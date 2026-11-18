@@ -116,6 +116,7 @@ import { CommandPalette } from './components/shell/CommandPalette';
 import { ContextMenu, PackContextMenuState } from './components/shell/ContextMenu';
 import { SkeletonLoader } from './components/shell/SkeletonLoader';
 import { DesktopHome } from './components/shell/DesktopHome';
+import { CreditFooter } from './components/shell/CreditFooter';
 import {
   LessonStudioApp,
   LessonStudioMode,
@@ -1656,12 +1657,7 @@ export default function App() {
         </div>
       </div>
 
-      <footer className="no-print border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-        <div className="mx-auto max-w-6xl px-4 py-3 sm:px-6 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <span>TeacherOS 4.1 — Simplified Productivity Workspace</span>
-          <span>Dữ liệu dùng chung trên IndexedDB (v5) · Hoạt động ngoại tuyến</span>
-        </div>
-      </footer>
+      <CreditFooter />
 
       <MobileBottomNav activeView={activeView} onSelectNav={handleSelectNav} />
 

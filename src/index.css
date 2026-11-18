@@ -99,6 +99,21 @@ html[data-density="compact"] .tos-card-pad {
   font-variant-numeric: tabular-nums;
 }
 
+@keyframes creditFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.credit-fade-in {
+  animation: creditFadeIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 /* A4 Screen Preview Sheet */
 .a4-sheet {
   width: 100%;
