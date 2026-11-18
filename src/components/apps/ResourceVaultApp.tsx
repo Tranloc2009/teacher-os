@@ -2,11 +2,14 @@ import { FormEvent, useMemo, useState } from 'react';
 import {
   Archive,
   ArrowUpRight,
+  Download,
+  GitBranch,
   HelpCircle,
   Plus,
   Search,
   Tag,
   Trash2,
+  UploadCloud,
 } from 'lucide-react';
 import { ContextualAcademyBar } from '../tutorial/ContextualAcademyBar';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
@@ -15,20 +18,34 @@ import {
   GRADE_OPTIONS,
   LessonPack,
   QuestionTier,
+  ResourceDocumentCategory,
   ResourceItem,
   ResourceType,
   SUBJECT_OPTIONS,
   TIER_LABELS,
 } from '../../types/lesson';
-import { createId } from '../../db/database';
+import {
+  DOCUMENT_CATEGORY_LABELS,
+  StoredResourceFileRecord,
+} from '../../types/resourceBulk';
+import { formatBytes } from '../../core/resourceStorage';
+import { createId, readResourceAttachmentBlob } from '../../db/database';
+import { ResourceBulkImportPanel } from './ResourceBulkImportPanel';
 
 interface ResourceVaultAppProps {
   resources: ResourceItem[];
   activePack: LessonPack;
+  temporaryMode?: boolean;
   onSaveResource: (item: ResourceItem) => Promise<void>;
+  onBulkSaveResources?: (
+    items: ResourceItem[],
+    fileRecords: StoredResourceFileRecord[]
+  ) => Promise<void>;
   onDeleteResource: (id: string) => Promise<void>;
   onInsertIntoActivePack: (resource: ResourceItem) => Promise<void>;
   onOpenActivePackInStudio: () => void;
+  onOpenWorkflowCenter?: () => void;
+  onShowToast?: (tone: 'success' | 'info' | 'error', text: string) => void;
 }
 
 const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
@@ -38,17 +55,28 @@ const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
   'formula-sheet': 'Bảng công thức / Sơ đồ',
 };
 
+const VAULT_PAGE_SIZE = 40;
+
 export function ResourceVaultApp({
   resources,
   activePack,
+  temporaryMode = false,
   onSaveResource,
+  onBulkSaveResources,
   onDeleteResource,
   onInsertIntoActivePack,
   onOpenActivePackInStudio,
+  onOpenWorkflowCenter,
+  onShowToast,
 }: ResourceVaultAppProps) {
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<ResourceType | 'ALL'>('ALL');
+  const [subjectFilter, setSubjectFilter] = useState<string>('ALL');
+  const [docCategoryFilter, setDocCategoryFilter] = useState<ResourceDocumentCategory | 'ALL'>('ALL');
+  const [tagFilter, setTagFilter] = useState<string>('');
+  const [vaultPage, setVaultPage] = useState(0);
   const [showForm, setShowForm] = useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
   const tutorial = useOptionalTutorial();
 
   // New resource form state
@@ -64,15 +92,77 @@ export function ResourceVaultApp({
   const [suggestedMinutes, setSuggestedMinutes] = useState<number>(10);
   const [formError, setFormError] = useState('');
 
+  const availableSubjects = useMemo(() => {
+    const set = new Set<string>(resources.map((r) => r.subject).filter(Boolean));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'vi'));
+  }, [resources]);
+
   const filteredResources = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const activeTag = tagFilter.trim().toLowerCase();
     return resources.filter((item) => {
       if (typeFilter !== 'ALL' && item.type !== typeFilter) return false;
+      if (subjectFilter !== 'ALL' && item.subject !== subjectFilter) return false;
+      if (docCategoryFilter !== 'ALL' && item.documentCategory !== docCategoryFilter) {
+        return false;
+      }
+      if (activeTag && !item.tags.some((t) => t.toLowerCase() === activeTag)) {
+        return false;
+      }
       if (!q) return true;
-      const hay = `${item.title} ${item.subject} ${item.grade} ${item.tags.join(' ')} ${item.content}`.toLowerCase();
+      const hay = `${item.title} ${item.subject} ${item.grade} ${item.chapterTopic ?? ''} ${item.sourceFile?.fileName ?? ''} ${item.tags.join(' ')} ${item.content}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [resources, query, typeFilter]);
+  }, [resources, query, typeFilter, subjectFilter, docCategoryFilter, tagFilter]);
+
+  const vaultPageCount = Math.max(1, Math.ceil(filteredResources.length / VAULT_PAGE_SIZE));
+  const safeVaultPage = Math.min(vaultPage, vaultPageCount - 1);
+  const pagedResources = useMemo(
+    () =>
+      filteredResources.slice(
+        safeVaultPage * VAULT_PAGE_SIZE,
+        (safeVaultPage + 1) * VAULT_PAGE_SIZE
+      ),
+    [filteredResources, safeVaultPage]
+  );
+
+  const handleBulkCommit = async (
+    items: ResourceItem[],
+    fileRecords: StoredResourceFileRecord[]
+  ) => {
+    if (onBulkSaveResources) {
+      await onBulkSaveResources(items, fileRecords);
+    } else {
+      for (const item of items) {
+        await onSaveResource(item);
+      }
+    }
+    setVaultPage(0);
+  };
+
+  const handleDownloadOriginalFile = async (item: ResourceItem) => {
+    if (!item.sourceFile) return;
+    try {
+      const blob = await readResourceAttachmentBlob(item);
+      if (!blob) {
+        onShowToast?.(
+          'info',
+          `Tệp "${item.sourceFile.fileName}" hiện chỉ có metadata trên trình duyệt này (ví dụ sau khi khôi phục JSON từ máy khác).`
+        );
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = item.sourceFile.fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      onShowToast?.('error', `Không thể đọc tệp đính kèm "${item.sourceFile.fileName}".`);
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -114,13 +204,13 @@ export function ResourceVaultApp({
       <ContextualAcademyBar
         tutorialId="tutorial.resource-vault"
         label="Resource Vault"
-        description="Lưu trữ câu hỏi mẫu, hoạt động 5–15p và chèn trực tiếp vào bộ tiết dạy đang mở."
+        description="Lưu trữ câu hỏi mẫu, hoạt động 5–15p, nhập hàng loạt tài liệu giảng dạy và chèn trực tiếp vào bộ tiết dạy."
       />
 
       <PageBanner
         tourId="rv-header"
         title="Kho học liệu & Mẫu câu hỏi"
-        subtitle="Lưu trữ các câu hỏi phân hóa, tình huống thực tế và hoạt động lớp học để chèn 1 chạm vào bộ tiết dạy."
+        subtitle="Lưu trữ câu hỏi phân hóa, giáo án, đề thi, slide và tài liệu giảng dạy để tìm nhanh hoặc chèn vào bộ tiết dạy."
         icon={<Archive className="h-5 w-5" aria-hidden="true" />}
         actions={
           <>
@@ -139,9 +229,24 @@ export function ResourceVaultApp({
               </Button>
             )}
             <Button
+              variant={showBulkImport ? 'primary' : 'secondary'}
+              size="sm"
+              data-testid="rv-bulk-import-toggle-btn"
+              onClick={() => {
+                setShowBulkImport((prev) => !prev);
+                setShowForm(false);
+              }}
+            >
+              <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{showBulkImport ? 'Đóng nhập hàng loạt' : 'Nhập hàng loạt thông minh'}</span>
+            </Button>
+            <Button
               variant="primary"
               data-tour-id="rv-add-btn"
-              onClick={() => setShowForm((prev) => !prev)}
+              onClick={() => {
+                setShowForm((prev) => !prev);
+                setShowBulkImport(false);
+              }}
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
               <span>{showForm ? 'Đóng biểu mẫu' : 'Thêm học liệu mới'}</span>
@@ -149,17 +254,40 @@ export function ResourceVaultApp({
           </>
         }
       >
-        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
-          <span>Đang liên kết bài dạy:</span>
-          <button
-            type="button"
-            onClick={onOpenActivePackInStudio}
-            className="font-semibold text-blue-600 dark:text-blue-400 hover:underline underline-offset-2"
-          >
-            {activePack.title || 'Bộ tiết dạy đang soạn'}
-          </button>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+          <div className="flex items-center gap-1.5">
+            <span>Đang liên kết bài dạy:</span>
+            <button
+              type="button"
+              onClick={onOpenActivePackInStudio}
+              className="font-semibold text-blue-600 dark:text-blue-400 hover:underline underline-offset-2"
+            >
+              {activePack.title || 'Bộ tiết dạy đang soạn'}
+            </button>
+          </div>
+          {onOpenWorkflowCenter && (
+            <button
+              type="button"
+              onClick={onOpenWorkflowCenter}
+              className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400"
+            >
+              <GitBranch className="h-3 w-3" aria-hidden="true" />
+              <span>Mở Workflow Center</span>
+            </button>
+          )}
         </div>
       </PageBanner>
+
+      {/* Smart Bulk Import 1.0 Panel */}
+      {showBulkImport && (
+        <ResourceBulkImportPanel
+          existingResources={resources}
+          temporaryMode={temporaryMode}
+          onCommitResources={handleBulkCommit}
+          onClose={() => setShowBulkImport(false)}
+          onCompletedSummary={(summary) => onShowToast?.('success', summary)}
+        />
+      )}
 
       {/* Add Resource Form */}
       {showForm && (
@@ -357,17 +485,71 @@ export function ResourceVaultApp({
       )}
 
       {/* Search & Filter Bar */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative flex-1 max-w-md">
-          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" aria-hidden="true" />
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Tìm theo tiêu đề, nội dung hoặc thẻ (tag)..."
-            aria-label="Tìm học liệu trong Resource Vault"
-            className="w-full rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-blue-600 focus:outline-none"
-          />
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative flex-1 max-w-md">
+            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setVaultPage(0);
+              }}
+              placeholder="Tìm theo tiêu đề, tên tệp, chương/chủ đề hoặc #tag..."
+              aria-label="Tìm học liệu trong Resource Vault"
+              className="w-full rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:border-blue-600 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Lọc theo môn học"
+              value={subjectFilter}
+              onChange={(e) => {
+                setSubjectFilter(e.target.value);
+                setVaultPage(0);
+              }}
+              className="rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200"
+            >
+              <option value="ALL">Tất cả môn học</option>
+              {availableSubjects.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Lọc theo phân loại tài liệu"
+              value={docCategoryFilter}
+              onChange={(e) => {
+                setDocCategoryFilter(e.target.value as ResourceDocumentCategory | 'ALL');
+                setVaultPage(0);
+              }}
+              className="rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200"
+            >
+              <option value="ALL">Tất cả phân loại tệp</option>
+              {(Object.keys(DOCUMENT_CATEGORY_LABELS) as ResourceDocumentCategory[]).map((cat) => (
+                <option key={cat} value={cat}>
+                  {DOCUMENT_CATEGORY_LABELS[cat]}
+                </option>
+              ))}
+            </select>
+
+            {tagFilter && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTagFilter('');
+                  setVaultPage(0);
+                }}
+                className="rounded-[10px] border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2.5 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-300 hover:bg-blue-100"
+              >
+                #{tagFilter} ×
+              </button>
+            )}
+          </div>
         </div>
 
         <div
@@ -390,6 +572,7 @@ export function ResourceVaultApp({
                 type="button"
                 onClick={() => {
                   setTypeFilter(tab.id);
+                  setVaultPage(0);
                   tutorial?.emitTutorialEvent('rv-filter-changed');
                 }}
                 className={`rounded-[10px] border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
@@ -417,92 +600,185 @@ export function ResourceVaultApp({
           </p>
         </div>
       ) : (
-        <div data-tour-id="rv-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {filteredResources.map((item, idx) => (
-            <article
-              key={item.id}
-              className="tos-card-pad flex flex-col justify-between rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5"
-            >
-              <div>
-                <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <div>
-                    <span className="font-semibold text-blue-600 dark:text-blue-400">
-                      {RESOURCE_TYPE_LABELS[item.type]}
-                    </span>
-                    <span className="mx-1.5" aria-hidden="true">·</span>
-                    <span>{item.subject}</span>
-                    <span className="mx-1.5" aria-hidden="true">·</span>
-                    <span>{item.grade}</span>
+        <div className="space-y-4">
+          <div data-tour-id="rv-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {pagedResources.map((item, idx) => (
+              <article
+                key={item.id}
+                className="tos-card-pad flex flex-col justify-between rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5"
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+                    <div className="min-w-0 truncate">
+                      <span className="font-semibold text-blue-600 dark:text-blue-400">
+                        {item.documentCategory
+                          ? DOCUMENT_CATEGORY_LABELS[item.documentCategory]
+                          : RESOURCE_TYPE_LABELS[item.type]}
+                      </span>
+                      <span className="mx-1.5" aria-hidden="true">·</span>
+                      <span>{item.subject}</span>
+                      <span className="mx-1.5" aria-hidden="true">·</span>
+                      <span>{item.grade}</span>
+                      {item.chapterTopic && (
+                        <>
+                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span>{item.chapterTopic}</span>
+                        </>
+                      )}
+                    </div>
+                    {item.tier && !item.sourceFile && (
+                      <span className="font-mono-num text-[11px] font-semibold text-slate-700 dark:text-slate-300 shrink-0">
+                        Mức {TIER_LABELS[item.tier]} ({item.points ?? 2}đ)
+                      </span>
+                    )}
+                    {!item.tier && item.suggestedMinutes && !item.sourceFile && (
+                      <span className="font-mono-num text-[11px] text-slate-600 dark:text-slate-400 shrink-0">
+                        {item.suggestedMinutes} phút
+                      </span>
+                    )}
+                    {item.sourceFile && (
+                      <span className="font-mono-num text-[11px] text-slate-600 dark:text-slate-400 shrink-0">
+                        {item.sourceFile.extension.toUpperCase()} · {formatBytes(item.sourceFile.sizeBytes)}
+                      </span>
+                    )}
                   </div>
-                  {item.tier && (
-                    <span className="font-mono-num text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                      Mức {TIER_LABELS[item.tier]} ({item.points ?? 2}đ)
-                    </span>
+
+                  <h2 className="mt-2 text-base font-semibold text-slate-950 dark:text-slate-50">
+                    {item.title}
+                  </h2>
+
+                  <p className="mt-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed line-clamp-3">
+                    {item.content}
+                  </p>
+
+                  {item.sourceFile && (
+                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 font-mono-num truncate">
+                      <span>Tệp gốc: {item.sourceFile.fileName}</span>
+                      {item.sourceFile.hasOmml && (
+                        <>
+                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                            {item.sourceFile.formulaCount} công thức OMML
+                          </span>
+                        </>
+                      )}
+                      {typeof item.classificationConfidence === 'number' && (
+                        <>
+                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span>Độ tin cậy {Math.round(item.classificationConfidence * 100)}%</span>
+                        </>
+                      )}
+                    </div>
                   )}
-                  {!item.tier && item.suggestedMinutes && (
-                    <span className="font-mono-num text-[11px] text-slate-600 dark:text-slate-400">
-                      {item.suggestedMinutes} phút
-                    </span>
+
+                  {item.answerOrNote && (
+                    <p className="mt-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 p-3 text-xs text-slate-600 dark:text-slate-300 line-clamp-2">
+                      <strong className="font-semibold text-slate-800 dark:text-slate-200">
+                        Gợi ý / Lưu ý:{' '}
+                      </strong>
+                      {item.answerOrNote}
+                    </p>
+                  )}
+
+                  {item.tags.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      <Tag className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      {item.tags.map((tag, tagIdx) => (
+                        <span key={tag} className="inline-flex items-center gap-2">
+                          {tagIdx > 0 && <span aria-hidden="true">·</span>}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTagFilter((prev) => (prev === tag ? '' : tag));
+                              setVaultPage(0);
+                            }}
+                            className={`hover:text-blue-600 dark:hover:text-blue-400 ${
+                              tagFilter === tag ? 'font-semibold text-blue-600 dark:text-blue-400' : ''
+                            }`}
+                          >
+                            #{tag}
+                          </button>
+                        </span>
+                      ))}
+                    </div>
                   )}
                 </div>
 
-                <h2 className="mt-2 text-base font-semibold text-slate-950 dark:text-slate-50">
-                  {item.title}
-                </h2>
-
-                <p className="mt-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
-                  {item.content}
-                </p>
-
-                {item.answerOrNote && (
-                  <p className="mt-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 p-3 text-xs text-slate-600 dark:text-slate-300">
-                    <strong className="font-semibold text-slate-800 dark:text-slate-200">
-                      Gợi ý / Lưu ý:{' '}
-                    </strong>
-                    {item.answerOrNote}
-                  </p>
-                )}
-
-                {item.tags.length > 0 && (
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                    <Tag className="h-3 w-3 shrink-0" aria-hidden="true" />
-                    {item.tags.map((tag, tagIdx) => (
-                      <span key={tag} className="inline-flex items-center gap-2">
-                        {tagIdx > 0 && <span aria-hidden="true">·</span>}
-                        <span>#{tag}</span>
+                <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      data-tour-id={idx === 0 ? 'rv-insert-btn' : undefined}
+                      onClick={() => void onInsertIntoActivePack(item)}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 dark:hover:bg-blue-500 whitespace-nowrap"
+                    >
+                      <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {item.type === 'question-template'
+                          ? 'Chèn vào Ngân hàng câu hỏi'
+                          : 'Chèn thành Hoạt động bài dạy'}
                       </span>
-                    ))}
+                    </button>
+
+                    {item.sourceFile && (
+                      <button
+                        type="button"
+                        onClick={() => void handleDownloadOriginalFile(item)}
+                        aria-label={`Tải tệp gốc ${item.sourceFile.fileName}`}
+                        className="inline-flex items-center gap-1 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap"
+                      >
+                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Tải tệp gốc</span>
+                      </button>
+                    )}
                   </div>
-                )}
-              </div>
 
-              <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  data-tour-id={idx === 0 ? 'rv-insert-btn' : undefined}
-                  onClick={() => void onInsertIntoActivePack(item)}
-                  className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 dark:hover:bg-blue-500 whitespace-nowrap"
-                >
-                  <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>
-                    {item.type === 'question-template'
-                      ? 'Chèn vào Ngân hàng câu hỏi'
-                      : 'Chèn thành Hoạt động bài dạy'}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => void onDeleteResource(item.id)}
+                    aria-label={`Xóa học liệu ${item.title}`}
+                    className="inline-flex items-center gap-1 rounded-[10px] px-2.5 py-1.5 text-xs font-medium text-slate-500 hover:bg-red-50 dark:hover:bg-red-950/50 hover:text-red-700 dark:hover:text-red-400"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Xóa</span>
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
 
-                <button
+          {vaultPageCount > 1 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 text-xs text-slate-600 dark:text-slate-400">
+              <span className="font-mono-num">
+                Hiển thị {safeVaultPage * VAULT_PAGE_SIZE + 1}–
+                {Math.min((safeVaultPage + 1) * VAULT_PAGE_SIZE, filteredResources.length)} /{' '}
+                {filteredResources.length} học liệu
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
                   type="button"
-                  onClick={() => void onDeleteResource(item.id)}
-                  aria-label={`Xóa học liệu ${item.title}`}
-                  className="inline-flex items-center gap-1 rounded-[10px] px-2.5 py-1.5 text-xs font-medium text-slate-500 hover:bg-red-50 dark:hover:bg-red-950/50 hover:text-red-700 dark:hover:text-red-400"
+                  size="sm"
+                  variant="secondary"
+                  disabled={safeVaultPage === 0}
+                  onClick={() => setVaultPage((p) => Math.max(0, p - 1))}
                 >
-                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Xóa</span>
-                </button>
+                  Trang trước
+                </Button>
+                <span className="font-mono-num">
+                  Trang {safeVaultPage + 1}/{vaultPageCount}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={safeVaultPage >= vaultPageCount - 1}
+                  onClick={() => setVaultPage((p) => Math.min(vaultPageCount - 1, p + 1))}
+                >
+                  Trang sau
+                </Button>
               </div>
-            </article>
-          ))}
+            </div>
+          )}
         </div>
       )}
     </main>

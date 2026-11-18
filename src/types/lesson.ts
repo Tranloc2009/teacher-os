@@ -108,6 +108,31 @@ export type ResourceType =
   | 'reading-passage'
   | 'formula-sheet';
 
+export type ResourceDocumentCategory =
+  | 'giao-an'
+  | 'de-thi'
+  | 'bai-tap'
+  | 'dap-an'
+  | 'bai-giang'
+  | 'slide'
+  | 'tham-khao'
+  | 'khac';
+
+export interface ResourceSourceFileMeta {
+  fileName: string;
+  relativePath: string;
+  extension: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  storageKind: 'opfs' | 'indexeddb' | 'metadata-only';
+  fileRecordId: string;
+  opfsKey?: string;
+  hasOmml?: boolean;
+  formulaCount?: number;
+  slideCount?: number;
+}
+
 export interface ResourceItem {
   id: string;
   title: string;
@@ -121,6 +146,11 @@ export interface ResourceItem {
   points?: number;
   suggestedMinutes?: number;
   updatedAt: string;
+  documentCategory?: ResourceDocumentCategory;
+  chapterTopic?: string;
+  classificationConfidence?: number;
+  classificationReason?: string;
+  sourceFile?: ResourceSourceFileMeta;
 }
 
 export type WorkflowPhase = 'pre-class' | 'in-class' | 'post-class';

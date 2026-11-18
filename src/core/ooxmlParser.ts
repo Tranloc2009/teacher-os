@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { MathVisualAsset } from '../types/mathExam';
-import { computeContentHash } from './mathIntegrity';
+import { createMathVisualAsset } from './mathIntegrity';
 
 export interface XmlNode {
   type: 'element' | 'text';
@@ -35,6 +35,11 @@ export interface DocxExtractionResult {
   warnings: string[];
   hasLegacyOleEquation: boolean;
   hasVbaMacro?: boolean;
+  legacyOleCount?: number;
+  legacyOleProgIds?: string[];
+  unsupportedMediaCount?: number;
+  tableCount?: number;
+  supportedImageCount?: number;
 }
 
 export const DOCX_MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -529,21 +534,139 @@ function getMimeFromExt(ext: string): { mime: string; supported: boolean } {
   }
 }
 
+interface MediaDescriptor {
+  normalizedTarget: string;
+  fileName: string;
+  ext: string;
+  supported: boolean;
+  dataUrl?: string;
+}
+
+interface DocxExtractionContext {
+  relsById: Map<string, string>;
+  mediaByTarget: Map<string, MediaDescriptor>;
+  resolvedAssetByTarget: Map<string, MathVisualAsset>;
+  assets: MathVisualAsset[];
+  imageCounter: { count: number };
+  ommlCounter: { count: number };
+  oleCounter: {
+    count: number;
+    progIds: Set<string>;
+    wmfPreviewRefs: Set<string>;
+  };
+  unsupportedMediaRefs: Set<string>;
+  warnings: string[];
+}
+
+function resolveImageAssetByRelId(
+  rId: string,
+  ctx: DocxExtractionContext,
+  locationHint: string
+): { kind: 'asset'; asset: MathVisualAsset } | { kind: 'unsupported'; target: string } | null {
+  const target = ctx.relsById.get(rId);
+  if (!target) return null;
+  const media = ctx.mediaByTarget.get(target);
+  if (!media) return null;
+
+  if (!media.supported || !media.dataUrl) {
+    return { kind: 'unsupported', target };
+  }
+
+  let existing = ctx.resolvedAssetByTarget.get(target);
+  if (!existing) {
+    ctx.imageCounter.count += 1;
+    const ord = ctx.imageCounter.count;
+    existing = createMathVisualAsset({
+      id: `docx-img-${ord}`,
+      kind: 'image',
+      label: media.fileName,
+      sourceData: media.dataUrl,
+      altText: `Hình trích xuất từ DOCX (${media.fileName})`,
+      required: true,
+      sourcePartPath: media.normalizedTarget,
+      sourceRelationshipId: rId,
+      sourceOrdinal: ord,
+      sourceLocation: locationHint,
+    });
+    ctx.resolvedAssetByTarget.set(target, existing);
+    ctx.assets.push(existing);
+  }
+
+  return { kind: 'asset', asset: existing };
+}
+
+function collectBodyBlockElements(container: XmlNode): XmlNode[] {
+  const blocks: XmlNode[] = [];
+  for (const child of container.children ?? []) {
+    if (child.type !== 'element') continue;
+    if (child.tag === 'w:p' || child.tag === 'w:tbl') {
+      blocks.push(child);
+    } else if (child.tag === 'w:sdt') {
+      const sdtContent = findChildren(child, 'w:sdtContent')[0];
+      if (sdtContent) {
+        blocks.push(...collectBodyBlockElements(sdtContent));
+      }
+    }
+  }
+  return blocks;
+}
+
+function recordOleElement(
+  oleContainerNode: XmlNode,
+  ctx: DocxExtractionContext
+): void {
+  ctx.oleCounter.count += 1;
+  const oleObjNodes =
+    oleContainerNode.tag === 'o:OLEObject'
+      ? [oleContainerNode]
+      : findAllDescendants(oleContainerNode, 'o:OLEObject');
+  for (const ole of oleObjNodes) {
+    const progId = ole.attrs?.ProgID || ole.attrs?.['o:ProgID'] || ole.attrs?.progId;
+    if (progId) {
+      ctx.oleCounter.progIds.add(progId);
+    }
+  }
+  const vmlPreviews = findAllDescendants(oleContainerNode, 'v:imagedata');
+  for (const preview of vmlPreviews) {
+    const rId =
+      preview.attrs?.['r:id'] ||
+      preview.attrs?.['r:embed'] ||
+      preview.attrs?.['o:relid'];
+    if (!rId) continue;
+    const target = ctx.relsById.get(rId);
+    if (target) {
+      const media = ctx.mediaByTarget.get(target);
+      if (media && !media.supported) {
+        ctx.oleCounter.wmfPreviewRefs.add(target);
+        ctx.unsupportedMediaRefs.add(target);
+      }
+    }
+  }
+}
+
 function extractParagraphContent(
   pNode: XmlNode,
-  ctx: {
-    relsById: Map<string, string>;
-    assetsByRelTarget: Map<string, MathVisualAsset>;
-    unsupportedRelIds: Set<string>;
-    ommlCounter: { count: number };
-    warnings: string[];
-  }
+  ctx: DocxExtractionContext,
+  paragraphLocation: string
 ): DocxParagraphSegment {
   let text = '';
   const ommlFragments: ExtractedOmmlFragment[] = [];
   const assetIds: string[] = [];
   let hasBoldCorrectCue = false;
   let hasLegacyOleEquation = false;
+
+  const attachRelId = (rId: string) => {
+    const resolved = resolveImageAssetByRelId(rId, ctx, paragraphLocation);
+    if (!resolved) return;
+    if (resolved.kind === 'asset') {
+      if (!assetIds.includes(resolved.asset.id)) {
+        assetIds.push(resolved.asset.id);
+      }
+      text += ` [[ASSET:${resolved.asset.id}]] `;
+    } else {
+      ctx.unsupportedMediaRefs.add(resolved.target);
+    }
+  };
 
   const walkParagraphNode = (node: XmlNode) => {
     if (node.type === 'text') return;
@@ -564,6 +687,7 @@ function extractParagraphContent(
 
     if (tag === 'w:object' || tag === 'o:OLEObject') {
       hasLegacyOleEquation = true;
+      recordOleElement(node, ctx);
       text += ' [CÔNG_THỨC_OLE_LEGACY] ';
       return;
     }
@@ -579,28 +703,44 @@ function extractParagraphContent(
 
       const vertAlign = findFirstDescendant(rPr, 'w:vertAlign')?.attrs?.['w:val'];
 
-      // Check embedded drawings inside run
-      const blips = findAllDescendants(node, 'a:blip');
-      for (const blip of blips) {
-        const rId = blip.attrs?.['r:embed'] || blip.attrs?.['r:link'];
-        if (!rId) continue;
-        const target = ctx.relsById.get(rId);
-        if (target && ctx.assetsByRelTarget.has(target)) {
-          const asset = ctx.assetsByRelTarget.get(target)!;
-          if (!assetIds.includes(asset.id)) {
-            assetIds.push(asset.id);
+      // 1. Check OLE objects inside run (<w:object> / <o:OLEObject>)
+      const oleObjectsInRun = findAllDescendants(node, 'w:object');
+      if (oleObjectsInRun.length > 0) {
+        hasLegacyOleEquation = true;
+        for (const oleNode of oleObjectsInRun) {
+          recordOleElement(oleNode, ctx);
+          text += ' [CÔNG_THỨC_OLE_LEGACY] ';
+        }
+      } else {
+        const bareOleNodes = findAllDescendants(node, 'o:OLEObject');
+        if (bareOleNodes.length > 0) {
+          hasLegacyOleEquation = true;
+          for (const oleNode of bareOleNodes) {
+            recordOleElement(oleNode, ctx);
+            text += ' [CÔNG_THỨC_OLE_LEGACY] ';
           }
-          text += ` [[ASSET:${asset.id}]] `;
-        } else if (ctx.unsupportedRelIds.has(rId)) {
-          ctx.warnings.push(
-            `Hình ảnh/Công thức định dạng WMF/EMF (${target ?? rId}) trong .docx không thể xem trước trực tiếp trên trình duyệt — hãy chuyển sang PNG/SVG hoặc LaTeX.`
-          );
         }
       }
 
-      // Check OLE objects inside run
-      if (findFirstDescendant(node, 'w:object') || findFirstDescendant(node, 'o:OLEObject')) {
-        hasLegacyOleEquation = true;
+      // 2. Check DrawingML embedded images (<a:blip>)
+      const blips = findAllDescendants(node, 'a:blip');
+      for (const blip of blips) {
+        const rId = blip.attrs?.['r:embed'] || blip.attrs?.['r:link'];
+        if (rId) attachRelId(rId);
+      }
+
+      // 3. Check standalone VML pictures (<w:pict><v:shape><v:imagedata r:id="..."/></v:shape></w:pict>)
+      const picts = findAllDescendants(node, 'w:pict');
+      for (const pict of picts) {
+        const vmlImages = findAllDescendants(pict, 'v:imagedata');
+        for (const vImg of vmlImages) {
+          const rId =
+            vImg.attrs?.['r:id'] ||
+            vImg.attrs?.['r:embed'] ||
+            vImg.attrs?.['r:pict'] ||
+            vImg.attrs?.['o:relid'];
+          if (rId) attachRelId(rId);
+        }
       }
 
       let runText = '';
@@ -687,9 +827,7 @@ export async function extractDocxDocument(
     );
   }
   const relsById = new Map<string, string>();
-  const assets: MathVisualAsset[] = [];
-  const assetsByRelTarget = new Map<string, MathVisualAsset>();
-  const unsupportedRelIds = new Set<string>();
+  const mediaByTarget = new Map<string, MediaDescriptor>();
 
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {
@@ -708,10 +846,11 @@ export async function extractDocxDocument(
         : `word/${target.replace(/^\.\//, '')}`;
       relsById.set(id, normalizedTarget);
 
-      if (/\/media\//i.test(normalizedTarget)) {
+      if (/\/media\//i.test(normalizedTarget) && !mediaByTarget.has(normalizedTarget)) {
         const mediaEntry = zip.file(normalizedTarget);
         const ext = normalizedTarget.split('.').pop() ?? '';
         const mimeInfo = getMimeFromExt(ext);
+        const fileName = normalizedTarget.split('/').pop() ?? `image.${ext}`;
         if (mediaEntry && mimeInfo.supported) {
           let base64 = await mediaEntry.async('base64');
           if (ext.toLowerCase() === 'svg') {
@@ -726,21 +865,20 @@ export async function extractDocxDocument(
             base64 = typeof btoa === 'function' ? btoa(bin) : Buffer.from(bytes).toString('base64');
           }
           const dataUrl = `data:${mimeInfo.mime};base64,${base64}`;
-          const fileName = normalizedTarget.split('/').pop() ?? `image.${ext}`;
-          const assetId = `docx-img-${assets.length + 1}`;
-          const asset: MathVisualAsset = {
-            id: assetId,
-            kind: 'image',
-            label: fileName,
-            sourceData: dataUrl,
-            altText: `Hình trích xuất từ DOCX (${fileName})`,
-            required: true,
-            checksum: computeContentHash(`image::${fileName}::${dataUrl}`),
-          };
-          assets.push(asset);
-          assetsByRelTarget.set(normalizedTarget, asset);
+          mediaByTarget.set(normalizedTarget, {
+            normalizedTarget,
+            fileName,
+            ext,
+            supported: true,
+            dataUrl,
+          });
         } else if (mediaEntry && !mimeInfo.supported) {
-          unsupportedRelIds.add(id);
+          mediaByTarget.set(normalizedTarget, {
+            normalizedTarget,
+            fileName,
+            ext,
+            supported: false,
+          });
         }
       }
     }
@@ -754,27 +892,45 @@ export async function extractDocxDocument(
     throw new Error('File .docx không có phần thân nội dung (w:body).');
   }
 
+  const ctx: DocxExtractionContext = {
+    relsById,
+    mediaByTarget,
+    resolvedAssetByTarget: new Map(),
+    assets: [],
+    imageCounter: { count: 0 },
+    ommlCounter: { count: 0 },
+    oleCounter: {
+      count: 0,
+      progIds: new Set<string>(),
+      wmfPreviewRefs: new Set<string>(),
+    },
+    unsupportedMediaRefs: new Set<string>(),
+    warnings,
+  };
+
   const paragraphs: DocxParagraphSegment[] = [];
   const allOmml: ExtractedOmmlFragment[] = [];
-  const ommlCounter = { count: 0 };
   let hasLegacyOleEquation = false;
+  let tableOrdinal = 0;
+  let paragraphOrdinal = 0;
 
-  for (const child of body.children ?? []) {
-    if (child.type !== 'element') continue;
+  const bodyBlocks = collectBodyBlockElements(body);
+
+  for (const child of bodyBlocks) {
     if (child.tag === 'w:p') {
-      const seg = extractParagraphContent(child, {
-        relsById,
-        assetsByRelTarget,
-        unsupportedRelIds,
-        ommlCounter,
-        warnings,
-      });
+      paragraphOrdinal += 1;
+      const seg = extractParagraphContent(
+        child,
+        ctx,
+        `word/document.xml#w:p[${paragraphOrdinal}]`
+      );
       if (seg.hasLegacyOleEquation) hasLegacyOleEquation = true;
       allOmml.push(...seg.ommlFragments);
       if (seg.text.trim() || seg.assetIds.length > 0) {
         paragraphs.push(seg);
       }
     } else if (child.tag === 'w:tbl') {
+      const nextTableOrdinal = tableOrdinal + 1;
       const rows = findChildren(child, 'w:tr');
       const rowTexts: string[] = [];
       const rowAssetIds: string[] = [];
@@ -783,14 +939,12 @@ export async function extractDocxDocument(
         const cellTexts: string[] = [];
         for (const tc of cells) {
           const cellPs = findChildren(tc, 'w:p');
-          const cellSegs = cellPs.map((cp) =>
-            extractParagraphContent(cp, {
-              relsById,
-              assetsByRelTarget,
-              unsupportedRelIds,
-              ommlCounter,
-              warnings,
-            })
+          const cellSegs = cellPs.map((cp, cpIdx) =>
+            extractParagraphContent(
+              cp,
+              ctx,
+              `word/document.xml#w:tbl[${nextTableOrdinal}]/w:p[${cpIdx + 1}]`
+            )
           );
           for (const cs of cellSegs) {
             if (cs.hasLegacyOleEquation) hasLegacyOleEquation = true;
@@ -808,16 +962,20 @@ export async function extractDocxDocument(
       }
       const tableBody = rowTexts.filter(Boolean).join('\n');
       if (tableBody) {
-        const tblAssetId = `docx-tbl-${assets.length + 1}`;
-        assets.push({
+        tableOrdinal = nextTableOrdinal;
+        const tblAssetId = `docx-tbl-${tableOrdinal}`;
+        const tableAsset = createMathVisualAsset({
           id: tblAssetId,
           kind: 'data-table',
-          label: `Bảng dữ liệu DOCX #${assets.length + 1}`,
+          label: `Bảng dữ liệu DOCX #${tableOrdinal}`,
           sourceData: tableBody,
           altText: 'Bảng dữ liệu trích xuất từ file Word',
           required: true,
-          checksum: computeContentHash(`data-table::Bảng::${tableBody}`),
+          sourcePartPath: 'word/document.xml',
+          sourceOrdinal: tableOrdinal,
+          sourceLocation: `w:body/w:tbl[${tableOrdinal}]`,
         });
+        ctx.assets.push(tableAsset);
         paragraphs.push({
           text: `${tableBody}\n[[ASSET:${tblAssetId}]]`,
           ommlFragments: [],
@@ -828,9 +986,29 @@ export async function extractDocxDocument(
     }
   }
 
-  if (hasLegacyOleEquation) {
+  if (hasLegacyOleEquation || ctx.oleCounter.count > 0) {
+    const progIds = Array.from(ctx.oleCounter.progIds);
+    const progIdNote = progIds.length > 0 ? ` (${progIds.join(', ')})` : '';
+    const wmfPreviewNote =
+      ctx.oleCounter.wmfPreviewRefs.size > 0
+        ? ` kèm ${ctx.oleCounter.wmfPreviewRefs.size} ảnh xem trước WMF/EMF`
+        : '';
     warnings.push(
-      'Phát hiện đối tượng Equation 3.0 / MathType OLE cũ trong file .docx. Do định dạng nhị phân cũ không đọc trực tiếp được công thức, hãy chuyển sang Word Equation (OMML) hoặc LaTeX trước khi trộn.'
+      `Phát hiện ${ctx.oleCounter.count} đối tượng công thức Equation 3.0 / MathType OLE cũ${progIdNote}${wmfPreviewNote} trong file .docx. Do định dạng nhị phân cũ không đọc trực tiếp được biểu thức, hãy chuyển sang Word Equation (OMML) hoặc LaTeX ($...$) trước khi trộn.`
+    );
+  }
+
+  if (ctx.unsupportedMediaRefs.size > 0) {
+    const sampleTargets = Array.from(ctx.unsupportedMediaRefs)
+      .slice(0, 3)
+      .map((t) => t.split('/').pop() ?? t)
+      .join(', ');
+    const moreSuffix =
+      ctx.unsupportedMediaRefs.size > 3
+        ? `, +${ctx.unsupportedMediaRefs.size - 3} tệp khác`
+        : '';
+    warnings.push(
+      `Phát hiện ${ctx.unsupportedMediaRefs.size} tệp hình ảnh/vector định dạng WMF/EMF (${sampleTargets}${moreSuffix}) trong .docx không thể xem trước trực tiếp trên trình duyệt — hãy chuyển sang PNG/SVG hoặc LaTeX.`
     );
   }
 
@@ -838,9 +1016,14 @@ export async function extractDocxDocument(
     plainTextWithMarkers: paragraphs.map((p) => p.text).join('\n'),
     paragraphs,
     ommlFragments: allOmml,
-    assets,
+    assets: ctx.assets,
     warnings: Array.from(new Set(warnings)),
-    hasLegacyOleEquation,
+    hasLegacyOleEquation: hasLegacyOleEquation || ctx.oleCounter.count > 0,
     hasVbaMacro,
+    legacyOleCount: ctx.oleCounter.count,
+    legacyOleProgIds: Array.from(ctx.oleCounter.progIds),
+    unsupportedMediaCount: ctx.unsupportedMediaRefs.size,
+    tableCount: tableOrdinal,
+    supportedImageCount: ctx.imageCounter.count,
   };
 }

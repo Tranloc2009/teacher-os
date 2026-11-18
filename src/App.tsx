@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Download, RefreshCw } from 'lucide-react';
 import {
   LocalSnapshotSummary,
   bulkDeleteCanvasNodes,
   bulkSaveCanvasBundle,
   bulkSaveCanvasNodes,
+  bulkSaveResourcesWithFiles,
   clearDemoPacks,
   createEmptyLessonPack,
   createId,
@@ -77,6 +78,7 @@ import {
   ResourceItem,
   WorkflowRun,
 } from './types/lesson';
+import type { StoredResourceFileRecord } from './types/resourceBulk';
 import { DEFAULT_PRINT_SETTINGS } from './utils/backup';
 import {
   StorageFailureInfo,
@@ -569,6 +571,33 @@ export default function App() {
     }
   };
 
+  const handleBulkSaveResources = async (
+    items: ResourceItem[],
+    fileRecords: StoredResourceFileRecord[]
+  ) => {
+    if (items.length === 0) return;
+    if (temporaryMode) {
+      const idSet = new Set(items.map((i) => i.id));
+      setResources((prev) =>
+        [...items, ...prev.filter((r) => !idSet.has(r.id))].sort((a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt)
+        )
+      );
+      showToast('success', `Đã nhập ${items.length} tài liệu vào phiên tạm thời.`);
+      return;
+    }
+    try {
+      await bulkSaveResourcesWithFiles(items, fileRecords);
+      setResources(await listResources());
+      showToast('success', `Đã nhập ${items.length} tài liệu vào Resource Vault.`);
+    } catch (err) {
+      const info = classifyStorageError(err);
+      setStorageBannerError(info);
+      showToast('error', info.message);
+      throw err;
+    }
+  };
+
   const handleDeleteResource = async (id: string) => {
     if (temporaryMode) {
       setResources((prev) => prev.filter((r) => r.id !== id));
@@ -662,25 +691,36 @@ export default function App() {
     );
   };
 
+  const mathSaveSeqRef = useRef<Record<string, number>>({});
+
   const handleSaveMathExam = async (
     exam: MathExamProject,
     silent = false
   ): Promise<MathExamProject> => {
+    const optimisticExam: MathExamProject = {
+      ...exam,
+      updatedAt: new Date().toISOString(),
+    };
+    const nextSeq = (mathSaveSeqRef.current[exam.id] ?? 0) + 1;
+    mathSaveSeqRef.current[exam.id] = nextSeq;
+
+    setMathExams((prev) =>
+      [optimisticExam, ...prev.filter((m) => m.id !== optimisticExam.id)].sort((a, b) =>
+        b.updatedAt.localeCompare(a.updatedAt)
+      )
+    );
+
     if (temporaryMode) {
-      const localSaved: MathExamProject = {
-        ...exam,
-        updatedAt: new Date().toISOString(),
-      };
-      setMathExams((prev) =>
-        [localSaved, ...prev.filter((m) => m.id !== localSaved.id)].sort((a, b) =>
-          b.updatedAt.localeCompare(a.updatedAt)
-        )
-      );
-      return localSaved;
+      return optimisticExam;
     }
     try {
-      const saved = await saveMathExam(exam);
-      setMathExams(await listMathExams());
+      const saved = await saveMathExam(optimisticExam);
+      if (mathSaveSeqRef.current[exam.id] === nextSeq) {
+        const latestList = await listMathExams();
+        if (mathSaveSeqRef.current[exam.id] === nextSeq) {
+          setMathExams(latestList);
+        }
+      }
       setStorageBannerError(null);
       if (!silent) {
         showToast('success', `Đã lưu đề Toán "${saved.title}".`);
@@ -1494,10 +1534,14 @@ export default function App() {
                 <ResourceVaultApp
                   resources={resources}
                   activePack={activePack}
+                  temporaryMode={temporaryMode}
                   onSaveResource={handleSaveResource}
+                  onBulkSaveResources={handleBulkSaveResources}
                   onDeleteResource={handleDeleteResource}
                   onInsertIntoActivePack={handleInsertResourceIntoActivePack}
                   onOpenActivePackInStudio={() => openApp('lesson-studio')}
+                  onOpenWorkflowCenter={() => openApp('workflow-center')}
+                  onShowToast={showToast}
                 />
               </ErrorBoundary>
             </div>

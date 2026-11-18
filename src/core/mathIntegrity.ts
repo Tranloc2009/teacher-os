@@ -61,6 +61,21 @@ export function sanitizeSvgSource(svg: string): string {
     .replace(/(href|xlink:href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '$1="#"');
 }
 
+export function computeVisualAssetChecksum(
+  asset: Pick<MathVisualAsset, 'kind' | 'label' | 'sourceData'>
+): string {
+  return computeContentHash(`${asset.kind}::${asset.label}::${asset.sourceData}`);
+}
+
+export function verifyVisualAssetIntegrity(
+  asset: MathVisualAsset
+): { valid: boolean; expectedChecksum: string; hasSourceData: boolean } {
+  const hasSourceData = Boolean(asset.sourceData && asset.sourceData.trim());
+  const expectedChecksum = computeVisualAssetChecksum(asset);
+  const valid = hasSourceData && (!asset.checksum || asset.checksum === expectedChecksum);
+  return { valid, expectedChecksum, hasSourceData };
+}
+
 export function createMathVisualAsset(params: {
   id: string;
   kind: MathVisualAssetKind;
@@ -68,6 +83,10 @@ export function createMathVisualAsset(params: {
   sourceData: string;
   altText?: string;
   required?: boolean;
+  sourcePartPath?: string;
+  sourceRelationshipId?: string;
+  sourceOrdinal?: number;
+  sourceLocation?: string;
 }): MathVisualAsset {
   const safeData =
     params.sourceData.trim().startsWith('<svg') || params.sourceData.toLowerCase().includes('<svg')
@@ -80,7 +99,16 @@ export function createMathVisualAsset(params: {
     sourceData: safeData,
     altText: params.altText ?? params.label,
     required: params.required ?? true,
-    checksum: computeContentHash(`${params.kind}::${params.label}::${safeData}`),
+    checksum: computeVisualAssetChecksum({
+      kind: params.kind,
+      label: params.label,
+      sourceData: safeData,
+    }),
+    contentHash: computeContentHash(safeData),
+    ...(params.sourcePartPath ? { sourcePartPath: params.sourcePartPath } : {}),
+    ...(params.sourceRelationshipId ? { sourceRelationshipId: params.sourceRelationshipId } : {}),
+    ...(params.sourceOrdinal !== undefined ? { sourceOrdinal: params.sourceOrdinal } : {}),
+    ...(params.sourceLocation ? { sourceLocation: params.sourceLocation } : {}),
   };
 }
 
@@ -447,7 +475,7 @@ function hashQuestionContent(q: MathQuestion): OriginalQuestionFingerprint {
 
   const assetChecksums: Record<string, string> = {};
   (q.visualAssets ?? []).forEach((asset) => {
-    assetChecksums[asset.id] = computeContentHash(`${asset.kind}::${asset.label}::${asset.sourceData}`);
+    assetChecksums[asset.id] = computeVisualAssetChecksum(asset);
   });
 
   const derivedCorrectOptionIds =
@@ -511,7 +539,7 @@ export function createOriginalExamSnapshot(exam: MathExamProject): OriginalExamS
   (exam.questionGroups ?? []).forEach((grp) => {
     const assetChecksums: Record<string, string> = {};
     grp.sharedAssets.forEach((a) => {
-      assetChecksums[a.id] = computeContentHash(`${a.kind}::${a.label}::${a.sourceData}`);
+      assetChecksums[a.id] = computeVisualAssetChecksum(a);
     });
     const firstIdx = exam.questions.findIndex((q) => grp.questionIds.includes(q.id));
     groupFingerprints[grp.id] = {
@@ -878,10 +906,28 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       });
     }
 
-    if (
+    const hasLegacyEqMarker =
       q.stem.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
-      q.stem.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
-    ) {
+      q.stem.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]') ||
+      (q.options ?? []).some(
+        (o) =>
+          o.content.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+          o.content.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+      ) ||
+      (q.multiSelectOptions ?? []).some(
+        (o) =>
+          o.content.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+          o.content.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+      ) ||
+      (q.statements ?? []).some(
+        (s) =>
+          s.content.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+          s.content.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+      ) ||
+      q.solutionGuide.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+      q.solutionGuide.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]');
+
+    if (hasLegacyEqMarker) {
       issues.push({
         id: `q-legacy-eq-${q.id}`,
         severity: 'warning',
@@ -890,14 +936,50 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         questionId: q.id,
         questionNumber: qNum,
         code: q.code,
-        message: `Câu ${qNum} (${q.code}) chứa đối tượng công thức Word cũ/OLE hoặc OMML chưa nhận dạng đầy đủ.`,
-        recommendation: 'Chuyển đổi công thức sang LaTeX ($...$) hoặc Word Equation hiện đại để đảm bảo hiển thị.',
+        message: `Câu ${qNum} (${q.code}) chứa đối tượng công thức Word cũ/MathType OLE hoặc OMML chưa nhận dạng đầy đủ.`,
+        recommendation: 'Chuyển đổi công thức MathType OLE/Equation 3.0 sang Word Equation (OMML) hoặc LaTeX ($...$) để bảo toàn hiển thị.',
       });
+    }
+
+    // Cổng bảo vệ công thức & bố cục khi nhập từ PDF hoặc định dạng đa nguồn (Exam Mixer Pro 7.0)
+    if (q.sourceVerification) {
+      const sv = q.sourceVerification;
+      if (
+        (sv.verificationStatus === 'BLOCKED' || sv.verificationStatus === 'UNSUPPORTED') &&
+        !sv.verifiedByTeacher
+      ) {
+        const detail = sv.formulaRiskFlags[0] ?? sv.reasons[0] ?? 'Ký tự lỗi font/vùng ảnh scan từ PDF.';
+        issues.push({
+          id: `q-source-blocked-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'latex',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          message: `Câu ${qNum} (${q.code}) [${sv.sourceFormat.toUpperCase()}]: Bị chặn trộn do chưa thể xác minh an toàn công thức (${detail}).`,
+          recommendation: 'Đối chiếu lại với trang PDF gốc, chỉnh sửa công thức bằng LaTeX và đánh dấu xác nhận ở Bước 1/2.',
+        });
+      } else if (sv.verificationStatus === 'REVIEW_REQUIRED' && !sv.verifiedByTeacher) {
+        const detail = sv.formulaRiskFlags[0] ?? sv.reasons[0] ?? 'Công thức/chỉ số trích xuất từ PDF cần xác nhận.';
+        issues.push({
+          id: `q-source-review-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'latex',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          message: `Câu ${qNum} (${q.code}) [${sv.sourceFormat.toUpperCase()}]: Cần giáo viên đối chiếu xác nhận trước khi trộn (${detail}).`,
+          recommendation: 'Kiểm tra lại biểu thức toán học với trang PDF gốc rồi bấm "Đã xác nhận công thức PDF".',
+        });
+      }
     }
 
     // Kiểm tra tài nguyên hình ảnh / đồ thị / bảng biến thiên gắn trên câu hỏi
     (q.visualAssets ?? []).forEach((asset) => {
-      if (!asset.sourceData || !asset.sourceData.trim()) {
+      const verification = verifyVisualAssetIntegrity(asset);
+      if (!verification.hasSourceData) {
         issues.push({
           id: `q-asset-missing-${q.id}-${asset.id}`,
           severity: 'error',
@@ -906,12 +988,11 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           questionId: q.id,
           questionNumber: qNum,
           code: q.code,
-          message: `Câu ${qNum} (${q.code}): Tài nguyên "${asset.label}" bị thiếu dữ liệu nguồn hoặc không tải được.`,
+          message: `Câu ${qNum} (${q.code}): Tài nguyên "${asset.label}" [${asset.id}] bị thiếu dữ liệu nguồn hoặc không tải được.`,
           recommendation: 'Tải lại hình ảnh/SVG hoặc xóa tài nguyên lỗi trước khi trộn.',
         });
-      }
-      const expectedCheck = computeContentHash(`${asset.kind}::${asset.label}::${asset.sourceData}`);
-      if (asset.checksum && asset.checksum !== expectedCheck) {
+      } else if (!verification.valid) {
+        const locationDetail = asset.sourceLocation ? `, nguồn=${asset.sourceLocation}` : '';
         issues.push({
           id: `q-asset-checksum-${q.id}-${asset.id}`,
           severity: 'error',
@@ -920,8 +1001,8 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           questionId: q.id,
           questionNumber: qNum,
           code: q.code,
-          message: `Câu ${qNum} (${q.code}): Checksum tài nguyên "${asset.label}" không khớp.`,
-          recommendation: 'Kiểm tra lại tài nguyên hình học/bảng biến thiên trước khi trộn.',
+          message: `Câu ${qNum} (${q.code}): Checksum tài nguyên "${asset.label}" không khớp [id=${asset.id}, kind=${asset.kind}${locationDetail}, lưu=${asset.checksum.slice(0, 12)}, tính=${verification.expectedChecksum.slice(0, 12)}].`,
+          recommendation: 'Kiểm tra lại tài nguyên hình học/bảng biến thiên hoặc nhập lại tệp nguồn trước khi trộn.',
         });
       }
     });
@@ -1317,14 +1398,24 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
   // Kiểm tra tài nguyên dùng chung của các nhóm câu hỏi
   (exam.questionGroups ?? []).forEach((grp) => {
     grp.sharedAssets.forEach((asset) => {
-      if (!asset.sourceData || !asset.sourceData.trim()) {
+      const verification = verifyVisualAssetIntegrity(asset);
+      if (!verification.hasSourceData) {
         issues.push({
           id: `grp-asset-missing-${grp.id}-${asset.id}`,
           severity: 'error',
           tier: 'BLOCKED',
           scope: 'asset',
-          message: `Nhóm "${grp.title}": Tài nguyên dùng chung "${asset.label}" bị thiếu hoặc không tải được.`,
+          message: `Nhóm "${grp.title}": Tài nguyên dùng chung "${asset.label}" [${asset.id}] bị thiếu hoặc không tải được.`,
           recommendation: 'Kiểm tra lại hình vẽ/bảng biểu dùng chung của nhóm.',
+        });
+      } else if (!verification.valid) {
+        issues.push({
+          id: `grp-asset-checksum-${grp.id}-${asset.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'asset',
+          message: `Nhóm "${grp.title}": Checksum tài nguyên dùng chung "${asset.label}" không khớp [id=${asset.id}, kind=${asset.kind}].`,
+          recommendation: 'Kiểm tra lại hình vẽ/bảng biểu dùng chung của nhóm trước khi trộn.',
         });
       }
     });
@@ -1610,9 +1701,7 @@ export function verifyMixedExamIntegrity(
       origAssets.forEach((oa) => {
         const ma = mixedAssets.find((item) => item.id === oa.id);
         const origCheck = fp.assetChecksums[oa.id];
-        const mixedCheck = ma
-          ? computeContentHash(`${ma.kind}::${ma.label}::${ma.sourceData}`)
-          : '';
+        const mixedCheck = ma ? computeVisualAssetChecksum(ma) : '';
         if (!ma || !ma.sourceData.trim() || mixedCheck !== origCheck) {
           issues.push({
             id: `mixed-asset-corrupt-${mixed.code}-${mq.id}-${oa.id}`,

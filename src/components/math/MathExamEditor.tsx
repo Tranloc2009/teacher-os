@@ -1,9 +1,10 @@
-import { ChangeEvent, useMemo, useState } from 'react';
+import { ChangeEvent, DragEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
   ClipboardPaste,
   Copy,
+  Eye,
   ImagePlus,
   Layers,
   Lock,
@@ -46,10 +47,15 @@ import {
 } from '../../core/subjectProfileRegistry';
 import {
   UniversalImportResult,
-  importUniversalExamFile,
   mergeImportedExamIntoProject,
   parseUniversalExamText,
 } from '../../core/universalImportEngine';
+import {
+  commitUniversalImportSessionToProject,
+  runUniversalImportSession,
+} from '../../core/universalImportAdapter';
+import type { PdfExtractionProgress } from '../../core/pdfImportAdapter';
+import type { UniversalImportSession } from '../../types/universalImport';
 import {
   VISUAL_ASSET_PRESETS,
   createEmptyMathQuestion,
@@ -63,18 +69,17 @@ import {
   MathIntegrityBadge,
   MathIntegrityReportPanel,
 } from './MathIntegrityReportPanel';
-
-const LATEX_SNIPPETS: Array<{ label: string; snippet: string }> = [
-  { label: 'Phân số', snippet: '$\\frac{a}{b}$' },
-  { label: 'Căn bậc 2', snippet: '$\\sqrt{x}$' },
-  { label: 'Số mũ / Chỉ số', snippet: '$x^2 + x_1$' },
-  { label: 'Giới hạn', snippet: '$\\lim_{x \\to 0}$' },
-  { label: 'Tích phân', snippet: '$\\int_{0}^{1} f(x)\\,dx$' },
-  { label: 'Vectơ', snippet: '$\\vec{u} = (a; b; c)$' },
-  { label: 'Logarit', snippet: '$\\log_{a}(x)$' },
-  { label: 'Hệ PT', snippet: '$\\begin{cases} x + y = 2 \\\\ x - y = 0 \\end{cases}$' },
-  { label: 'Tập hợp ℝ', snippet: '$D = \\mathbb{R} \\setminus \\{0\\}$' },
-];
+import { MathSymbolToolbar } from './MathSymbolToolbar';
+import { UniversalImportReviewModal } from './UniversalImportReviewModal';
+import {
+  FieldHistoryState,
+  MathToolbarSymbol,
+  createFieldHistory,
+  insertMathSymbolAtCursor,
+  pushFieldHistory,
+  redoFieldHistory,
+  undoFieldHistory,
+} from '../../core/mathToolbarSymbols';
 
 type QuestionFilterKind =
   | MathQuestionType
@@ -111,6 +116,11 @@ export function MathExamEditor({
   const [pasteBuffer, setPasteBuffer] = useState('');
   const [pasteFeedback, setPasteFeedback] = useState<string[]>([]);
   const [importPreview, setImportPreview] = useState<UniversalImportResult | null>(null);
+  const [importSession, setImportSession] = useState<UniversalImportSession | null>(null);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [importProgress, setImportProgress] = useState<PdfExtractionProgress | null>(null);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [applySuggestedSubject, setApplySuggestedSubject] = useState(true);
   const [isImportingFile, setIsImportingFile] = useState(false);
   const [filterType, setFilterType] = useState<QuestionFilterKind>('all');
@@ -120,6 +130,27 @@ export function MathExamEditor({
   const [groupDraftMode, setGroupDraftMode] = useState<'move' | 'lock'>('move');
   const [groupFeedback, setGroupFeedback] = useState<string | null>(null);
   const [manualCheckTick, setManualCheckTick] = useState<string | null>(null);
+  const [activeFieldKey, setActiveFieldKey] = useState<string>('stem');
+  const [, setHistoryTick] = useState(0);
+  const fieldElementRefs = useRef<Record<string, HTMLTextAreaElement | HTMLInputElement | null>>({});
+  const fieldHistoriesRef = useRef<Record<string, FieldHistoryState>>({});
+  const pendingSelectionRef = useRef<{ fieldKey: string; start: number; end: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) return;
+    const el = fieldElementRefs.current[pending.fieldKey];
+    if (!el) return;
+    pendingSelectionRef.current = null;
+    if (document.activeElement !== el) {
+      el.focus();
+    }
+    try {
+      el.setSelectionRange(pending.start, pending.end);
+    } catch {
+      // Ignore if input type does not support selection range
+    }
+  });
 
   const subjectProfiles = useMemo(() => listSubjectProfiles(), []);
   const currentSubjectId = useMemo(
@@ -392,6 +423,7 @@ export function MathExamEditor({
   };
 
   const handleImportPaste = () => {
+    setImportSession(null);
     const parsed = parseUniversalExamText(pasteBuffer, createId, {
       subjectId: currentSubjectId,
       sourceFormat: 'text',
@@ -411,53 +443,108 @@ export function MathExamEditor({
     ]);
   };
 
-  const handleUploadExamFile = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
+  const processUploadedExamFile = async (file: File) => {
     if (file.size > 50 * 1024 * 1024) {
       setPasteFeedback(['Tệp vượt quá giới hạn 50 MB. Vui lòng chia nhỏ tài liệu trước khi nhập.']);
       return;
     }
 
+    importAbortRef.current?.abort();
+    const controller = new AbortController();
+    importAbortRef.current = controller;
+
     setIsImportingFile(true);
+    setImportProgress({ phase: 'loading', currentPage: 0, totalPages: 1, percent: 5 });
     setPasteFeedback([]);
+    setImportPreview(null);
+
     try {
-      const lower = file.name.toLowerCase();
-      let result: UniversalImportResult;
-      if (lower.endsWith('.docx')) {
-        const buffer = await file.arrayBuffer();
-        result = await importUniversalExamFile(
-          { fileName: file.name, buffer },
-          createId,
-          { subjectId: currentSubjectId }
-        );
-      } else {
-        const textContent = await file.text();
-        result = await importUniversalExamFile(
-          { fileName: file.name, textContent },
-          createId,
-          { subjectId: currentSubjectId }
-        );
-      }
-      setImportPreview(result);
-      setApplySuggestedSubject(result.report.suggestedSubject.confidence !== 'low');
-      setPasteFeedback(
-        result.questions.length > 0
-          ? [`Đã phân tích tệp "${file.name}": nhận diện ${result.questions.length} câu hỏi.`]
-          : [`Không tách được câu hỏi từ tệp "${file.name}". Xem cảnh báo chi tiết bên dưới.`]
+      const buffer = await file.arrayBuffer();
+      const session = await runUniversalImportSession(
+        {
+          fileName: file.name,
+          mimeType: file.type,
+          buffer,
+        },
+        createId,
+        {
+          subjectId: currentSubjectId,
+          renderPreviews: true,
+          onProgress: (prog) => setImportProgress(prog),
+          signal: controller.signal,
+        }
       );
+
+      setImportSession(session);
+      const compat = session.compatibilityReport;
+      setApplySuggestedSubject(compat.suggestedSubject.confidence !== 'low');
+
+      if (session.detection.detectedFormat === 'pdf' || compat.status !== 'READY') {
+        setShowReviewModal(true);
+      }
+
+      if (session.questions.length > 0) {
+        setPasteFeedback([
+          `Đã phân tích "${file.name}" (${compat.detectedFormat.toUpperCase()}): ${compat.totalDetectedQuestions} câu · An toàn: ${compat.safeToMixCount} · Cần đối chiếu/Chặn: ${compat.blockedCount}.`,
+        ]);
+      } else {
+        setPasteFeedback([
+          `Tệp "${file.name}" ở trạng thái ${compat.status}: ${compat.recommendations[0] ?? session.detection.reason}`,
+        ]);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Không thể đọc tệp đề thi.';
-      setImportPreview(null);
+      setImportSession(null);
       setPasteFeedback([`Lỗi đọc tệp "${file.name}": ${msg}`]);
     } finally {
       setIsImportingFile(false);
+      setImportProgress(null);
+      importAbortRef.current = null;
     }
   };
 
+  const handleUploadExamFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await processUploadedExamFile(file);
+  };
+
+  const handleDropExamFile = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      void processUploadedExamFile(file);
+    }
+  };
+
+  const handleCancelImport = () => {
+    importAbortRef.current?.abort();
+    setIsImportingFile(false);
+    setImportProgress(null);
+    setPasteFeedback(['Đã hủy quá trình đọc tệp tài liệu.']);
+  };
+
   const handleCommitImport = (replaceExisting: boolean) => {
+    if (importSession && importSession.questions.length > 0) {
+      const nextExam = commitUniversalImportSessionToProject(exam, importSession, {
+        applySuggestedSubject,
+        replaceExisting,
+      });
+      onChangeExam(nextExam);
+      setSelectedQuestionId(importSession.questions[0].id);
+      setPasteFeedback([
+        replaceExisting
+          ? `Đã thay thế đề gốc bằng ${importSession.questions.length} câu hỏi từ "${importSession.originalSource.fileName}".`
+          : `Đã thêm ${importSession.questions.length} câu hỏi từ "${importSession.originalSource.fileName}" vào đề gốc.`,
+      ]);
+      setImportSession(null);
+      setShowReviewModal(false);
+      return;
+    }
+
     if (!importPreview || importPreview.questions.length === 0) return;
     const nextExam = mergeImportedExamIntoProject(exam, importPreview, {
       applySuggestedSubject,
@@ -474,16 +561,229 @@ export function MathExamEditor({
     setPasteBuffer('');
   };
 
-  const insertSnippetToStem = (snippet: string) => {
-    if (!activeQuestion) return;
-    const nextRaw = activeQuestion.stem.rawSource
-      ? `${activeQuestion.stem.rawSource} ${snippet}`
-      : snippet;
-    updateQuestion(activeQuestion.id, (q) => ({
-      ...q,
-      stem: parseMathContent(nextRaw, `${q.id}-stem`),
-    }));
+  useEffect(() => {
+    setActiveFieldKey('stem');
+  }, [activeQuestion?.id]);
+
+  const getFieldRawValue = (q: MathQuestion, fieldKey: string): string => {
+    if (fieldKey === 'stem') return q.stem.rawSource;
+    if (fieldKey === 'solutionGuide') return q.solutionGuide.rawSource;
+    if (fieldKey.startsWith('opt:')) {
+      const optId = fieldKey.slice(4);
+      return q.options?.find((o) => o.id === optId)?.content.rawSource ?? '';
+    }
+    if (fieldKey.startsWith('ms:')) {
+      const optId = fieldKey.slice(3);
+      return (q.multiSelectOptions ?? q.options ?? []).find((o) => o.id === optId)?.content.rawSource ?? '';
+    }
+    if (fieldKey.startsWith('st:')) {
+      const stId = fieldKey.slice(3);
+      return q.statements?.find((s) => s.id === stId)?.content.rawSource ?? '';
+    }
+    if (fieldKey.startsWith('ord:')) {
+      const itId = fieldKey.slice(4);
+      return q.ordering?.items.find((it) => it.id === itId)?.content.rawSource ?? '';
+    }
+    if (fieldKey.startsWith('part:')) {
+      const partId = fieldKey.slice(5);
+      return q.essayParts?.find((p) => p.id === partId)?.content.rawSource ?? '';
+    }
+    return q.stem.rawSource;
   };
+
+  const applyFieldRawValue = (q: MathQuestion, fieldKey: string, raw: string): MathQuestion => {
+    if (fieldKey === 'stem') {
+      return { ...q, stem: parseMathContent(raw, `${q.id}-stem`) };
+    }
+    if (fieldKey === 'solutionGuide') {
+      return { ...q, solutionGuide: parseMathContent(raw, `${q.id}-sol`) };
+    }
+    if (fieldKey.startsWith('opt:')) {
+      const optId = fieldKey.slice(4);
+      const nextOpts = (q.options ?? []).map((item) =>
+        item.id === optId ? { ...item, content: parseMathContent(raw, `${item.id}-c`) } : item
+      );
+      const deps = detectDependentOptions(nextOpts);
+      return {
+        ...q,
+        options: nextOpts,
+        dependencyFlags: deps,
+        lockOptionShuffle: q.lockOptionShuffle || deps.length > 0,
+      };
+    }
+    if (fieldKey.startsWith('ms:')) {
+      const optId = fieldKey.slice(3);
+      const src = q.multiSelectOptions ?? q.options ?? [];
+      const next = src.map((o) =>
+        o.id === optId ? { ...o, content: parseMathContent(raw, `${o.id}-c`) } : o
+      );
+      return { ...q, multiSelectOptions: next };
+    }
+    if (fieldKey.startsWith('st:')) {
+      const stId = fieldKey.slice(3);
+      const nextSts = (q.statements ?? []).map((item) =>
+        item.id === stId ? { ...item, content: parseMathContent(raw, `${item.id}-c`) } : item
+      );
+      const deps = detectDependentStatements(nextSts);
+      return { ...q, statements: nextSts, dependencyFlags: deps };
+    }
+    if (fieldKey.startsWith('ord:')) {
+      const itId = fieldKey.slice(4);
+      return {
+        ...q,
+        ordering: q.ordering
+          ? {
+              ...q.ordering,
+              items: q.ordering.items.map((x) =>
+                x.id === itId ? { ...x, content: parseMathContent(raw, `${x.id}-c`) } : x
+              ),
+            }
+          : undefined,
+      };
+    }
+    if (fieldKey.startsWith('part:')) {
+      const partId = fieldKey.slice(5);
+      return {
+        ...q,
+        essayParts: (q.essayParts ?? []).map((p) =>
+          p.id === partId ? { ...p, content: parseMathContent(raw, `${p.id}-c`) } : p
+        ),
+      };
+    }
+    return { ...q, stem: parseMathContent(raw, `${q.id}-stem`) };
+  };
+
+  const getOrInitHistory = (q: MathQuestion, fieldKey: string): FieldHistoryState => {
+    const hKey = `${q.id}::${fieldKey}`;
+    if (!fieldHistoriesRef.current[hKey]) {
+      const currentRaw = getFieldRawValue(q, fieldKey);
+      fieldHistoriesRef.current[hKey] = createFieldHistory(currentRaw);
+    }
+    return fieldHistoriesRef.current[hKey];
+  };
+
+  const restoreFocusAndSelection = (fieldKey: string, selStart: number, selEnd: number) => {
+    pendingSelectionRef.current = { fieldKey, start: selStart, end: selEnd };
+    const el = fieldElementRefs.current[fieldKey];
+    if (el && document.activeElement !== el) {
+      el.focus();
+    }
+  };
+
+  const handleTrackedFieldChange = (
+    fieldKey: string,
+    nextRaw: string,
+    selStart: number | null,
+    selEnd: number | null
+  ) => {
+    if (!activeQuestion) return;
+    const hKey = `${activeQuestion.id}::${fieldKey}`;
+    const hist = getOrInitHistory(activeQuestion, fieldKey);
+    const cursorPos = selStart ?? nextRaw.length;
+    fieldHistoriesRef.current[hKey] = pushFieldHistory(
+      hist,
+      { value: nextRaw, selectionStart: cursorPos, selectionEnd: selEnd ?? cursorPos },
+      100
+    );
+    setHistoryTick((t) => t + 1);
+    updateQuestion(activeQuestion.id, (q) => applyFieldRawValue(q, fieldKey, nextRaw));
+  };
+
+  const handleInsertMathSymbol = (symbol: MathToolbarSymbol) => {
+    if (!activeQuestion) return;
+    const targetKey = fieldElementRefs.current[activeFieldKey] ? activeFieldKey : 'stem';
+    const el = fieldElementRefs.current[targetKey];
+    const currentRaw = getFieldRawValue(activeQuestion, targetKey);
+    const selStart = el?.selectionStart ?? currentRaw.length;
+    const selEnd = el?.selectionEnd ?? currentRaw.length;
+
+    const hKey = `${activeQuestion.id}::${targetKey}`;
+    const baseHist = getOrInitHistory(activeQuestion, targetKey);
+    const withPreSelection: FieldHistoryState = {
+      ...baseHist,
+      present: { value: currentRaw, selectionStart: selStart, selectionEnd: selEnd },
+    };
+
+    const inserted = insertMathSymbolAtCursor(currentRaw, selStart, selEnd, symbol);
+    fieldHistoriesRef.current[hKey] = pushFieldHistory(
+      withPreSelection,
+      {
+        value: inserted.nextValue,
+        selectionStart: inserted.selectionStart,
+        selectionEnd: inserted.selectionEnd,
+      },
+      100
+    );
+    setHistoryTick((t) => t + 1);
+    updateQuestion(activeQuestion.id, (q) => applyFieldRawValue(q, targetKey, inserted.nextValue));
+    restoreFocusAndSelection(targetKey, inserted.selectionStart, inserted.selectionEnd);
+  };
+
+  const handleUndoField = (explicitFieldKey?: string) => {
+    if (!activeQuestion) return;
+    const targetKey = explicitFieldKey ?? (fieldElementRefs.current[activeFieldKey] ? activeFieldKey : 'stem');
+    const hKey = `${activeQuestion.id}::${targetKey}`;
+    const hist = getOrInitHistory(activeQuestion, targetKey);
+    const { nextState, applied } = undoFieldHistory(hist);
+    if (!applied) return;
+    fieldHistoriesRef.current[hKey] = nextState;
+    setHistoryTick((t) => t + 1);
+    updateQuestion(activeQuestion.id, (q) => applyFieldRawValue(q, targetKey, applied.value));
+    restoreFocusAndSelection(targetKey, applied.selectionStart, applied.selectionEnd);
+  };
+
+  const handleRedoField = (explicitFieldKey?: string) => {
+    if (!activeQuestion) return;
+    const targetKey = explicitFieldKey ?? (fieldElementRefs.current[activeFieldKey] ? activeFieldKey : 'stem');
+    const hKey = `${activeQuestion.id}::${targetKey}`;
+    const hist = getOrInitHistory(activeQuestion, targetKey);
+    const { nextState, applied } = redoFieldHistory(hist);
+    if (!applied) return;
+    fieldHistoriesRef.current[hKey] = nextState;
+    setHistoryTick((t) => t + 1);
+    updateQuestion(activeQuestion.id, (q) => applyFieldRawValue(q, targetKey, applied.value));
+    restoreFocusAndSelection(targetKey, applied.selectionStart, applied.selectionEnd);
+  };
+
+  const handleFieldKeyDown = (
+    fieldKey: string,
+    e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLInputElement>
+  ) => {
+    if (!activeQuestion) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'z' && !e.shiftKey) {
+      const hist = getOrInitHistory(activeQuestion, fieldKey);
+      if (hist.past.length > 0) {
+        e.preventDefault();
+        handleUndoField(fieldKey);
+      }
+    } else if ((key === 'z' && e.shiftKey) || (key === 'y' && !e.shiftKey)) {
+      const hist = getOrInitHistory(activeQuestion, fieldKey);
+      if (hist.future.length > 0) {
+        e.preventDefault();
+        handleRedoField(fieldKey);
+      }
+    }
+  };
+
+  const activeToolbarFieldKey = fieldElementRefs.current[activeFieldKey] ? activeFieldKey : 'stem';
+  const activeFieldHistory = activeQuestion
+    ? fieldHistoriesRef.current[`${activeQuestion.id}::${activeToolbarFieldKey}`]
+    : undefined;
+  const canUndoActive = (activeFieldHistory?.past.length ?? 0) > 0;
+  const canRedoActive = (activeFieldHistory?.future.length ?? 0) > 0;
+  const activeFieldLabel =
+    activeToolbarFieldKey === 'stem'
+      ? 'Đề bài'
+      : activeToolbarFieldKey === 'solutionGuide'
+      ? 'Hướng dẫn giải'
+      : activeToolbarFieldKey.startsWith('opt:')
+      ? 'Phương án'
+      : activeToolbarFieldKey.startsWith('st:')
+      ? 'Mệnh đề Đ/S'
+      : 'Ô đang chọn';
 
   if (stepMode === 2) {
     const statsByType: Record<MathQuestionType, number> = {
@@ -872,7 +1172,7 @@ export function MathExamEditor({
               className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap"
             >
               <ClipboardPaste className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Nhập DOCX / Đề</span>
+              <span>Nhập DOCX / PDF / Đề</span>
             </button>
             <button
               type="button"
@@ -1060,16 +1360,16 @@ export function MathExamEditor({
           </div>
         )}
 
-        {/* Universal Import Drawer (DOCX / OMML / HTML / Text & LaTeX) */}
+        {/* Universal Import Drawer (DOCX / Text-Layer PDF / HTML / Text & LaTeX) */}
         {showImportDrawer && (
           <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-4 space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div className="text-xs text-slate-700 dark:text-slate-300 space-y-1">
                 <p className="font-semibold text-slate-900 dark:text-slate-100">
-                  Nhập đề đa môn cục bộ (.docx / .html / .txt / Dán văn bản)
+                  Nhập đề đa định dạng cục bộ (.docx / .pdf có lớp chữ / .html / .txt / Dán văn bản)
                 </p>
                 <p>
-                  Tự động đọc công thức OMML/LaTeX, chỉ số trên/dưới (H₂SO₄, Fe³⁺), ảnh &amp; bảng trong Word, tách nhóm Đọc hiểu / Cloze Test và bảng đáp án cuối đề.
+                  Xác thực chữ ký tệp thực tế, tách cột 1/2 cột theo tọa độ trang PDF, bảo vệ công thức Toán học bằng cổng đối chiếu 2 cột trước khi trộn.
                 </p>
               </div>
               <button
@@ -1081,21 +1381,70 @@ export function MathExamEditor({
               </button>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3.5 py-2.5">
-              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700">
-                <Upload className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                <span>{isImportingFile ? 'Đang giải nén DOCX...' : 'Chọn tệp .docx / .html / .txt'}</span>
-                <input
-                  type="file"
-                  accept=".docx,.html,.htm,.txt,.md"
-                  onChange={(e) => void handleUploadExamFile(e)}
-                  className="sr-only"
-                />
-              </label>
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                Hỗ trợ Word .docx (giữ ảnh, bảng &amp; XML công thức OMML) · Tối đa 50 MB · Xử lý 100% trên máy
-              </span>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragActive(true);
+              }}
+              onDragLeave={() => setIsDragActive(false)}
+              onDrop={handleDropExamFile}
+              className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed px-3.5 py-3 transition-colors ${
+                isDragActive
+                  ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40'
+                  : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900'
+              }`}
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700">
+                  <Upload className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                  <span>
+                    {isImportingFile ? 'Đang phân tích tài liệu...' : 'Chọn tệp .docx / .pdf / .html / .txt'}
+                  </span>
+                  <input
+                    data-testid="universal-import-file-input"
+                    type="file"
+                    accept=".docx,.pdf,.html,.htm,.txt,.md,.tex,.csv,.xlsx"
+                    onChange={(e) => void handleUploadExamFile(e)}
+                    className="sr-only"
+                  />
+                </label>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Kéo thả tệp vào đây · Hỗ trợ DOCX (OMML/ảnh) &amp; PDF có lớp chữ · Tối đa 50 MB / 80 trang · 100% cục bộ
+                </span>
+              </div>
+              {isImportingFile && (
+                <button
+                  type="button"
+                  onClick={handleCancelImport}
+                  className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/50 px-2.5 py-1 text-xs font-medium text-red-700 dark:text-red-300 hover:bg-red-100 whitespace-nowrap"
+                >
+                  Hủy đọc
+                </button>
+              )}
             </div>
+
+            {importProgress && (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-600 dark:text-slate-300">
+                  <span>
+                    {importProgress.phase === 'loading'
+                      ? 'Đang mở tài liệu & kiểm tra chữ ký...'
+                      : importProgress.phase === 'parsing-pages'
+                      ? `Đang trích xuất tọa độ & cấu trúc Trang ${importProgress.currentPage}/${importProgress.totalPages}...`
+                      : importProgress.phase === 'rendering-previews'
+                      ? `Đang tạo ảnh đối chiếu Trang ${importProgress.currentPage}/${importProgress.totalPages}...`
+                      : 'Đang kiểm chứng tính tương thích...'}
+                  </span>
+                  <span>{importProgress.percent}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                  <div
+                    className="h-full bg-blue-600 transition-all duration-150"
+                    style={{ width: `${importProgress.percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             <textarea
               rows={5}
@@ -1120,7 +1469,59 @@ export function MathExamEditor({
               </button>
             </div>
 
-            {importPreview && (
+            {importSession && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3.5 space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-semibold text-slate-900 dark:text-slate-100">
+                    Báo cáo tương thích: {importSession.originalSource.fileName} ({importSession.compatibilityReport.status})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowReviewModal(true)}
+                    className="inline-flex items-center gap-1.5 rounded-[10px] border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/50 px-3 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-200 hover:bg-blue-100 whitespace-nowrap"
+                  >
+                    <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Mở màn hình đối chiếu 2 cột</span>
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono-num text-[11px] text-slate-600 dark:text-slate-300">
+                  <span>Nhận diện: {importSession.compatibilityReport.totalDetectedQuestions} câu</span>
+                  <span className="text-emerald-700 dark:text-emerald-400">
+                    Sẵn sàng: {importSession.compatibilityReport.safeToMixCount}
+                  </span>
+                  <span className="text-amber-700 dark:text-amber-400">
+                    Cần đối chiếu/Chặn: {importSession.compatibilityReport.blockedCount}
+                  </span>
+                  <span>Trang chữ: {importSession.compatibilityReport.textLayerPages}/{importSession.compatibilityReport.totalPages}</span>
+                </div>
+                {importSession.compatibilityReport.recommendations[0] && (
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                    {importSession.compatibilityReport.recommendations[0]}
+                  </p>
+                )}
+                {importSession.questions.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => handleCommitImport(false)}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700"
+                    >
+                      <span>Thêm {importSession.questions.length} câu vào cuối đề</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCommitImport(true)}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Thay thế bằng đề vừa nhập</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {importPreview && !importSession && (
               <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3.5 space-y-3 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="font-semibold text-slate-900 dark:text-slate-100">
@@ -1129,6 +1530,12 @@ export function MathExamEditor({
                   <span className="font-mono-num text-[11px] font-medium text-slate-600 dark:text-slate-300">
                     {importPreview.report.totalParsed} câu · {importPreview.report.groupsCreated} nhóm ·{' '}
                     {importPreview.report.assetsAttached} ảnh/bảng · {importPreview.report.ommlCount} OMML
+                    {(importPreview.report.legacyOleCount ?? 0) > 0
+                      ? ` · ${importPreview.report.legacyOleCount} OLE cũ`
+                      : ''}
+                    {(importPreview.report.unsupportedMediaCount ?? 0) > 0
+                      ? ` · ${importPreview.report.unsupportedMediaCount} WMF/EMF`
+                      : ''}
                   </span>
                 </div>
 
@@ -1503,6 +1910,44 @@ export function MathExamEditor({
                 </div>
               </div>
 
+              {activeQuestion.sourceVerification &&
+                !activeQuestion.sourceVerification.verifiedByTeacher && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/35 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                    <div className="space-y-0.5">
+                      <p className="font-semibold">
+                        Câu nhập từ {activeQuestion.sourceVerification.sourceFormat.toUpperCase()} đang chờ xác nhận bảo toàn Toán học
+                        {activeQuestion.sourceVerification.pageNumber
+                          ? ` (Trang ${activeQuestion.sourceVerification.pageNumber})`
+                          : ''}
+                      </p>
+                      <p className="text-[11px]">
+                        {activeQuestion.sourceVerification.formulaRiskFlags[0] ??
+                          activeQuestion.sourceVerification.reasons[0] ??
+                          'Cần kiểm tra công thức trước khi trộn.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateQuestion(activeQuestion.id, (q) => ({
+                          ...q,
+                          sourceVerification: q.sourceVerification
+                            ? {
+                                ...q.sourceVerification,
+                                verifiedByTeacher: true,
+                                verifiedAt: new Date().toISOString(),
+                              }
+                            : undefined,
+                        }))
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Đã xác nhận công thức PDF</span>
+                    </button>
+                  </div>
+                )}
+
               {/* Section title + LaTeX Snippet Toolbar */}
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1514,30 +1959,32 @@ export function MathExamEditor({
                   </span>
                 </div>
 
-                <div className="flex flex-wrap gap-1">
-                  {LATEX_SNIPPETS.map((item) => (
-                    <button
-                      key={item.label}
-                      type="button"
-                      onClick={() => insertSnippetToStem(item.snippet)}
-                      className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 py-0.5 text-[11px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 whitespace-nowrap"
-                    >
-                      + {item.label}
-                    </button>
-                  ))}
-                </div>
+                <MathSymbolToolbar
+                  onInsertSymbol={handleInsertMathSymbol}
+                  onUndo={() => handleUndoField()}
+                  onRedo={() => handleRedoField()}
+                  canUndo={canUndoActive}
+                  canRedo={canRedoActive}
+                  activeFieldLabel={activeFieldLabel}
+                />
 
                 <textarea
+                  ref={(el) => {
+                    fieldElementRefs.current['stem'] = el;
+                  }}
                   aria-label="Nội dung đề bài Toán"
                   rows={3}
                   value={activeQuestion.stem.rawSource}
-                  onChange={(e) => {
-                    const nextRaw = e.target.value;
-                    updateQuestion(activeQuestion.id, (q) => ({
-                      ...q,
-                      stem: parseMathContent(nextRaw, `${q.id}-stem`),
-                    }));
-                  }}
+                  onFocus={() => setActiveFieldKey('stem')}
+                  onKeyDown={(e) => handleFieldKeyDown('stem', e)}
+                  onChange={(e) =>
+                    handleTrackedFieldChange(
+                      'stem',
+                      e.target.value,
+                      e.target.selectionStart,
+                      e.target.selectionEnd
+                    )
+                  }
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 p-2.5 text-xs font-mono text-slate-900 dark:text-slate-100"
                 />
 
@@ -1609,20 +2056,21 @@ export function MathExamEditor({
                             </button>
                           </div>
                           <input
+                            ref={(el) => {
+                              fieldElementRefs.current[`ms:${opt.id}`] = el;
+                            }}
                             type="text"
                             value={opt.content.rawSource}
-                            onChange={(e) => {
-                              const raw = e.target.value;
-                              updateQuestion(activeQuestion.id, (q) => {
-                                const src = q.multiSelectOptions ?? q.options ?? [];
-                                const next = src.map((o) =>
-                                  o.id === opt.id
-                                    ? { ...o, content: parseMathContent(raw, `${o.id}-c`) }
-                                    : o
-                                );
-                                return { ...q, multiSelectOptions: next };
-                              });
-                            }}
+                            onFocus={() => setActiveFieldKey(`ms:${opt.id}`)}
+                            onKeyDown={(e) => handleFieldKeyDown(`ms:${opt.id}`, e)}
+                            onChange={(e) =>
+                              handleTrackedFieldChange(
+                                `ms:${opt.id}`,
+                                e.target.value,
+                                e.target.selectionStart,
+                                e.target.selectionEnd
+                              )
+                            }
                             className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-mono"
                           />
                         </div>
@@ -1732,26 +2180,22 @@ export function MathExamEditor({
                             </div>
                           </div>
                           <input
+                            ref={(el) => {
+                              fieldElementRefs.current[`opt:${opt.id}`] = el;
+                            }}
                             type="text"
                             aria-label={`Nội dung phương án ${MCQ_LABELS[idx]}`}
                             value={opt.content.rawSource}
-                            onChange={(e) => {
-                              const raw = e.target.value;
-                              updateQuestion(activeQuestion.id, (q) => {
-                                const nextOpts = (q.options ?? []).map((item) =>
-                                  item.id === opt.id
-                                    ? { ...item, content: parseMathContent(raw, `${item.id}-c`) }
-                                    : item
-                                );
-                                const deps = detectDependentOptions(nextOpts);
-                                return {
-                                  ...q,
-                                  options: nextOpts,
-                                  dependencyFlags: deps,
-                                  lockOptionShuffle: q.lockOptionShuffle || deps.length > 0,
-                                };
-                              });
-                            }}
+                            onFocus={() => setActiveFieldKey(`opt:${opt.id}`)}
+                            onKeyDown={(e) => handleFieldKeyDown(`opt:${opt.id}`, e)}
+                            onChange={(e) =>
+                              handleTrackedFieldChange(
+                                `opt:${opt.id}`,
+                                e.target.value,
+                                e.target.selectionStart,
+                                e.target.selectionEnd
+                              )
+                            }
                             className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-mono text-slate-900 dark:text-slate-100"
                           />
                           <div className="text-xs text-slate-700 dark:text-slate-300">
@@ -1835,24 +2279,21 @@ export function MathExamEditor({
                           </div>
                         </div>
                         <input
+                          ref={(el) => {
+                            fieldElementRefs.current[`st:${st.id}`] = el;
+                          }}
                           type="text"
                           value={st.content.rawSource}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            updateQuestion(activeQuestion.id, (q) => {
-                              const nextSts = (q.statements ?? []).map((item) =>
-                                item.id === st.id
-                                  ? { ...item, content: parseMathContent(raw, `${item.id}-c`) }
-                                  : item
-                              );
-                              const deps = detectDependentStatements(nextSts);
-                              return {
-                                ...q,
-                                statements: nextSts,
-                                dependencyFlags: deps,
-                              };
-                            });
-                          }}
+                          onFocus={() => setActiveFieldKey(`st:${st.id}`)}
+                          onKeyDown={(e) => handleFieldKeyDown(`st:${st.id}`, e)}
+                          onChange={(e) =>
+                            handleTrackedFieldChange(
+                              `st:${st.id}`,
+                              e.target.value,
+                              e.target.selectionStart,
+                              e.target.selectionEnd
+                            )
+                          }
                           className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-mono text-slate-900 dark:text-slate-100"
                         />
                         <div className="text-xs text-slate-700 dark:text-slate-300">
@@ -1976,24 +2417,21 @@ export function MathExamEditor({
                       <div key={it.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center text-xs">
                         <span className="sm:col-span-1 font-mono-num font-bold">{it.originalLabel}.</span>
                         <input
+                          ref={(el) => {
+                            fieldElementRefs.current[`ord:${it.id}`] = el;
+                          }}
                           type="text"
                           value={it.content.rawSource}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            updateQuestion(activeQuestion.id, (q) => ({
-                              ...q,
-                              ordering: q.ordering
-                                ? {
-                                    ...q.ordering,
-                                    items: q.ordering.items.map((x) =>
-                                      x.id === it.id
-                                        ? { ...x, content: parseMathContent(raw, `${x.id}-c`) }
-                                        : x
-                                    ),
-                                  }
-                                : undefined,
-                            }));
-                          }}
+                          onFocus={() => setActiveFieldKey(`ord:${it.id}`)}
+                          onKeyDown={(e) => handleFieldKeyDown(`ord:${it.id}`, e)}
+                          onChange={(e) =>
+                            handleTrackedFieldChange(
+                              `ord:${it.id}`,
+                              e.target.value,
+                              e.target.selectionStart,
+                              e.target.selectionEnd
+                            )
+                          }
                           className="sm:col-span-9 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 font-mono"
                         />
                         <div className="sm:col-span-2 flex items-center gap-1">
@@ -2142,19 +2580,21 @@ export function MathExamEditor({
                         <span className="font-mono-num text-slate-500">{part.points} điểm</span>
                       </div>
                       <input
+                        ref={(el) => {
+                          fieldElementRefs.current[`part:${part.id}`] = el;
+                        }}
                         type="text"
                         value={part.content.rawSource}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          updateQuestion(activeQuestion.id, (q) => ({
-                            ...q,
-                            essayParts: (q.essayParts ?? []).map((p) =>
-                              p.id === part.id
-                                ? { ...p, content: parseMathContent(raw, `${p.id}-c`) }
-                                : p
-                            ),
-                          }));
-                        }}
+                        onFocus={() => setActiveFieldKey(`part:${part.id}`)}
+                        onKeyDown={(e) => handleFieldKeyDown(`part:${part.id}`, e)}
+                        onChange={(e) =>
+                          handleTrackedFieldChange(
+                            `part:${part.id}`,
+                            e.target.value,
+                            e.target.selectionStart,
+                            e.target.selectionEnd
+                          )
+                        }
                         className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-mono text-slate-900 dark:text-slate-100"
                       />
                     </div>
@@ -2227,15 +2667,21 @@ export function MathExamEditor({
                   Hướng dẫn giải / Ghi chú giáo viên (tùy chọn)
                 </label>
                 <input
+                  ref={(el) => {
+                    fieldElementRefs.current['solutionGuide'] = el;
+                  }}
                   type="text"
                   value={activeQuestion.solutionGuide.rawSource}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    updateQuestion(activeQuestion.id, (q) => ({
-                      ...q,
-                      solutionGuide: parseMathContent(raw, `${q.id}-sol`),
-                    }));
-                  }}
+                  onFocus={() => setActiveFieldKey('solutionGuide')}
+                  onKeyDown={(e) => handleFieldKeyDown('solutionGuide', e)}
+                  onChange={(e) =>
+                    handleTrackedFieldChange(
+                      'solutionGuide',
+                      e.target.value,
+                      e.target.selectionStart,
+                      e.target.selectionEnd
+                    )
+                  }
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
                 />
               </div>
@@ -2243,6 +2689,17 @@ export function MathExamEditor({
           )}
         </section>
       </div>
+
+      {showReviewModal && importSession && (
+        <UniversalImportReviewModal
+          session={importSession}
+          applySuggestedSubject={applySuggestedSubject}
+          onChangeApplySuggestedSubject={setApplySuggestedSubject}
+          onChangeSession={setImportSession}
+          onCommit={handleCommitImport}
+          onClose={() => setShowReviewModal(false)}
+        />
+      )}
     </div>
   );
 }

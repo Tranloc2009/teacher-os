@@ -21,7 +21,6 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
-  computeContentHash,
   createMathVisualAsset,
   detectDependentOptions,
   detectDependentStatements,
@@ -47,6 +46,8 @@ export interface ImportDiagnosticReport {
   groupsCreated: number;
   assetsAttached: number;
   ommlCount: number;
+  legacyOleCount?: number;
+  unsupportedMediaCount?: number;
   confirmedAnswerCount: number;
   unconfirmedAnswerCount: number;
   warnings: string[];
@@ -68,6 +69,8 @@ export interface UniversalImportOptions {
   preWarnings?: string[];
   sourceFormat?: ImportSourceFormat;
   fileName?: string;
+  legacyOleCount?: number;
+  unsupportedMediaCount?: number;
 }
 
 const ENGLISH_DEPENDENT_PATTERNS = [
@@ -132,16 +135,21 @@ export function normalizeHtmlToImportText(html: string): {
     .replace(/<style[\s\S]*?<\/style>/gi, '');
 
   // Trích xuất ảnh data URL
+  let htmlImgOrdinal = 0;
+  let htmlTblOrdinal = 0;
   working = working.replace(
     /<img\b[^>]*src\s*=\s*(?:"(data:image\/[^"]+)"|'(data:image\/[^']+)')[^>]*>/gi,
     (_m, d1, d2) => {
       const dataUrl = d1 || d2;
+      htmlImgOrdinal += 1;
       const asset = createMathVisualAsset({
-        id: `html-img-${assets.length + 1}`,
+        id: `html-img-${htmlImgOrdinal}`,
         kind: 'image',
-        label: `Hình HTML #${assets.length + 1}`,
+        label: `Hình HTML #${htmlImgOrdinal}`,
         sourceData: dataUrl,
         altText: 'Hình ảnh trích xuất từ nội dung HTML',
+        sourceOrdinal: htmlImgOrdinal,
+        sourceLocation: `html/img[${htmlImgOrdinal}]`,
       });
       assets.push(asset);
       return `\n[[ASSET:${asset.id}]]\n`;
@@ -161,15 +169,17 @@ export function normalizeHtmlToImportText(html: string): {
     });
     const body = rows.filter(Boolean).join('\n');
     if (!body) return '\n';
-    const asset: MathVisualAsset = {
-      id: `html-tbl-${assets.length + 1}`,
+    htmlTblOrdinal += 1;
+    const asset = createMathVisualAsset({
+      id: `html-tbl-${htmlTblOrdinal}`,
       kind: 'data-table',
-      label: `Bảng HTML #${assets.length + 1}`,
+      label: `Bảng HTML #${htmlTblOrdinal}`,
       sourceData: body,
       altText: 'Bảng dữ liệu trích xuất từ HTML',
       required: true,
-      checksum: computeContentHash(`data-table::Bảng::${body}`),
-    };
+      sourceOrdinal: htmlTblOrdinal,
+      sourceLocation: `html/table[${htmlTblOrdinal}]`,
+    });
     assets.push(asset);
     return `\n${body}\n[[ASSET:${asset.id}]]\n`;
   });
@@ -203,39 +213,152 @@ interface ExtractedAnswerKeyEntry {
   raw: string;
 }
 
+function parseTableKeyLines(
+  lines: string[],
+  startIdx: number
+): { pairs: Array<{ qNum: number; val: string }>; nextIdx: number } {
+  const tableLines: string[] = [];
+  let cursor = startIdx;
+  while (cursor < lines.length && lines[cursor].includes('|')) {
+    tableLines.push(lines[cursor]);
+    cursor += 1;
+  }
+  const pairs: Array<{ qNum: number; val: string }> = [];
+  if (tableLines.length === 0) return { pairs, nextIdx: startIdx };
+
+  const grid = tableLines.map((ln) => ln.split('|').map((c) => c.trim()));
+  for (let r = 0; r < grid.length; r++) {
+    const row = grid[r];
+    // Case A: "1 | A | 2 | B" or "Câu 1 | A | Câu 2 | B"
+    for (let c = 0; c + 1 < row.length; c += 2) {
+      const mNum = row[c].match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
+      const val = row[c + 1];
+      if (mNum && val && !/^(?:Câu|Question|Đáp án|Key)$/i.test(val)) {
+        pairs.push({ qNum: Number(mNum[1]), val });
+      }
+    }
+    // Case B: Horizontal pair of rows: row r = numbers (e.g., Câu | 1 | 2 | 3), row r+1 = answers (Đáp án | A | B | C)
+    if (r + 1 < grid.length) {
+      const nextRow = grid[r + 1];
+      const numCols: Array<{ colIdx: number; qNum: number }> = [];
+      row.forEach((cell, cIdx) => {
+        const mNum = cell.match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
+        if (mNum) numCols.push({ colIdx: cIdx, qNum: Number(mNum[1]) });
+      });
+      if (numCols.length >= 2 && nextRow.length >= 2) {
+        const nextRowIsMostlyAnswers = numCols.some(({ colIdx }) => {
+          const v = nextRow[colIdx] ?? '';
+          return Boolean(v) && !/^\d{1,3}$/.test(v);
+        });
+        if (nextRowIsMostlyAnswers) {
+          for (const { colIdx, qNum } of numCols) {
+            const v = (nextRow[colIdx] ?? '').trim();
+            if (v) pairs.push({ qNum, val: v });
+          }
+          r += 1;
+        }
+      }
+    }
+  }
+  return { pairs, nextIdx: cursor - 1 };
+}
+
 function extractTrailingAnswerKeySection(rawText: string): {
   bodyText: string;
   keyByNumber: Map<number, ExtractedAnswerKeyEntry>;
+  keyBySectionAndNumber: Map<string, ExtractedAnswerKeyEntry>;
+  hasSectionedKeys: boolean;
 } {
   const keyHeaderRe =
-    /(?:^|\n)\s*(?:#+\s*)?(?:BẢNG\s+ĐÁP\s+ÁN|ĐÁP\s+ÁN\s*(?:ĐỀ\s+GỐC|CHI\s+TIẾT|THAM\s+KHẢO)?|ANSWER\s+KEY)\s*[:.]?\s*(?:\n|$)/i;
+    /(?:^|\n)\s*(?:#+\s*)?(?:BẢNG\s+ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+CHẤM)?))?|ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+CHẤM)?)|\s*(?:ĐỀ\s+GỐC|CHI\s+TIẾT|THAM\s+KHẢO))|LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+(?:CHẤM|GIẢI(?:\s+CHI\s+TIẾT)?)|ANSWER\s+KEY)\s*[:.–-]?\s*(?:\n|$)/i;
   const match = keyHeaderRe.exec(rawText);
   if (!match || match.index === undefined) {
-    return { bodyText: rawText, keyByNumber: new Map() };
+    return {
+      bodyText: rawText,
+      keyByNumber: new Map(),
+      keyBySectionAndNumber: new Map(),
+      hasSectionedKeys: false,
+    };
   }
 
-  // Chỉ cắt nếu phần header nằm ở nửa sau văn bản (tránh cắt nhầm tiêu đề)
+  // Chỉ cắt nếu phần header nằm ở sau 25% văn bản (tránh cắt nhầm tiêu đề đầu đề)
   if (match.index < rawText.length * 0.25) {
-    return { bodyText: rawText, keyByNumber: new Map() };
+    return {
+      bodyText: rawText,
+      keyByNumber: new Map(),
+      keyBySectionAndNumber: new Map(),
+      hasSectionedKeys: false,
+    };
   }
 
   const bodyText = rawText.slice(0, match.index).trim();
-  const keyText = rawText.slice(match.index + match[0].length).trim();
-  const keyByNumber = new Map<number, ExtractedAnswerKeyEntry>();
+  const keyText = rawText
+    .slice(match.index + match[0].length)
+    .replace(/\[\[ASSET:[^\]]+\]\]/g, '')
+    .trim();
 
-  // Hỗ trợ dạng: "1.A  2.B", "Câu 1: Đ-S-Đ-S", "1: 12,5", "3. for; to", "Câu 3: A, C"
-  const pairRe =
-    /(?:^|\s|\n)(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[.:)\-–]\s*([^\n]+?)(?=(?:\s+(?:Câu|Question|Bài)?\s*\d{1,3}\s*[.:)\-–])|\n|$)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = pairRe.exec(keyText)) !== null) {
-    const qNum = Number(m[1]);
-    const val = m[2].trim();
-    if (Number.isFinite(qNum) && val) {
+  const keyByNumber = new Map<number, ExtractedAnswerKeyEntry>();
+  const keyBySectionAndNumber = new Map<string, ExtractedAnswerKeyEntry>();
+  let hasSectionedKeys = false;
+
+  const keyLines = keyText.split(/\r?\n/);
+  let keySectionOrdinal = 0;
+  let keySectionHint: UniversalQuestionType | undefined;
+
+  const recordPair = (qNum: number, val: string) => {
+    if (!Number.isFinite(qNum) || !val) return;
+    if (keySectionOrdinal > 0) {
+      hasSectionedKeys = true;
+      keyBySectionAndNumber.set(`part:${keySectionOrdinal}::${qNum}`, { raw: val });
+    }
+    if (keySectionHint) {
+      keyBySectionAndNumber.set(`hint:${keySectionHint}::${qNum}`, { raw: val });
+    }
+    if (!keyByNumber.has(qNum) || keySectionOrdinal === 0) {
       keyByNumber.set(qNum, { raw: val });
+    }
+  };
+
+  for (let i = 0; i < keyLines.length; i++) {
+    const ln = keyLines[i].trim();
+    if (!ln) continue;
+
+    // Nếu đã có bảng đáp án nhanh và sang phần LỜI GIẢI CHI TIẾT -> dừng đọc key để tránh đè bởi số bước giải
+    if (
+      /^(?:#+\s*)?(?:LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+GIẢI(?:\s+CHI\s+TIẾT)?)\s*[:.–-]?$/i.test(ln) &&
+      (keyByNumber.size > 0 || keyBySectionAndNumber.size > 0)
+    ) {
+      break;
+    }
+
+    const sec = detectSectionHeader(ln);
+    if (sec) {
+      keySectionOrdinal += 1;
+      keySectionHint = sec.sectionHintType;
+      continue;
+    }
+
+    if (ln.includes('|')) {
+      const { pairs, nextIdx } = parseTableKeyLines(keyLines, i);
+      pairs.forEach((p) => recordPair(p.qNum, p.val));
+      if (pairs.length > 0) {
+        i = nextIdx;
+        continue;
+      }
+    }
+
+    // Hỗ trợ dạng: "1.A  2.B", "Câu 1: Đ-S-Đ-S", "1: 12,5", "3. for; to", "Câu 3: A, C"
+    const pairRe =
+      /(?:^|\s)(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[.:)\-–]\s*([^\n]+?)(?=(?:\s+(?:Câu|Question|Bài)?\s*\d{1,3}\s*[.:)\-–])|$)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = pairRe.exec(ln)) !== null) {
+      const qNum = Number(m[1]);
+      const val = m[2].trim();
+      recordPair(qNum, val);
     }
   }
 
-  return { bodyText, keyByNumber };
+  return { bodyText, keyByNumber, keyBySectionAndNumber, hasSectionedKeys };
 }
 
 interface ParsedSectionChunk {
@@ -400,11 +523,13 @@ export function parseUniversalExamText(
     };
   }
 
-  const { bodyText, keyByNumber } = extractTrailingAnswerKeySection(trimmed);
+  const { bodyText, keyByNumber, keyBySectionAndNumber, hasSectionedKeys } =
+    extractTrailingAnswerKeySection(trimmed);
   const lines = bodyText.split(/\r?\n/);
 
   interface RawQuestionBlock {
     questionNumber: number;
+    sectionOrdinal: number;
     sectionTitle: string;
     sectionHintType?: UniversalQuestionType;
     lines: string[];
@@ -414,6 +539,8 @@ export function parseUniversalExamText(
   let currentSectionTitle =
     subjectProfile.defaultSections[0]?.title ?? MATH_SECTION_TITLES.mcq;
   let currentSectionHint: UniversalQuestionType | undefined;
+  let currentSectionOrdinal = 1;
+  let sawSectionOrQuestion = false;
 
   const pendingPassages: Map<string, PendingPassageRange> = new Map();
   let activePassageKey: string | undefined;
@@ -432,6 +559,10 @@ export function parseUniversalExamText(
     // 1. Section Header
     const sec = detectSectionHeader(rawLine);
     if (sec) {
+      if (sawSectionOrQuestion) {
+        currentSectionOrdinal += 1;
+      }
+      sawSectionOrQuestion = true;
       currentSectionTitle = sec.sectionTitle;
       currentSectionHint = sec.sectionHintType;
       collectingPassageLines = null;
@@ -467,6 +598,7 @@ export function parseUniversalExamText(
     // 3. Question Start
     const qMatch = rawLine.match(questionStartRe);
     if (qMatch) {
+      sawSectionOrQuestion = true;
       collectingPassageLines = null;
       if (currentBlock) {
         blocks.push(currentBlock);
@@ -488,6 +620,7 @@ export function parseUniversalExamText(
       }
       currentBlock = {
         questionNumber: qNum,
+        sectionOrdinal: currentSectionOrdinal,
         sectionTitle: currentSectionTitle,
         sectionHintType: currentSectionHint,
         lines: qMatch[2] ? [qMatch[2]] : [],
@@ -528,15 +661,33 @@ export function parseUniversalExamText(
     blocks.push(currentBlock);
   }
 
+  // Phát hiện số câu bị lặp lại giữa nhiều phần (VD: Phần I Câu 1, Phần II Câu 1, Phần III Câu 1)
+  const qNumOccurrences = new Map<number, number>();
+  for (const blk of blocks) {
+    qNumOccurrences.set(blk.questionNumber, (qNumOccurrences.get(blk.questionNumber) ?? 0) + 1);
+  }
+
   const now = new Date().toISOString();
   const warnings = [...baseWarnings];
   const questions: MathQuestion[] = [];
   const groupQuestionsMap = new Map<string, string[]>();
   const codePrefix = options?.codePrefix ?? 'IMP';
+  const usedCodes = new Set<string>();
 
   blocks.forEach((blk, idx) => {
     const qId = createIdFn('mq');
-    const code = `${codePrefix}-${String(blk.questionNumber || idx + 1).padStart(2, '0')}`;
+    const paddedNum = String(blk.questionNumber || idx + 1).padStart(2, '0');
+    let code = `${codePrefix}-${paddedNum}`;
+    if (usedCodes.has(code)) {
+      code = `${codePrefix}-P${blk.sectionOrdinal}-${paddedNum}`;
+      let dupIdx = 2;
+      while (usedCodes.has(code)) {
+        code = `${codePrefix}-P${blk.sectionOrdinal}-${paddedNum}-${dupIdx}`;
+        dupIdx += 1;
+      }
+    }
+    usedCodes.add(code);
+
     const rawChunk = blk.lines.join('\n').trim();
     const { cleanedText: bodyWithInline, assets: qAssets } = extractAssetMarkersAndClean(
       rawChunk,
@@ -551,7 +702,20 @@ export function parseUniversalExamText(
       ? bodyWithInline.slice(0, inlineAnsMatch.index).trim()
       : bodyWithInline;
     const inlineAnswerRaw = inlineAnsMatch ? inlineAnsMatch[1].trim() : '';
-    const trailingAnswerRaw = keyByNumber.get(blk.questionNumber)?.raw ?? '';
+
+    const numRepeatsAcrossSections = (qNumOccurrences.get(blk.questionNumber) ?? 0) > 1;
+    const sectionScopedKey =
+      keyBySectionAndNumber.get(`part:${blk.sectionOrdinal}::${blk.questionNumber}`) ??
+      (blk.sectionHintType
+        ? keyBySectionAndNumber.get(`hint:${blk.sectionHintType}::${blk.questionNumber}`)
+        : undefined);
+    const trailingAnswerRaw =
+      sectionScopedKey?.raw ??
+      (!hasSectionedKeys && !numRepeatsAcrossSections
+        ? keyByNumber.get(blk.questionNumber)?.raw ?? ''
+        : !hasSectionedKeys && blk.sectionOrdinal === 1
+        ? keyByNumber.get(blk.questionNumber)?.raw ?? ''
+        : '');
     const declaredAnswerRaw = inlineAnswerRaw || trailingAnswerRaw;
 
     // A. Kiểm tra Đúng / Sai 4 ý: a) ... b) ... c) ... d) ...
@@ -1147,6 +1311,10 @@ export function parseUniversalExamText(
       groupsCreated: questionGroups.length,
       assetsAttached,
       ommlCount: ommlFragments.length,
+      ...(options?.legacyOleCount !== undefined ? { legacyOleCount: options.legacyOleCount } : {}),
+      ...(options?.unsupportedMediaCount !== undefined
+        ? { unsupportedMediaCount: options.unsupportedMediaCount }
+        : {}),
       confirmedAnswerCount,
       unconfirmedAnswerCount,
       warnings: Array.from(new Set(warnings)),
@@ -1190,6 +1358,8 @@ export async function importUniversalExamFile(
       fileName: input.fileName,
       assets: [...(options?.assets ?? []), ...extracted.assets],
       ommlFragments: extracted.ommlFragments,
+      legacyOleCount: extracted.legacyOleCount,
+      unsupportedMediaCount: extracted.unsupportedMediaCount,
       preWarnings: [...(options?.preWarnings ?? []), ...extracted.warnings],
     });
   }

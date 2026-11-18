@@ -499,7 +499,7 @@ export function SettingsView({
             Sao lưu &amp; Khôi phục dữ liệu (JSON)
           </h2>
           <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
-            Xuất toàn bộ <span className="font-mono-num font-medium">{packs.length}</span> bộ tiết dạy và cấu hình in ra tệp JSON để lưu trữ hoặc chuyển sang máy tính khác. Khi khôi phục, hệ thống kiểm tra cấu trúc (schema) chặt chẽ và luôn hỏi xác nhận trước khi thay dữ liệu hiện tại.
+            Xuất toàn bộ <span className="font-mono-num font-medium">{packs.length}</span> bộ tiết dạy, tài nguyên Resource Vault (bao gồm metadata &amp; mã SHA-256 tệp đính kèm) và cấu hình in ra tệp JSON. Khi khôi phục, hệ thống kiểm tra cấu trúc (schema) chặt chẽ, tự dọn bản ghi tệp không còn liên kết và luôn hỏi xác nhận trước khi thay dữ liệu hiện tại. Các tệp đính kèm nhị phân lớn lưu trong OPFS/IndexedDB vẫn được giữ nguyên bản trên thiết bị.
           </p>
         </div>
 
@@ -637,7 +637,7 @@ export function SettingsView({
         <ul className="list-disc pl-5 space-y-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
           <li>
             Mọi bộ tiết dạy, câu hỏi, rubric, đề Toán, sơ đồ Canvas và cài đặt in được lưu trực tiếp trong cơ sở dữ liệu{' '}
-            <strong className="font-semibold text-slate-900 dark:text-slate-100">IndexedDB (TeacherOS2DB v5)</strong> trên trình duyệt của thiết bị này, không mất dữ liệu khi tải lại trang.
+            <strong className="font-semibold text-slate-900 dark:text-slate-100">IndexedDB (TeacherOS2DB v6) &amp; OPFS</strong> trên trình duyệt của thiết bị này, không mất dữ liệu khi tải lại trang.
           </li>
           <li>
             Ứng dụng hoạt động hoàn toàn phía trình duyệt (client-only), không kết nối máy chủ ngoài, không sử dụng AI API, không thu thập dữ liệu sử dụng và không yêu cầu tài khoản đăng nhập.

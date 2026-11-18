@@ -101,6 +101,12 @@ export interface MathVisualAsset {
   altText: string;
   required: boolean;
   checksum: string;
+  /** Thông tin truy vết nguồn gốc tài nguyên (phần DOCX, rId, thứ tự bảng/ảnh) */
+  sourcePartPath?: string;
+  sourceRelationshipId?: string;
+  sourceOrdinal?: number;
+  sourceLocation?: string;
+  contentHash?: string;
 }
 
 export interface McqOption {
@@ -286,8 +292,34 @@ export interface MathQuestion {
   dependencyFlags: string[];
   hasVisualAsset: boolean;
   answerConfirmed: boolean;
+  /** Truy vết & cổng bảo toàn toán học khi nhập từ PDF hoặc các định dạng đa nguồn */
+  sourceVerification?: QuestionSourceVerification;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NormalizedPdfBBox {
+  /** Tọa độ chuẩn hóa [0..1] theo trang PDF gốc để highlight chính xác */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface QuestionSourceVerification {
+  sourceFormat: string;
+  sourceBlockId?: string;
+  pageNumber?: number;
+  pageSpan?: number[];
+  columnIndex?: number;
+  bbox?: NormalizedPdfBBox;
+  /** READY: an toàn; REVIEW_REQUIRED: cần đối chiếu trang PDF; UNSUPPORTED/BLOCKED: không được phép trộn tự động */
+  verificationStatus: 'READY' | 'REVIEW_REQUIRED' | 'UNSUPPORTED' | 'BLOCKED';
+  verifiedByTeacher: boolean;
+  verifiedAt?: string;
+  formulaRiskFlags: string[];
+  reasons: string[];
+  extractedRawText?: string;
 }
 
 export interface QuestionTypeMixPolicy {
@@ -638,6 +670,15 @@ export interface MathExamProject {
   lastStep: MathExamStep;
   status: 'draft' | 'ready';
   isDemo: boolean;
+  /** Hồ sơ nguồn gốc tài liệu nhập gần nhất (Layer 1 provenance) */
+  sourceRecord?: {
+    sourceId: string;
+    fileName: string;
+    detectedFormat: string;
+    sizeBytes: number;
+    contentHash: string;
+    importedAt: string;
+  };
   createdAt: string;
   updatedAt: string;
 }

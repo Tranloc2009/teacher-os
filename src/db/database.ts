@@ -7,6 +7,8 @@ import {
   RubricCriterion,
   WorkflowRun,
 } from '../types/lesson';
+import { StoredResourceFileRecord } from '../types/resourceBulk';
+import { deleteBlobFromOpfs, readBlobFromOpfs } from '../core/resourceStorage';
 import { DEMO_LESSON_PACKS } from '../data/demoPacks';
 import { DEMO_MATH_EXAM } from '../data/demoMathExams';
 import {
@@ -90,6 +92,7 @@ class TeacherOSDatabase extends Dexie {
   canvasNodes!: Table<CanvasNodeRecord, string>;
   canvasEdges!: Table<CanvasEdgeRecord, string>;
   canvasViewSettings!: Table<CanvasViewSettings, string>;
+  resourceFiles!: Table<StoredResourceFileRecord, string>;
 
   constructor() {
     super('TeacherOS2DB');
@@ -136,6 +139,21 @@ class TeacherOSDatabase extends Dexie {
       canvasNodes: 'id, boardId, type, parentId, updatedAt',
       canvasEdges: 'id, boardId, source, target, edgeType',
       canvasViewSettings: 'boardId',
+    });
+    // Phiên bản 6 (Resource Vault Smart Bulk Import 1.0): bổ sung bảng resourceFiles lưu tệp đính kèm nhị phân, giữ nguyên 100% dữ liệu v1-v5
+    this.version(6).stores({
+      lessonPacks: 'id, subject, grade, status, isDemo, updatedAt',
+      settings: 'id',
+      meta: 'key',
+      resources: 'id, type, subject, grade, updatedAt',
+      workflows: 'id, linkedPackId, updatedAt',
+      journals: 'id, packId, taughtDate, updatedAt',
+      mathExams: 'id, grade, status, updatedAt',
+      canvasBoards: 'id, mode, updatedAt',
+      canvasNodes: 'id, boardId, type, parentId, updatedAt',
+      canvasEdges: 'id, boardId, source, target, edgeType',
+      canvasViewSettings: 'boardId',
+      resourceFiles: 'id, resourceId, sha256, storageKind, updatedAt',
     });
   }
 }
@@ -583,9 +601,76 @@ export async function saveResource(item: ResourceItem): Promise<ResourceItem> {
   });
 }
 
+export async function bulkSaveResourcesWithFiles(
+  items: ResourceItem[],
+  fileRecords: StoredResourceFileRecord[]
+): Promise<void> {
+  return executeStorageOperation(async () => {
+    if (items.length === 0 && fileRecords.length === 0) return;
+    const staleOpfsKeys: string[] = [];
+    await db.transaction('rw', [db.resources, db.resourceFiles], async () => {
+      // If replacing existing resources, remove old file records first
+      const resourceIds = items.map((i) => i.id);
+      if (resourceIds.length > 0) {
+        const oldFiles = await db.resourceFiles
+          .where('resourceId')
+          .anyOf(resourceIds)
+          .toArray();
+        const replacedFiles = oldFiles.filter(
+          (f) => !fileRecords.some((nf) => nf.id === f.id)
+        );
+        for (const old of replacedFiles) {
+          if (old.storageKind === 'opfs' && old.opfsKey) {
+            staleOpfsKeys.push(old.opfsKey);
+          }
+        }
+        const replacedFileIds = replacedFiles.map((f) => f.id);
+        if (replacedFileIds.length > 0) {
+          await db.resourceFiles.bulkDelete(replacedFileIds);
+        }
+        await db.resources.bulkPut(items);
+      }
+      if (fileRecords.length > 0) {
+        await db.resourceFiles.bulkPut(fileRecords);
+      }
+    });
+    for (const key of staleOpfsKeys) {
+      await deleteBlobFromOpfs(key);
+    }
+  });
+}
+
+export async function readResourceAttachmentBlob(
+  resource: ResourceItem
+): Promise<Blob | null> {
+  return executeStorageOperation(async () => {
+    if (!resource.sourceFile) return null;
+    const rec = await db.resourceFiles.get(resource.sourceFile.fileRecordId);
+    if (rec?.storageKind === 'opfs' && rec.opfsKey) {
+      return await readBlobFromOpfs(rec.opfsKey);
+    }
+    if (rec?.blob) return rec.blob;
+    if (resource.sourceFile.opfsKey) {
+      return await readBlobFromOpfs(resource.sourceFile.opfsKey);
+    }
+    return null;
+  });
+}
+
 export async function deleteResource(id: string): Promise<void> {
   return executeStorageOperation(async () => {
-    await db.resources.delete(id);
+    const linkedFiles = await db.resourceFiles.where('resourceId').equals(id).toArray();
+    for (const f of linkedFiles) {
+      if (f.storageKind === 'opfs' && f.opfsKey) {
+        await deleteBlobFromOpfs(f.opfsKey);
+      }
+    }
+    await db.transaction('rw', [db.resources, db.resourceFiles], async () => {
+      await db.resources.delete(id);
+      if (linkedFiles.length > 0) {
+        await db.resourceFiles.bulkDelete(linkedFiles.map((f) => f.id));
+      }
+    });
   });
 }
 
@@ -885,6 +970,16 @@ export async function replaceAllFromBackup(
 ): Promise<void> {
   return executeStorageOperation(async () => {
     const normalizedPacks = packs.map(normalizeLegacyLessonPack);
+    const staleOpfsKeys: string[] = [];
+    if (Array.isArray(extras?.resources)) {
+      const keepIds = new Set(extras.resources.map((r) => r.id));
+      const currentFiles = await db.resourceFiles.toArray();
+      for (const f of currentFiles) {
+        if (!keepIds.has(f.resourceId) && f.storageKind === 'opfs' && f.opfsKey) {
+          staleOpfsKeys.push(f.opfsKey);
+        }
+      }
+    }
     await db.transaction(
       'rw',
       [
@@ -892,6 +987,7 @@ export async function replaceAllFromBackup(
         db.settings,
         db.meta,
         db.resources,
+        db.resourceFiles,
         db.workflows,
         db.journals,
         db.mathExams,
@@ -913,6 +1009,14 @@ export async function replaceAllFromBackup(
         });
         if (Array.isArray(extras?.resources)) {
           await db.resources.clear();
+          const keepIds = new Set(extras.resources.map((r) => r.id));
+          const currentFiles = await db.resourceFiles.toArray();
+          const removeFileIds = currentFiles
+            .filter((f) => !keepIds.has(f.resourceId))
+            .map((f) => f.id);
+          if (removeFileIds.length > 0) {
+            await db.resourceFiles.bulkDelete(removeFileIds);
+          }
           if (extras.resources.length > 0) {
             await db.resources.bulkPut(extras.resources);
           }
@@ -967,6 +1071,9 @@ export async function replaceAllFromBackup(
         await db.meta.put({ key: 'canvas_seeded_v1', value: 'true' });
       }
     );
+    for (const key of staleOpfsKeys) {
+      await deleteBlobFromOpfs(key);
+    }
   });
 }
 
