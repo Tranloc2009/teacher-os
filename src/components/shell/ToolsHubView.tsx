@@ -48,11 +48,11 @@ export function ToolsHubView({
     },
     {
       id: 'math-mixer',
-      title: 'Math Exam Mixer',
+      title: 'Exam Mixer Pro 6.0',
       description:
-        'Tải đề kiểm tra Toán, trộn nhiều mã đề theo ma trận nhận thức, khóa câu phụ thuộc và bảo toàn công thức LaTeX.',
-      metricLabel: `${mathExamCount} đề kiểm tra Toán`,
-      ctaLabel: 'Mở Math Exam Mixer',
+        'Nhập đề Word (.docx) hoặc văn bản đa môn (12 môn học, 10 dạng câu hỏi), khóa ngữ liệu 5 lớp và xuất trọn bộ DOCX/ZIP/PDF A4.',
+      metricLabel: `${mathExamCount} đề kiểm tra đa môn`,
+      ctaLabel: 'Mở Exam Mixer Pro 6.0',
       icon: Calculator,
       tourId: 'desktop-app-math-mixer',
     },

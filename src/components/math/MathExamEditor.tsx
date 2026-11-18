@@ -78,6 +78,11 @@ const LATEX_SNIPPETS: Array<{ label: string; snippet: string }> = [
 
 type QuestionFilterKind =
   | MathQuestionType
+  | 'multi-select'
+  | 'fill-blank'
+  | 'matching'
+  | 'ordering'
+  | 'reading-comprehension'
   | 'all'
   | 'locked'
   | 'unlocked'
@@ -121,6 +126,20 @@ export function MathExamEditor({
     () => resolveSubjectId(exam.subjectId || exam.subject || 'Toán học'),
     [exam.subjectId, exam.subject]
   );
+  const currentProfile = useMemo(
+    () => getSubjectProfile(currentSubjectId),
+    [currentSubjectId]
+  );
+  const issuesByQuestionId = useMemo(() => {
+    const map = new Map<string, MathIntegrityIssue[]>();
+    integrityIssues.forEach((issue) => {
+      if (!issue.questionId) return;
+      const list = map.get(issue.questionId) ?? [];
+      list.push(issue);
+      map.set(issue.questionId, list);
+    });
+    return map;
+  }, [integrityIssues]);
 
   const activeQuestion = useMemo(
     () =>
@@ -149,7 +168,10 @@ export function MathExamEditor({
     if (filterType === 'grouped') {
       return exam.questions.filter((q) => Boolean(q.groupId));
     }
-    return exam.questions.filter((q) => q.type === filterType);
+    if (filterType === 'mcq' || filterType === 'true-false' || filterType === 'short-answer' || filterType === 'essay') {
+      return exam.questions.filter((q) => q.type === filterType);
+    }
+    return exam.questions.filter((q) => (q.universalType ?? q.type) === filterType);
   }, [exam.questions, exam.mixConfig.lockedQuestionIds, filterType]);
 
   const errorIssues = integrityIssues.filter((i) => i.severity === 'error');
@@ -562,6 +584,7 @@ export function MathExamEditor({
             <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
               <button
                 type="button"
+                data-tour-id="math-confirm-answers"
                 disabled={errorIssues.length > 0}
                 onClick={() =>
                   onChangeExam({
@@ -640,13 +663,36 @@ export function MathExamEditor({
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {exam.questions.map((q, idx) => {
+                  const uType = q.universalType ?? q.type;
                   const ansText =
-                    q.type === 'mcq'
+                    uType === 'multi-select'
+                      ? (q.multiSelectOptions ?? q.options ?? [])
+                          .map((o, oIdx) => (o.isCorrect ? String.fromCharCode(65 + oIdx) : null))
+                          .filter(Boolean)
+                          .join(', ') || '?'
+                      : q.type === 'mcq'
                       ? q.options?.find((o) => o.id === q.correctOptionId)?.originalLabel ?? '?'
                       : q.type === 'true-false'
                       ? (q.statements ?? [])
                           .map((s) => `${s.originalLabel}:${s.isTrue ? 'Đ' : 'S'}`)
                           .join(' · ')
+                      : uType === 'fill-blank'
+                      ? (q.fillBlank?.slots ?? [])
+                          .map((s, sIdx) => `(${sIdx + 1}) ${s.acceptedAnswers[0] ?? '?'}`)
+                          .join('; ') || q.shortAnswer?.answerValue || 'Chưa nhập'
+                      : uType === 'matching'
+                      ? (q.matching?.correctPairs ?? [])
+                          .map((p) => {
+                            const l = q.matching?.leftItems.find((x) => x.id === p.leftItemId)?.originalLabel ?? '?';
+                            const r = q.matching?.rightItems.find((x) => x.id === p.rightItemId)?.originalLabel ?? '?';
+                            return `${l}→${r}`;
+                          })
+                          .join(', ') || '?'
+                      : uType === 'ordering'
+                      ? [...(q.ordering?.items ?? [])]
+                          .sort((a, b) => a.correctRank - b.correctRank)
+                          .map((it) => it.originalLabel)
+                          .join(' → ') || '?'
                       : q.type === 'short-answer'
                       ? `${q.shortAnswer?.answerValue || 'Chưa nhập'}${
                           q.shortAnswer?.unit ? ` ${q.shortAnswer.unit}` : ''
@@ -660,7 +706,7 @@ export function MathExamEditor({
                         {q.code}
                       </td>
                       <td className="px-4 py-2.5 text-slate-600 dark:text-slate-300">
-                        {MATH_QUESTION_TYPE_LABELS[q.type]}
+                        {UNIVERSAL_QUESTION_TYPE_LABELS[uType] ?? MATH_QUESTION_TYPE_LABELS[q.type]}
                       </td>
                       <td className="px-4 py-2.5 max-w-md">
                         <div className="line-clamp-2 text-slate-800 dark:text-slate-200">
@@ -736,7 +782,7 @@ export function MathExamEditor({
               className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-950 dark:text-slate-100"
             />
           </div>
-          <div className="md:col-span-2">
+          <div className="md:col-span-2" data-tour-id="math-subject-select">
             <label
               htmlFor="exam-subject-select"
               className="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1"
@@ -821,6 +867,7 @@ export function MathExamEditor({
             </button>
             <button
               type="button"
+              data-tour-id="math-import-btn"
               onClick={() => setShowImportDrawer((prev) => !prev)}
               className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap"
             >
@@ -835,6 +882,15 @@ export function MathExamEditor({
               <span>Kiểm tra &amp; Xác nhận</span>
             </button>
           </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 dark:bg-slate-800/50 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+          <span>
+            <strong className="text-slate-800 dark:text-slate-100">Hồ sơ bảo toàn {currentProfile.name}:</strong>{' '}
+            {currentProfile.groupRules.description}
+          </span>
+          <span className="font-mono-num text-blue-700 dark:text-blue-400">
+            Cấp bảo vệ: {currentProfile.protectionLevel}
+          </span>
         </div>
 
         {/* Question Group Manager Drawer */}
@@ -1167,8 +1223,13 @@ export function MathExamEditor({
                 <option value="unlocked">Chưa khóa vị trí</option>
                 <option value="grouped">Thuộc nhóm câu hỏi</option>
                 <option value="mcq">4 phương án</option>
+                <option value="multi-select">Nhiều đáp án đúng</option>
                 <option value="true-false">Đúng / Sai</option>
                 <option value="short-answer">Trả lời ngắn</option>
+                <option value="fill-blank">Điền khuyết</option>
+                <option value="matching">Ghép đôi</option>
+                <option value="ordering">Sắp xếp trình tự</option>
+                <option value="reading-comprehension">Đọc hiểu nhóm</option>
                 <option value="essay">Tự luận</option>
               </select>
             </div>
@@ -1227,6 +1288,9 @@ export function MathExamEditor({
               const isLocked =
                 q.lockQuestionPosition || exam.mixConfig.lockedQuestionIds.includes(q.id);
               const lockedOptCount = (q.options ?? []).filter((o) => Boolean(o.lockPosition)).length;
+              const qIssues = issuesByQuestionId.get(q.id) ?? [];
+              const hasBlockedIssue = qIssues.some((i) => i.severity === 'error');
+              const hasWarnIssue = !hasBlockedIssue && qIssues.length > 0;
               return (
                 <div
                   key={q.id}
@@ -1265,8 +1329,18 @@ export function MathExamEditor({
                     className="flex-1 min-w-0 text-left space-y-1"
                   >
                     <div className="flex items-center justify-between gap-2 text-[11px]">
-                      <span className="font-mono-num font-semibold text-slate-900 dark:text-slate-100">
-                        Câu {globalIdx} · {q.code}
+                      <span className="font-mono-num font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-1.5">
+                        <span>Câu {globalIdx} · {q.code}</span>
+                        {hasBlockedIssue && (
+                          <span className="rounded bg-red-100 dark:bg-red-950 px-1 py-0.5 text-[9px] font-bold text-red-700 dark:text-red-300">
+                            LỖI
+                          </span>
+                        )}
+                        {hasWarnIssue && (
+                          <span className="rounded bg-amber-100 dark:bg-amber-950 px-1 py-0.5 text-[9px] font-bold text-amber-800 dark:text-amber-300">
+                            CẢNH BÁO
+                          </span>
+                        )}
                       </span>
                       <span className="text-slate-500 dark:text-slate-400">
                         {COGNITIVE_LEVEL_LABELS[q.cognitiveLevel]}
@@ -1353,23 +1427,39 @@ export function MathExamEditor({
                       </option>
                     ))}
                   </select>
-                  <select
-                    aria-label="Chuyên đề Toán"
-                    value={activeQuestion.topic}
-                    onChange={(e) =>
-                      updateQuestion(activeQuestion.id, (q) => ({
-                        ...q,
-                        topic: e.target.value,
-                      }))
-                    }
-                    className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs text-slate-800 dark:text-slate-100"
-                  >
-                    {MATH_TOPICS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
+                  {currentSubjectId === 'toan' ? (
+                    <select
+                      aria-label="Chuyên đề Toán"
+                      value={activeQuestion.topic}
+                      onChange={(e) =>
+                        updateQuestion(activeQuestion.id, (q) => ({
+                          ...q,
+                          topic: e.target.value,
+                        }))
+                      }
+                      className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs text-slate-800 dark:text-slate-100"
+                    >
+                      {MATH_TOPICS.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      aria-label="Chủ đề / Chuyên đề"
+                      type="text"
+                      value={activeQuestion.topic}
+                      onChange={(e) =>
+                        updateQuestion(activeQuestion.id, (q) => ({
+                          ...q,
+                          topic: e.target.value,
+                        }))
+                      }
+                      placeholder={currentProfile.name}
+                      className="w-40 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs text-slate-800 dark:text-slate-100"
+                    />
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1.5">
@@ -1460,7 +1550,91 @@ export function MathExamEditor({
               </div>
 
               {/* Type-specific Editors */}
-              {activeQuestion.type === 'mcq' && activeQuestion.options && (
+              {(activeQuestion.universalType ?? activeQuestion.type) === 'multi-select' && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Trắc nghiệm nhiều đáp án đúng (chọn ≥ 1 phương án đúng)
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={activeQuestion.lockOptionShuffle}
+                        onChange={(e) =>
+                          updateQuestion(activeQuestion.id, (q) => ({
+                            ...q,
+                            lockOptionShuffle: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span>Khóa thứ tự phương án</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {(activeQuestion.multiSelectOptions ?? activeQuestion.options ?? []).map((opt, idx) => {
+                      const lbl = String.fromCharCode(65 + idx);
+                      return (
+                        <div
+                          key={opt.id}
+                          className={`rounded-lg border p-2.5 space-y-1.5 ${
+                            opt.isCorrect
+                              ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50/50 dark:bg-emerald-950/30'
+                              : 'border-slate-200 dark:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono-num text-xs font-bold">Phương án {lbl}</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateQuestion(activeQuestion.id, (q) => {
+                                  const src = q.multiSelectOptions ?? q.options ?? [];
+                                  const next = src.map((o) =>
+                                    o.id === opt.id ? { ...o, isCorrect: !o.isCorrect } : o
+                                  );
+                                  return {
+                                    ...q,
+                                    multiSelectOptions: next,
+                                    correctOptionIds: next.filter((o) => o.isCorrect).map((o) => o.id),
+                                  };
+                                })
+                              }
+                              className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+                                opt.isCorrect
+                                  ? 'bg-emerald-700 text-white'
+                                  : 'border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300'
+                              }`}
+                            >
+                              {opt.isCorrect ? 'Là đáp án đúng' : 'Đánh dấu đúng'}
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={opt.content.rawSource}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              updateQuestion(activeQuestion.id, (q) => {
+                                const src = q.multiSelectOptions ?? q.options ?? [];
+                                const next = src.map((o) =>
+                                  o.id === opt.id
+                                    ? { ...o, content: parseMathContent(raw, `${o.id}-c`) }
+                                    : o
+                                );
+                                return { ...q, multiSelectOptions: next };
+                              });
+                            }}
+                            className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-mono"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {(activeQuestion.universalType ?? activeQuestion.type) !== 'multi-select' &&
+                activeQuestion.type === 'mcq' &&
+                activeQuestion.options && (
                 <div className="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
@@ -1690,7 +1864,172 @@ export function MathExamEditor({
                 </div>
               )}
 
-              {activeQuestion.type === 'short-answer' && (
+              {(activeQuestion.universalType ?? activeQuestion.type) === 'fill-blank' &&
+                activeQuestion.fillBlank && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    Đáp án từng chỗ trống Điền khuyết ({activeQuestion.fillBlank.slots.length} vị trí)
+                  </div>
+                  <div className="space-y-2">
+                    {activeQuestion.fillBlank.slots.map((slot, sIdx) => (
+                      <div key={slot.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                        <span className="sm:col-span-3 font-mono-num text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          Chỗ trống ({slot.slotNumber || sIdx + 1})
+                        </span>
+                        <input
+                          type="text"
+                          value={slot.acceptedAnswers.join(' | ')}
+                          onChange={(e) => {
+                            const answers = e.target.value
+                              .split('|')
+                              .map((s) => s.trim())
+                              .filter(Boolean);
+                            updateQuestion(activeQuestion.id, (q) => ({
+                              ...q,
+                              fillBlank: q.fillBlank
+                                ? {
+                                    ...q.fillBlank,
+                                    slots: q.fillBlank.slots.map((sl) =>
+                                      sl.id === slot.id ? { ...sl, acceptedAnswers: answers } : sl
+                                    ),
+                                  }
+                                : undefined,
+                            }));
+                          }}
+                          placeholder="Đáp án đúng (ngăn cách nhiều phương án bằng |)"
+                          className="sm:col-span-9 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-mono"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(activeQuestion.universalType ?? activeQuestion.type) === 'matching' &&
+                activeQuestion.matching && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Câu hỏi Ghép đôi ({activeQuestion.matching.leftItems.length} cột A · {activeQuestion.matching.rightItems.length} cột B)
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={activeQuestion.matching.allowShuffleRight}
+                        onChange={(e) =>
+                          updateQuestion(activeQuestion.id, (q) => ({
+                            ...q,
+                            matching: q.matching
+                              ? { ...q.matching, allowShuffleRight: e.target.checked }
+                              : undefined,
+                          }))
+                        }
+                      />
+                      <span>Cho phép đảo cột B (ánh xạ ID)</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {activeQuestion.matching.correctPairs.map((pair, pIdx) => {
+                      const left = activeQuestion.matching!.leftItems.find((x) => x.id === pair.leftItemId);
+                      const right = activeQuestion.matching!.rightItems.find((x) => x.id === pair.rightItemId);
+                      return (
+                        <div
+                          key={`${pair.leftItemId}-${pair.rightItemId}-${pIdx}`}
+                          className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 px-2.5 py-2"
+                        >
+                          <div className="font-mono-num font-semibold text-blue-800 dark:text-blue-300">
+                            {left?.originalLabel} ↔ {right?.originalLabel}
+                          </div>
+                          <div className="text-[11px] text-slate-600 dark:text-slate-400 truncate">
+                            {left?.content.rawSource} → {right?.content.rawSource}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {(activeQuestion.universalType ?? activeQuestion.type) === 'ordering' &&
+                activeQuestion.ordering && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Câu hỏi Sắp xếp trình tự ({activeQuestion.ordering.items.length} bước)
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={activeQuestion.lockOptionShuffle}
+                        onChange={(e) =>
+                          updateQuestion(activeQuestion.id, (q) => ({
+                            ...q,
+                            lockOptionShuffle: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span>Khóa thứ tự các mảnh trình bày</span>
+                    </label>
+                  </div>
+                  <div className="space-y-1.5">
+                    {activeQuestion.ordering.items.map((it) => (
+                      <div key={it.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center text-xs">
+                        <span className="sm:col-span-1 font-mono-num font-bold">{it.originalLabel}.</span>
+                        <input
+                          type="text"
+                          value={it.content.rawSource}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            updateQuestion(activeQuestion.id, (q) => ({
+                              ...q,
+                              ordering: q.ordering
+                                ? {
+                                    ...q.ordering,
+                                    items: q.ordering.items.map((x) =>
+                                      x.id === it.id
+                                        ? { ...x, content: parseMathContent(raw, `${x.id}-c`) }
+                                        : x
+                                    ),
+                                  }
+                                : undefined,
+                            }));
+                          }}
+                          className="sm:col-span-9 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 font-mono"
+                        />
+                        <div className="sm:col-span-2 flex items-center gap-1">
+                          <span className="text-[11px] text-slate-500">Hạng:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={activeQuestion.ordering!.items.length}
+                            value={it.correctRank}
+                            onChange={(e) => {
+                              const rk = Math.max(1, Number(e.target.value) || 1);
+                              updateQuestion(activeQuestion.id, (q) => ({
+                                ...q,
+                                ordering: q.ordering
+                                  ? {
+                                      ...q.ordering,
+                                      items: q.ordering.items.map((x) =>
+                                        x.id === it.id ? { ...x, correctRank: rk } : x
+                                      ),
+                                    }
+                                  : undefined,
+                              }));
+                            }}
+                            className="w-14 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-1.5 py-1 font-mono-num"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {activeQuestion.type === 'short-answer' &&
+                !['fill-blank', 'matching', 'ordering'].includes(
+                  activeQuestion.universalType ?? activeQuestion.type
+                ) && (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 pt-2 border-t border-slate-100 dark:border-slate-800">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">

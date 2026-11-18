@@ -544,7 +544,8 @@ export interface MathIntegrityIssue {
     | 'asset'
     | 'lock'
     | 'group'
-    | 'layout';
+    | 'layout'
+    | 'export';
   questionId?: string;
   questionNumber?: number;
   code?: string;
@@ -583,6 +584,37 @@ export interface MixedExamVersion {
 
 export type MathExamStep = 1 | 2 | 3 | 4 | 5;
 
+export interface ExamExportSettings {
+  departmentName: string;
+  schoolName: string;
+  examTitleOverride: string;
+  headerNote: string;
+  footerNote: string;
+  paperMarginMm: 10 | 15 | 20;
+  fontFamily: 'Be Vietnam Pro' | 'Times New Roman';
+  includeAnswerKey: boolean;
+  includeAnswerMatrix: boolean;
+  includeMappingTable: boolean;
+  includeIntegritySummary: boolean;
+  separateAnswerKeySection: boolean;
+}
+
+export interface ExportIntegrityResult {
+  verified: boolean;
+  status: MathIntegrityStatus;
+  checkedAt: string;
+  format: 'pdf-print' | 'docx' | 'zip' | 'json' | 'csv';
+  fileCount: number;
+  verifiedCodes: string[];
+  checks: Array<{
+    id: string;
+    label: string;
+    passed: boolean;
+    detail: string;
+  }>;
+  issues: MathIntegrityIssue[];
+}
+
 export interface MathExamProject {
   id: string;
   title: string;
@@ -592,6 +624,7 @@ export interface MathExamProject {
   subjectId?: ExamSubjectId;
   schemaVersion?: '5.0' | '6.0';
   subjectProfileOverrides?: SubjectProfileOverride;
+  exportSettings?: ExamExportSettings;
   grade: string;
   durationMinutes: number;
   schoolYear: string;

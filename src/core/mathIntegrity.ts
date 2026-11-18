@@ -53,6 +53,14 @@ export function computeContentHash(input: string): string {
   return `${(h1 >>> 0).toString(16).padStart(8, '0')}-${(h2 >>> 0).toString(16).padStart(8, '0')}-${input.length}`;
 }
 
+export function sanitizeSvgSource(svg: string): string {
+  return svg
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<script[\s\S]*?\/>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|xlink:href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '$1="#"');
+}
+
 export function createMathVisualAsset(params: {
   id: string;
   kind: MathVisualAssetKind;
@@ -61,14 +69,18 @@ export function createMathVisualAsset(params: {
   altText?: string;
   required?: boolean;
 }): MathVisualAsset {
+  const safeData =
+    params.sourceData.trim().startsWith('<svg') || params.sourceData.toLowerCase().includes('<svg')
+      ? sanitizeSvgSource(params.sourceData)
+      : params.sourceData;
   return {
     id: params.id,
     kind: params.kind,
     label: params.label,
-    sourceData: params.sourceData,
+    sourceData: safeData,
     altText: params.altText ?? params.label,
     required: params.required ?? true,
-    checksum: computeContentHash(`${params.kind}::${params.label}::${params.sourceData}`),
+    checksum: computeContentHash(`${params.kind}::${params.label}::${safeData}`),
   };
 }
 
@@ -863,6 +875,23 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         code: q.code,
         message: `Câu ${qNum} (${q.code}): ${latexWarn}`,
         recommendation: 'Kiểm tra hiển thị KaTeX ở khung xem trước công thức.',
+      });
+    }
+
+    if (
+      q.stem.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+      q.stem.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+    ) {
+      issues.push({
+        id: `q-legacy-eq-${q.id}`,
+        severity: 'warning',
+        tier: 'WARNING',
+        scope: 'latex',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        message: `Câu ${qNum} (${q.code}) chứa đối tượng công thức Word cũ/OLE hoặc OMML chưa nhận dạng đầy đủ.`,
+        recommendation: 'Chuyển đổi công thức sang LaTeX ($...$) hoặc Word Equation hiện đại để đảm bảo hiển thị.',
       });
     }
 
@@ -2147,5 +2176,40 @@ export function verifyMixedExamIntegrity(
     status,
     issues,
     report,
+  };
+}
+
+/**
+ * Cổng kiểm chứng an toàn trước khi xuất bản (Export Gate):
+ * Từ chối xuất nếu đề gốc hoặc bất kỳ mã đề nào đang ở trạng thái BLOCKED.
+ */
+export function checkExamExportGate(exam: MathExamProject): {
+  canExport: boolean;
+  status: MathIntegrityStatus;
+  blockingReasons: string[];
+} {
+  const pre = evaluatePreMixIntegrity(exam);
+  const reasons: string[] = [];
+
+  if (pre.status === 'BLOCKED') {
+    pre.issues
+      .filter((i) => i.severity === 'error')
+      .forEach((i) => reasons.push(i.message));
+  }
+
+  if (exam.generatedVersions.length === 0) {
+    reasons.push('Chưa sinh mã đề nào để xuất bản.');
+  }
+
+  for (const v of exam.generatedVersions) {
+    if (!v.integrityPassed || v.integrityStatus === 'BLOCKED' || v.integrityReport?.canExport === false) {
+      reasons.push(`Mã đề ${v.code} có trạng thái BLOCKED (lỗi toàn vẹn nội dung hoặc vi phạm khóa).`);
+    }
+  }
+
+  return {
+    canExport: reasons.length === 0,
+    status: reasons.length > 0 ? 'BLOCKED' : pre.status,
+    blockingReasons: Array.from(new Set(reasons)),
   };
 }

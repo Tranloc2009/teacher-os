@@ -85,7 +85,7 @@ function shuffleWithPinnedSlots<T>(
 }
 
 export const MAX_EXAM_CODES = 200;
-export const EXAM_CODE_PRESETS = [2, 4, 10, 20, 40, 100] as const;
+export const EXAM_CODE_PRESETS = [2, 4, 8, 10, 20, 40, 50, 100] as const;
 
 export function resolveExamCodes(exam: MathExamProject): string[] {
   const count = Math.max(1, Math.min(MAX_EXAM_CODES, Math.floor(exam.mixConfig.examCount || 4)));
@@ -235,6 +235,29 @@ interface EffectiveMixRules {
   lockedIds: Set<string>;
 }
 
+function applySubjectOverride(
+  base: EffectiveMixRules,
+  exam: MathExamProject
+): EffectiveMixRules {
+  const ov = exam.subjectProfileOverrides;
+  if (!ov) return base;
+  return {
+    ...base,
+    shuffleQuestions:
+      typeof ov.shuffleQuestions === 'boolean' && exam.mixConfig.level > 0
+        ? ov.shuffleQuestions
+        : base.shuffleQuestions,
+    shuffleMcqOptions:
+      typeof ov.shuffleOptions === 'boolean' && exam.mixConfig.level >= 2
+        ? ov.shuffleOptions
+        : base.shuffleMcqOptions,
+    shufflePerSectionOnly:
+      typeof ov.shufflePerSectionOnly === 'boolean'
+        ? ov.shufflePerSectionOnly
+        : base.shufflePerSectionOnly,
+  };
+}
+
 function getEffectiveRules(exam: MathExamProject): EffectiveMixRules {
   const cfg = exam.mixConfig;
   const lockedIds = new Set<string>(cfg.lockedQuestionIds);
@@ -250,43 +273,55 @@ function getEffectiveRules(exam: MathExamProject): EffectiveMixRules {
     };
   }
   if (cfg.level === 1) {
-    return {
-      shuffleQuestions: true,
-      shuffleMcqOptions: false,
-      keepVdcPositions: false,
-      shufflePerSectionOnly: true,
-      shuffleIndependentTrueFalseStatements: false,
-      lockedIds,
-    };
+    return applySubjectOverride(
+      {
+        shuffleQuestions: true,
+        shuffleMcqOptions: false,
+        keepVdcPositions: false,
+        shufflePerSectionOnly: true,
+        shuffleIndependentTrueFalseStatements: false,
+        lockedIds,
+      },
+      exam
+    );
   }
   if (cfg.level === 2) {
-    return {
-      shuffleQuestions: true,
-      shuffleMcqOptions: true,
-      keepVdcPositions: false,
-      shufflePerSectionOnly: true,
-      shuffleIndependentTrueFalseStatements: false,
-      lockedIds,
-    };
+    return applySubjectOverride(
+      {
+        shuffleQuestions: true,
+        shuffleMcqOptions: true,
+        keepVdcPositions: false,
+        shufflePerSectionOnly: true,
+        shuffleIndependentTrueFalseStatements: false,
+        lockedIds,
+      },
+      exam
+    );
   }
   if (cfg.level === 3) {
-    return {
-      shuffleQuestions: true,
-      shuffleMcqOptions: true,
-      keepVdcPositions: false,
-      shufflePerSectionOnly: true,
-      shuffleIndependentTrueFalseStatements: false,
-      lockedIds,
-    };
+    return applySubjectOverride(
+      {
+        shuffleQuestions: true,
+        shuffleMcqOptions: true,
+        keepVdcPositions: false,
+        shufflePerSectionOnly: true,
+        shuffleIndependentTrueFalseStatements: false,
+        lockedIds,
+      },
+      exam
+    );
   }
-  return {
-    shuffleQuestions: cfg.shuffleQuestions,
-    shuffleMcqOptions: cfg.shuffleMcqOptions,
-    keepVdcPositions: cfg.keepVdcPositions,
-    shufflePerSectionOnly: cfg.shufflePerSectionOnly,
-    shuffleIndependentTrueFalseStatements: cfg.shuffleIndependentTrueFalseStatements,
-    lockedIds,
-  };
+  return applySubjectOverride(
+    {
+      shuffleQuestions: cfg.shuffleQuestions,
+      shuffleMcqOptions: cfg.shuffleMcqOptions,
+      keepVdcPositions: cfg.keepVdcPositions,
+      shufflePerSectionOnly: cfg.shufflePerSectionOnly,
+      shuffleIndependentTrueFalseStatements: cfg.shuffleIndependentTrueFalseStatements,
+      lockedIds,
+    },
+    exam
+  );
 }
 
 function selectQuestionsByMatrix(
@@ -1053,6 +1088,97 @@ export function generateMixedExams(exam: MathExamProject): {
       versions.push(chosenVersion);
     }
   });
+
+  return {
+    versions,
+    snapshot,
+    warnings,
+    errors: [],
+  };
+}
+
+/**
+ * Phiên bản bất đồng bộ chia nhỏ tác vụ theo từng cụm mã đề để giữ mượt giao diện khi tạo 20–200 mã đề
+ * và hỗ trợ hủy ngang (AbortSignal).
+ */
+export async function generateMixedExamsAsync(
+  exam: MathExamProject,
+  options?: {
+    chunkSize?: number;
+    onProgress?: (completed: number, total: number) => void;
+    signal?: AbortSignal;
+  }
+): Promise<{
+  versions: MixedExamVersion[];
+  snapshot: OriginalExamSnapshot | null;
+  warnings: string[];
+  errors: string[];
+  cancelled?: boolean;
+}> {
+  const configIssues = validateMixConfiguration(exam);
+  const errors = configIssues.filter((i) => i.severity === 'error').map((i) => i.message);
+  const warnings = configIssues
+    .filter((i) => i.severity === 'warning')
+    .map((i) => i.message);
+
+  if (errors.length > 0) {
+    return {
+      versions: [],
+      snapshot: null,
+      warnings,
+      errors,
+    };
+  }
+
+  const snapshot = createOriginalExamSnapshot(exam);
+  const codes = resolveExamCodes(exam);
+  const rules = getEffectiveRules(exam);
+  const baseSeed = exam.mixConfig.seed.trim() || 'teacheros-math-2025';
+  const versions: MixedExamVersion[] = [];
+  const seenFingerprints = new Set<string>();
+  const chunkSize = Math.max(1, options?.chunkSize ?? 5);
+
+  for (let idx = 0; idx < codes.length; idx++) {
+    if (options?.signal?.aborted) {
+      return {
+        versions: [],
+        snapshot: null,
+        warnings,
+        errors: [],
+        cancelled: true,
+      };
+    }
+
+    const code = codes[idx];
+    let chosenVersion: MixedExamVersion | null = null;
+    const maxAttempts = rules.shuffleQuestions || rules.shuffleMcqOptions ? 40 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const attemptSeed = `${baseSeed}::code=${code}::idx=${idx}::try=${attempt}`;
+      const candidate = buildUnverifiedSingleVersion(exam, code, attemptSeed, rules);
+      const fp = buildVersionFingerprint(candidate);
+
+      if (!seenFingerprints.has(fp) || attempt === maxAttempts - 1) {
+        if (seenFingerprints.has(fp) && exam.mixConfig.level > 0) {
+          candidate.integrityWarnings.push(
+            `Mã đề ${code} có cấu trúc trùng với một mã đề khác do ràng buộc khóa chặt hoặc số câu tự do quá ít.`
+          );
+        }
+        seenFingerprints.add(fp);
+        chosenVersion = finalizeVerifiedVersion(exam, snapshot, candidate);
+        break;
+      }
+    }
+
+    if (chosenVersion) {
+      versions.push(chosenVersion);
+    }
+
+    options?.onProgress?.(idx + 1, codes.length);
+    if ((idx + 1) % chunkSize === 0 && idx + 1 < codes.length) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
 
   return {
     versions,

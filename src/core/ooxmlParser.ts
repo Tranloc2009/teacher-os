@@ -34,6 +34,31 @@ export interface DocxExtractionResult {
   assets: MathVisualAsset[];
   warnings: string[];
   hasLegacyOleEquation: boolean;
+  hasVbaMacro?: boolean;
+}
+
+export const DOCX_MAX_FILE_BYTES = 50 * 1024 * 1024;
+export const DOCX_MAX_ZIP_ENTRIES = 2500;
+export const DOCX_MAX_XML_BYTES = 35 * 1024 * 1024;
+
+/**
+ * Làm sạch SVG trước khi render hoặc đóng gói: loại bỏ script, event handler on*, foreignObject script và javascript: URI.
+ */
+export function sanitizeSvgMarkup(svg: string): string {
+  return svg
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<script[\s\S]*?\/>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|xlink:href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '$1="#"');
+}
+
+function assertSafeXmlPayload(xml: string, partName: string): void {
+  if (xml.length > DOCX_MAX_XML_BYTES) {
+    throw new Error(`Tệp XML "${partName}" vượt quá giới hạn an toàn (${Math.round(DOCX_MAX_XML_BYTES / (1024 * 1024))} MB).`);
+  }
+  if (/<!(?:DOCTYPE|ENTITY)\b/i.test(xml)) {
+    throw new Error(`Tệp "${partName}" chứa khai báo <!DOCTYPE>/<!ENTITY> không được phép vì lý do bảo mật XXE.`);
+  }
 }
 
 export function decodeXmlEntities(input: string): string {
@@ -633,13 +658,34 @@ function extractParagraphContent(
 export async function extractDocxDocument(
   buffer: ArrayBuffer | Uint8Array
 ): Promise<DocxExtractionResult> {
+  const byteLen = buffer instanceof ArrayBuffer ? buffer.byteLength : buffer.byteLength;
+  if (byteLen > DOCX_MAX_FILE_BYTES) {
+    throw new Error('File .docx vượt quá giới hạn 50 MB.');
+  }
+
   const zip = await JSZip.loadAsync(buffer);
+  const entryNames = Object.keys(zip.files);
+  if (entryNames.length > DOCX_MAX_ZIP_ENTRIES) {
+    throw new Error(`File .docx chứa quá nhiều mục (${entryNames.length} > ${DOCX_MAX_ZIP_ENTRIES}), có thể là ZIP không an toàn.`);
+  }
+  for (const name of entryNames) {
+    if (name.includes('..') || name.startsWith('/')) {
+      throw new Error(`Đường dẫn không hợp lệ bên trong gói DOCX: "${name}".`);
+    }
+  }
+
+  const hasVbaMacro = entryNames.some((n) => /vbaProject\.bin$/i.test(n));
   const documentFile = zip.file('word/document.xml');
   if (!documentFile) {
     throw new Error('File .docx không hợp lệ (thiếu word/document.xml).');
   }
 
   const warnings: string[] = [];
+  if (hasVbaMacro) {
+    warnings.push(
+      'Cảnh báo bảo mật: File .docx có chứa macro VBA (vbaProject.bin). Hệ thống đã bỏ qua hoàn toàn macro và chỉ đọc dữ liệu văn bản/XML.'
+    );
+  }
   const relsById = new Map<string, string>();
   const assets: MathVisualAsset[] = [];
   const assetsByRelTarget = new Map<string, MathVisualAsset>();
@@ -648,6 +694,7 @@ export async function extractDocxDocument(
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {
     const relsXml = await relsFile.async('string');
+    assertSafeXmlPayload(relsXml, 'word/_rels/document.xml.rels');
     const relsTree = parseXmlTree(relsXml);
     const relNodes = findAllDescendants(relsTree, 'Relationship');
     for (const rel of relNodes) {
@@ -666,7 +713,18 @@ export async function extractDocxDocument(
         const ext = normalizedTarget.split('.').pop() ?? '';
         const mimeInfo = getMimeFromExt(ext);
         if (mediaEntry && mimeInfo.supported) {
-          const base64 = await mediaEntry.async('base64');
+          let base64 = await mediaEntry.async('base64');
+          if (ext.toLowerCase() === 'svg') {
+            const rawSvg = await mediaEntry.async('string');
+            const cleanSvg = sanitizeSvgMarkup(rawSvg);
+            if (cleanSvg !== rawSvg) {
+              warnings.push(`Đã loại bỏ thẻ script/thuộc tính sự kiện không an toàn trong hình SVG (${normalizedTarget}).`);
+            }
+            const bytes = new TextEncoder().encode(cleanSvg);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            base64 = typeof btoa === 'function' ? btoa(bin) : Buffer.from(bytes).toString('base64');
+          }
           const dataUrl = `data:${mimeInfo.mime};base64,${base64}`;
           const fileName = normalizedTarget.split('/').pop() ?? `image.${ext}`;
           const assetId = `docx-img-${assets.length + 1}`;
@@ -689,6 +747,7 @@ export async function extractDocxDocument(
   }
 
   const docXml = await documentFile.async('string');
+  assertSafeXmlPayload(docXml, 'word/document.xml');
   const docTree = parseXmlTree(docXml);
   const body = findFirstDescendant(docTree, 'w:body');
   if (!body) {
@@ -782,5 +841,6 @@ export async function extractDocxDocument(
     assets,
     warnings: Array.from(new Set(warnings)),
     hasLegacyOleEquation,
+    hasVbaMacro,
   };
 }

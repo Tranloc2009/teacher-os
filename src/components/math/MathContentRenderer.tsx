@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import katex from 'katex';
 import { MathContentPayload, MathVisualAsset } from '../../types/mathExam';
-import { parseMathContent } from '../../core/mathIntegrity';
+import { parseMathContent, sanitizeSvgSource } from '../../core/mathIntegrity';
 
 interface MathContentRendererProps {
   payload?: MathContentPayload;
@@ -128,7 +128,7 @@ export function MathVisualAssetRenderer({ asset, compact = false }: MathVisualAs
           className={`rounded border border-slate-200 bg-white p-2 flex justify-center overflow-x-auto ${
             compact ? 'max-h-36' : ''
           }`}
-          dangerouslySetInnerHTML={{ __html: asset.sourceData }}
+          dangerouslySetInnerHTML={{ __html: sanitizeSvgSource(asset.sourceData) }}
         />
       ) : asset.kind === 'data-table' ? (
         <pre className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-2 text-[11px] font-mono text-slate-800 dark:text-slate-200 overflow-x-auto whitespace-pre">

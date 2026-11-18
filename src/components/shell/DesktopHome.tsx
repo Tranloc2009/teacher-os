@@ -646,10 +646,10 @@ export function DesktopHome({
                   <Calculator className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" aria-hidden="true" />
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                      Math Exam Mixer
+                      Exam Mixer Pro 6.0
                     </div>
                     <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                      Trộn đề Toán theo ma trận
+                      Trộn đề đa môn theo ma trận
                     </div>
                   </div>
                 </div>

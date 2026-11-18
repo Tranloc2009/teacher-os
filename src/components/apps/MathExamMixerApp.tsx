@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
   CheckCircle2,
   Copy,
   Download,
+  FileArchive,
   FilePlus2,
+  FileSpreadsheet,
+  FileText,
   HelpCircle,
   Lock,
   Printer,
@@ -13,7 +16,9 @@ import {
   ShieldAlert,
   ShieldCheck,
   Shuffle,
+  SlidersHorizontal,
   Trash2,
+  XCircle,
 } from 'lucide-react';
 import { ContextualAcademyBar } from '../tutorial/ContextualAcademyBar';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
@@ -21,33 +26,54 @@ import { Button, PageBanner } from '../ui/DesignSystem';
 import {
   COGNITIVE_LEVEL_LABELS,
   CognitiveLevel,
-  MATH_QUESTION_TYPE_LABELS,
+  ExamExportSettings,
+  ExportIntegrityResult,
   MATH_TOPICS,
   MIX_LEVEL_DESCRIPTIONS,
   MathExamProject,
   MathExamStep,
   MathIntegrityReport,
+  MathQuestion,
   MathQuestionType,
   MixLevel,
+  QuestionGroup,
+  UNIVERSAL_QUESTION_TYPE_LABELS,
+  UniversalQuestionType,
 } from '../../types/mathExam';
 import {
   auditOriginalExamIntegrity,
+  checkExamExportGate,
   computeLockStats,
   createOriginalExamSnapshot,
   estimateMaxDistinctPermutations,
   evaluatePreMixIntegrity,
+  getOptionLetterLabel,
+  getStatementLetterLabel,
   verifyMixedExamIntegrity,
 } from '../../core/mathIntegrity';
 import {
   EXAM_CODE_PRESETS,
   MAX_EXAM_CODES,
   buildDefaultMatrixRules,
-  generateMixedExams,
+  generateMixedExamsAsync,
   validateMixConfiguration,
 } from '../../core/mathShuffleEngine';
+import {
+  getSubjectProfile,
+  getUniversalQuestionType,
+  resolveSubjectId,
+} from '../../core/subjectProfileRegistry';
+import {
+  buildAnswerKeyDocxBuffer,
+  buildConsolidatedAnswerCsv,
+  buildStudentExamDocxBuffer,
+  exportMixedExamZipBundle,
+  verifyExportedDocxBuffer,
+} from '../../core/examExportEngine';
 import { createEmptyMathExamProject } from '../../data/demoMathExams';
 import { createId } from '../../db/database';
 import { MathExamEditor } from '../math/MathExamEditor';
+import { MathExamPrintPreview } from '../math/MathExamPrintPreview';
 import {
   MathContentRenderer,
   MathVisualAssetRenderer,
@@ -66,12 +92,21 @@ interface MathExamMixerAppProps {
 }
 
 const STEP_TABS: Array<{ step: MathExamStep; label: string }> = [
-  { step: 1, label: '1. Nhập đề thi' },
+  { step: 1, label: '1. Nhập đề & Hồ sơ môn' },
   { step: 2, label: '2. Xác nhận đáp án gốc' },
-  { step: 3, label: '3. Thiết lập quy tắc trộn' },
-  { step: 4, label: '4. Kiểm tra mã đề' },
-  { step: 5, label: '5. Tổng quan xuất đề' },
+  { step: 3, label: '3. Quy tắc trộn & Số mã' },
+  { step: 4, label: '4. Kiểm tra & So sánh' },
+  { step: 5, label: '5. Kiểm chứng & Xuất đề' },
 ];
+
+function triggerBlobDownload(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export function MathExamMixerApp({
   mathExams,
@@ -85,20 +120,47 @@ export function MathExamMixerApp({
   );
   const [step, setStep] = useState<MathExamStep>(1);
   const [selectedCodeTab, setSelectedCodeTab] = useState<string>('');
-  const [step4ViewMode, setStep4ViewMode] = useState<'compare' | 'answer-matrix'>('compare');
+  const [compareCodeTab, setCompareCodeTab] = useState<string>('');
+  const [step4ViewMode, setStep4ViewMode] = useState<
+    'compare' | 'compare-codes' | 'answer-matrix'
+  >('compare');
   const [codeBatchPage, setCodeBatchPage] = useState<number>(0);
   const [mixErrors, setMixErrors] = useState<string[]>([]);
   const [mixWarnings, setMixWarnings] = useState<string[]>([]);
+  const [mixProgress, setMixProgress] = useState<{ done: number; total: number } | null>(null);
+  const [exportBusy, setExportBusy] = useState<string | null>(null);
+  const [lastExportIntegrity, setLastExportIntegrity] =
+    useState<ExportIntegrityResult | null>(null);
+  const mixAbortRef = useRef<AbortController | null>(null);
   const tutorial = useOptionalTutorial();
+
+  useEffect(() => {
+    return () => {
+      mixAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (tutorial?.activeTutorial?.tutorialId !== 'tutorial.math-mixer') return;
     const sid = tutorial.currentStep?.stepId;
-    if ((sid === 'math-step-overview' || sid === 'math-lock-controls') && step !== 1) {
+    if (
+      (sid === 'math-step-overview' ||
+        sid === 'math-subject-profile' ||
+        sid === 'math-import-source' ||
+        sid === 'math-lock-controls') &&
+      step !== 1
+    ) {
       setStep(1);
+    } else if (sid === 'math-confirm-step' && step !== 2) {
+      setStep(2);
     } else if (sid === 'math-mix-rules' && step !== 3) {
       setStep(3);
-    } else if (sid === 'math-verify-export' && step !== 5) {
+    } else if (sid === 'math-compare-codes' && step !== 4) {
+      setStep(4);
+    } else if (
+      (sid === 'math-verify-export' || sid === 'math-export-formats') &&
+      step !== 5
+    ) {
       setStep(5);
     }
   }, [step, tutorial?.activeTutorial?.tutorialId, tutorial?.currentStep?.stepId]);
@@ -109,6 +171,18 @@ export function MathExamMixerApp({
       mathExams[0] ??
       null,
     [mathExams, selectedExamId]
+  );
+
+  useEffect(() => {
+    setLastExportIntegrity(null);
+  }, [activeExam?.id, activeExam?.generatedVersions.length]);
+
+  const activeSubjectProfile = useMemo(
+    () =>
+      activeExam
+        ? getSubjectProfile(resolveSubjectId(activeExam.subjectId || activeExam.subject))
+        : getSubjectProfile('toan'),
+    [activeExam]
   );
 
   const originalIssues = useMemo(
@@ -136,6 +210,11 @@ export function MathExamMixerApp({
     [activeExam]
   );
 
+  const exportGate = useMemo(
+    () => (activeExam ? checkExamExportGate(activeExam) : null),
+    [activeExam]
+  );
+
   const handleExamChange = (next: MathExamProject) => {
     void onSaveMathExam(next, true);
   };
@@ -147,7 +226,8 @@ export function MathExamMixerApp({
     setStep(1);
     setMixErrors([]);
     setMixWarnings([]);
-    onShowToast('success', 'Đã tạo đề kiểm tra Toán mới.');
+    setLastExportIntegrity(null);
+    onShowToast('success', 'Đã tạo đề kiểm tra mới.');
   };
 
   const handleRunShuffle = async () => {
@@ -160,31 +240,56 @@ export function MathExamMixerApp({
       return;
     }
 
-    const res = generateMixedExams(activeExam);
-    setMixErrors(res.errors);
-    setMixWarnings(res.warnings);
+    mixAbortRef.current?.abort();
+    const controller = new AbortController();
+    mixAbortRef.current = controller;
+    const totalTarget = Math.max(1, activeExam.mixConfig.examCount || 4);
+    setMixProgress({ done: 0, total: totalTarget });
 
-    if (res.errors.length > 0) {
-      onShowToast('error', res.errors[0]);
-      return;
+    try {
+      const res = await generateMixedExamsAsync(activeExam, {
+        chunkSize: 5,
+        signal: controller.signal,
+        onProgress: (done, total) => setMixProgress({ done, total }),
+      });
+
+      if (res.cancelled) {
+        onShowToast('info', 'Đã hủy quá trình trộn đề hàng loạt.');
+        return;
+      }
+
+      setMixErrors(res.errors);
+      setMixWarnings(res.warnings);
+
+      if (res.errors.length > 0) {
+        onShowToast('error', res.errors[0]);
+        return;
+      }
+
+      const updated: MathExamProject = {
+        ...activeExam,
+        generatedVersions: res.versions,
+        lastIntegrityReport: preMixReport ?? undefined,
+        lastStep: 4,
+        status: 'ready',
+        updatedAt: new Date().toISOString(),
+      };
+      await onSaveMathExam(updated, true);
+      setSelectedCodeTab(res.versions[0]?.code ?? '');
+      setCompareCodeTab(res.versions[1]?.code ?? res.versions[0]?.code ?? '');
+      setCodeBatchPage(0);
+      setLastExportIntegrity(null);
+      setStep(4);
+      onShowToast(
+        'success',
+        `Đã tạo và kiểm chứng toàn vẹn ${res.versions.length} mã đề (${activeSubjectProfile.name}).`
+      );
+    } finally {
+      setMixProgress(null);
+      if (mixAbortRef.current === controller) {
+        mixAbortRef.current = null;
+      }
     }
-
-    const updated: MathExamProject = {
-      ...activeExam,
-      generatedVersions: res.versions,
-      lastIntegrityReport: preMixReport ?? undefined,
-      lastStep: 4,
-      status: 'ready',
-      updatedAt: new Date().toISOString(),
-    };
-    await onSaveMathExam(updated, true);
-    setSelectedCodeTab(res.versions[0]?.code ?? '');
-    setCodeBatchPage(0);
-    setStep(4);
-    onShowToast(
-      'success',
-      `Đã tạo và kiểm chứng toàn vẹn ${res.versions.length} mã đề.`
-    );
   };
 
   const handleReverifyVersions = async () => {
@@ -225,16 +330,18 @@ export function MathExamMixerApp({
 
   const handleExportMixedBundleJson = () => {
     if (!activeExam || activeExam.generatedVersions.length === 0) return;
-    const anyBlocked = activeExam.generatedVersions.some(
-      (v) => !v.integrityPassed || v.integrityStatus === 'BLOCKED'
-    );
-    if (anyBlocked || preMixReport?.status === 'BLOCKED') {
-      onShowToast('error', 'Xuất đề bị chặn do phát hiện lỗi toàn vẹn BLOCKED.');
+    if (!exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất đề bị chặn do phát hiện lỗi toàn vẹn BLOCKED.'
+      );
       return;
     }
     const payload = {
       exportedAt: new Date().toISOString(),
       title: activeExam.title,
+      subject: activeSubjectProfile.name,
+      subjectId: activeSubjectProfile.id,
       grade: activeExam.grade,
       durationMinutes: activeExam.durationMinutes,
       versions: activeExam.generatedVersions.map((v) => ({
@@ -244,16 +351,128 @@ export function MathExamMixerApp({
         questions: v.questions,
       })),
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json;charset=utf-8',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `math-exam-codes-${activeExam.id}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(
+      new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      }),
+      `exam-codes-${activeExam.id}.json`
+    );
     onShowToast('success', 'Đã xuất tệp JSON bộ mã đề đã kiểm chứng.');
+  };
+
+  const handleExportZipBundle = async () => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất đề bị chặn do phát hiện lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    setExportBusy('zip');
+    try {
+      const { zipBytes, fileName, integrity } = await exportMixedExamZipBundle(activeExam);
+      setLastExportIntegrity(integrity);
+      const bufferCopy = new Uint8Array(zipBytes).buffer;
+      triggerBlobDownload(new Blob([bufferCopy], { type: 'application/zip' }), fileName);
+      onShowToast(
+        'success',
+        `Đã xuất & kiểm chứng ngược gói ZIP (${integrity.verifiedCodes.length} mã đề + đáp án DOCX/CSV).`
+      );
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể đóng gói tệp ZIP xuất đề.'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportSingleDocx = async (code: string) => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất DOCX bị chặn do lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    const ver = activeExam.generatedVersions.find((v) => v.code === code);
+    if (!ver) return;
+    setExportBusy(`docx-${ver.code}`);
+    try {
+      const bytes = await buildStudentExamDocxBuffer(activeExam, ver);
+      const check = await verifyExportedDocxBuffer(bytes, ver, activeExam);
+      if (!check.passed) {
+        onShowToast(
+          'error',
+          check.issues[0]?.message ?? `Kiểm chứng DOCX Mã ${ver.code} không đạt.`
+        );
+        return;
+      }
+      const bufferCopy = new Uint8Array(bytes).buffer;
+      triggerBlobDownload(
+        new Blob([bufferCopy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        `Ma_de_${ver.code}.docx`
+      );
+      onShowToast(
+        'success',
+        `Đã xuất & kiểm chứng sạch Mã đề ${ver.code}.docx (0% rò rỉ đáp án).`
+      );
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể tạo tệp Word (.docx).'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportAnswerKeyDocx = async () => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất Đáp án DOCX bị chặn do lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    setExportBusy('answer-docx');
+    try {
+      const bytes = await buildAnswerKeyDocxBuffer(activeExam);
+      const bufferCopy = new Uint8Array(bytes).buffer;
+      triggerBlobDownload(
+        new Blob([bufferCopy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        `Dap_an_va_Anh_xa_${activeExam.id}.docx`
+      );
+      onShowToast('success', 'Đã xuất file Word Đáp án tổng hợp & Bảng ánh xạ.');
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể tạo file Đáp án DOCX.'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportAnswerCsv = () => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất CSV bị chặn do lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    const csv = buildConsolidatedAnswerCsv(activeExam);
+    triggerBlobDownload(
+      new Blob([csv], { type: 'text/csv;charset=utf-8' }),
+      `Bang_dap_an_${activeExam.id}.csv`
+    );
+    onShowToast('success', 'Đã xuất bảng đáp án CSV (hỗ trợ chấm trắc nghiệm/Excel).');
   };
 
   if (!activeExam) {
@@ -261,14 +480,14 @@ export function MathExamMixerApp({
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
         <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-10 text-center space-y-3">
           <h1 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
-            Math Exam Mixer Pro — Chưa có đề thi Toán nào
+            Exam Mixer Pro 6.0 — Chưa có đề thi nào
           </h1>
           <p className="text-sm text-slate-600 dark:text-slate-400">
-            Khởi tạo đề kiểm tra Toán học theo cấu trúc GDPT 2018 (4 dạng câu hỏi, hỗ trợ LaTeX &amp; KaTeX ngoại tuyến).
+            Khởi tạo đề kiểm tra đa môn (Toán, Lý, Hóa, Sinh, Văn, Anh, Sử, Địa, GDKT&amp;PL, Tin, Công nghệ...) bảo toàn nguyên vẹn công thức và đáp án gốc.
           </p>
           <Button variant="primary" onClick={() => void handleCreateExam()}>
             <FilePlus2 className="h-4 w-4" aria-hidden="true" />
-            <span>Tạo đề kiểm tra Toán mới</span>
+            <span>Tạo đề kiểm tra mới</span>
           </Button>
         </div>
       </main>
@@ -280,19 +499,26 @@ export function MathExamMixerApp({
     activeExam.generatedVersions[0] ??
     null;
 
+  const compareVersionB =
+    activeExam.generatedVersions.find((v) => v.code === compareCodeTab) ??
+    activeExam.generatedVersions[1] ??
+    activeExam.generatedVersions[0] ??
+    null;
+
   return (
     <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 space-y-6">
-      <ContextualAcademyBar
-        tutorialId="tutorial.math-mixer"
-        label="Math Exam Mixer Pro"
-        description="Khóa vị trí câu/phương án bằng Math Lock và kiểm chứng 6 hạng mục trước khi xuất mã đề."
-      />
+      <div className="no-print space-y-6">
+        <ContextualAcademyBar
+          tutorialId="tutorial.math-mixer"
+          label="Exam Mixer Pro 6.0"
+          description="Trộn đề đa môn 10 dạng câu hỏi với Hồ sơ môn học, khóa 5 lớp và xuất DOCX/ZIP/PDF đã kiểm chứng toàn vẹn."
+        />
 
-      <PageBanner
-        tourId="math-header"
-        title="Math Exam Mixer Pro"
-        subtitle="Hoán vị khối dữ liệu bất biến theo ID · Khóa Math Lock · Bảo toàn 100% công thức toán học và đáp án gốc."
-        icon={<Shuffle className="h-5 w-5" aria-hidden="true" />}
+        <PageBanner
+          tourId="math-header"
+          title="Exam Mixer Pro 6.0"
+          subtitle={`Đang mở: ${activeSubjectProfile.name} · Hoán vị khối dữ liệu bất biến theo ID · Xuất DOCX, ZIP & PDF A4 đã kiểm chứng toàn vẹn.`}
+          icon={<Shuffle className="h-5 w-5" aria-hidden="true" />}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -401,6 +627,7 @@ export function MathExamMixerApp({
           </nav>
         </div>
       </PageBanner>
+      </div>
 
       {/* Step 1 & Step 2 */}
       {(step === 1 || step === 2) && (
@@ -534,23 +761,35 @@ export function MathExamMixerApp({
                       >
                         <select
                           aria-label="Dạng câu ma trận"
-                          value={rule.type}
-                          onChange={(e) =>
+                          value={rule.universalType ?? rule.type}
+                          onChange={(e) => {
+                            const selectedUType = e.target.value as UniversalQuestionType;
+                            const mappedBase: MathQuestionType =
+                              selectedUType === 'mcq' ||
+                              selectedUType === 'multi-select' ||
+                              selectedUType === 'reading-comprehension' ||
+                              selectedUType === 'shared-context'
+                                ? 'mcq'
+                                : selectedUType === 'true-false'
+                                ? 'true-false'
+                                : selectedUType === 'essay'
+                                ? 'essay'
+                                : 'short-answer';
                             handleExamChange({
                               ...activeExam,
                               mixConfig: {
                                 ...activeExam.mixConfig,
                                 matrixRules: activeExam.mixConfig.matrixRules.map((r) =>
                                   r.id === rule.id
-                                    ? { ...r, type: e.target.value as MathQuestionType }
+                                    ? { ...r, type: mappedBase, universalType: selectedUType }
                                     : r
                                 ),
                               },
-                            })
-                          }
+                            });
+                          }}
                           className="sm:col-span-3 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs"
                         >
-                          {Object.entries(MATH_QUESTION_TYPE_LABELS).map(([k, lbl]) => (
+                          {Object.entries(UNIVERSAL_QUESTION_TYPE_LABELS).map(([k, lbl]) => (
                             <option key={k} value={k}>
                               {lbl}
                             </option>
@@ -597,7 +836,12 @@ export function MathExamMixerApp({
                           className="sm:col-span-3 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs"
                         >
                           <option value="Tất cả">Tất cả chuyên đề</option>
-                          {MATH_TOPICS.map((t) => (
+                          {Array.from(
+                            new Set([
+                              ...activeExam.questions.map((q) => q.topic).filter(Boolean),
+                              ...(activeSubjectProfile.id === 'toan' ? MATH_TOPICS : []),
+                            ])
+                          ).map((t) => (
                             <option key={t} value={t}>
                               {t}
                             </option>
@@ -740,6 +984,106 @@ export function MathExamMixerApp({
                   </div>
                 </div>
               )}
+
+              {/* Subject Profile Overrides Card */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/30 p-3.5 space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                    <span>Tùy chỉnh Hồ sơ môn {activeSubjectProfile.name}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleExamChange({
+                        ...activeExam,
+                        subjectProfileOverrides: undefined,
+                      })
+                    }
+                    className="text-[11px] font-medium text-blue-700 dark:text-blue-400 hover:underline"
+                  >
+                    Khôi phục mặc định môn
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        activeExam.subjectProfileOverrides?.shufflePerSectionOnly ??
+                        activeSubjectProfile.defaultMixPolicy.shufflePerSectionOnly
+                      }
+                      onChange={(e) =>
+                        handleExamChange({
+                          ...activeExam,
+                          subjectProfileOverrides: {
+                            ...(activeExam.subjectProfileOverrides ?? {}),
+                            shufflePerSectionOnly: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>Chỉ trộn nội bộ từng Phần/Section</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        activeExam.subjectProfileOverrides?.lockSharedPassageGroups ??
+                        activeSubjectProfile.defaultMixPolicy.lockSharedPassageGroups
+                      }
+                      onChange={(e) =>
+                        handleExamChange({
+                          ...activeExam,
+                          subjectProfileOverrides: {
+                            ...(activeExam.subjectProfileOverrides ?? {}),
+                            lockSharedPassageGroups: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>Khóa nhóm ngữ liệu đọc hiểu / thí nghiệm</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        activeExam.subjectProfileOverrides?.detectEnglishDependentOptions ??
+                        activeSubjectProfile.answerConstraints.detectEnglishDependentOptions
+                      }
+                      onChange={(e) =>
+                        handleExamChange({
+                          ...activeExam,
+                          subjectProfileOverrides: {
+                            ...(activeExam.subjectProfileOverrides ?? {}),
+                            detectEnglishDependentOptions: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>Chặn trộn phương án phụ thuộc (All/Both/None)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        activeExam.subjectProfileOverrides?.preserveLineBreaksInPoetryOrCode ??
+                        activeSubjectProfile.presentationRules.preserveLineBreaksInPoetryOrCode
+                      }
+                      onChange={(e) =>
+                        handleExamChange({
+                          ...activeExam,
+                          subjectProfileOverrides: {
+                            ...(activeExam.subjectProfileOverrides ?? {}),
+                            preserveLineBreaksInPoetryOrCode: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>Giữ nguyên ngắt dòng thơ / thụt lề code</span>
+                  </label>
+                </div>
+              </div>
             </section>
 
             {/* Right: Exam Codes, Seed, Validation & Trigger */}
@@ -966,6 +1310,32 @@ export function MathExamMixerApp({
                 })()}
               </div>
 
+              {mixProgress && (
+                <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/40 p-3 space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-blue-900 dark:text-blue-200">
+                      Đang sinh &amp; kiểm chứng toàn vẹn: {mixProgress.done}/{mixProgress.total} mã đề...
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => mixAbortRef.current?.abort()}
+                      className="inline-flex items-center gap-1 rounded border border-red-300 dark:border-red-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-red-700 dark:text-red-300"
+                    >
+                      <XCircle className="h-3 w-3" aria-hidden="true" />
+                      <span>Hủy trộn</span>
+                    </button>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-blue-100 dark:bg-blue-900">
+                    <div
+                      className="h-full bg-blue-600 transition-all"
+                      style={{
+                        width: `${Math.round((mixProgress.done / Math.max(1, mixProgress.total)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
                 <button
                   type="button"
@@ -976,12 +1346,16 @@ export function MathExamMixerApp({
                 </button>
                 <button
                   type="button"
-                  disabled={configIssues.some((i) => i.severity === 'error')}
+                  disabled={
+                    Boolean(mixProgress) || configIssues.some((i) => i.severity === 'error')
+                  }
                   onClick={() => void handleRunShuffle()}
                   className="inline-flex items-center gap-2 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 dark:hover:bg-blue-500 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Trộn đề &amp; Kiểm chứng toàn vẹn</span>
+                  <span>
+                    {mixProgress ? 'Đang xử lý hàng loạt...' : 'Trộn đề & Kiểm chứng toàn vẹn'}
+                  </span>
                 </button>
               </div>
             </section>
@@ -1099,7 +1473,7 @@ export function MathExamMixerApp({
                   )}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setStep4ViewMode('compare')}
@@ -1109,8 +1483,21 @@ export function MathExamMixerApp({
                         : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
                     }`}
                   >
-                    So sánh Đề gốc ↔ Mã đề
+                    Đề gốc ↔ Mã {activeVersion?.code}
                   </button>
+                  {activeExam.generatedVersions.length >= 2 && (
+                    <button
+                      type="button"
+                      onClick={() => setStep4ViewMode('compare-codes')}
+                      className={`rounded-[10px] border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                        step4ViewMode === 'compare-codes'
+                          ? 'border-slate-900 dark:border-slate-200 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900'
+                          : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      So sánh 2 mã đề
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setStep4ViewMode('answer-matrix')}
@@ -1141,7 +1528,87 @@ export function MathExamMixerApp({
                 </div>
               )}
 
-              {step4ViewMode === 'answer-matrix' ? (() => {
+              {step4ViewMode === 'compare-codes' && activeVersion && compareVersionB ? (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="font-semibold text-slate-800 dark:text-slate-200">
+                        Đối chiếu song song hai mã đề đã sinh:
+                      </span>
+                      <span className="font-mono-num font-bold text-blue-700 dark:text-blue-400">
+                        Mã {activeVersion.code}
+                      </span>
+                      <span>↔</span>
+                      <select
+                        aria-label="Chọn mã đề đối chiếu thứ hai"
+                        value={compareVersionB.code}
+                        onChange={(e) => setCompareCodeTab(e.target.value)}
+                        className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-mono-num font-semibold"
+                      >
+                        {activeExam.generatedVersions.map((ver) => (
+                          <option key={ver.code} value={ver.code}>
+                            Mã {ver.code}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <span className="font-mono-num text-[11px] text-slate-500">
+                      Cùng ngân hàng {activeVersion.questions.length} câu · Độc lập thứ tự &amp; phương án
+                    </span>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 divide-y divide-slate-200 dark:divide-slate-800">
+                    <div className="px-4 py-3 bg-slate-50/70 dark:bg-slate-800/50 grid grid-cols-1 lg:grid-cols-12 gap-4 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      <div className="lg:col-span-6">Mã đề {activeVersion.code}</div>
+                      <div className="lg:col-span-6">Mã đề {compareVersionB.code}</div>
+                    </div>
+                    {activeVersion.questions.map((qA, idx) => {
+                      const qB = compareVersionB.questions[idx];
+                      const ansA = activeVersion.answerKeyRows[idx]?.answer ?? '—';
+                      const ansB = compareVersionB.answerKeyRows[idx]?.answer ?? '—';
+                      return (
+                        <div
+                          key={`${activeVersion.code}-${compareVersionB.code}-${idx}`}
+                          className="p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 text-xs"
+                        >
+                          <div className="lg:col-span-6 space-y-1.5 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-mono-num font-bold text-blue-900 dark:text-blue-300">
+                                Câu {idx + 1} · ID {qA.code}
+                              </span>
+                              <span className="font-mono-num font-semibold text-emerald-700 dark:text-emerald-300">
+                                ĐA: {ansA}
+                              </span>
+                            </div>
+                            <div className="text-slate-900 dark:text-slate-100">
+                              <MathContentRenderer payload={qA.stem} />
+                            </div>
+                          </div>
+                          <div className="lg:col-span-6 space-y-1.5 rounded-lg border border-blue-200/70 dark:border-blue-900/50 bg-white dark:bg-slate-900 p-3">
+                            {qB ? (
+                              <>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono-num font-bold text-blue-900 dark:text-blue-300">
+                                    Câu {idx + 1} · ID {qB.code}
+                                  </span>
+                                  <span className="font-mono-num font-semibold text-emerald-700 dark:text-emerald-300">
+                                    ĐA: {ansB}
+                                  </span>
+                                </div>
+                                <div className="text-slate-900 dark:text-slate-100">
+                                  <MathContentRenderer payload={qB.stem} />
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : step4ViewMode === 'answer-matrix' ? (() => {
                 const pageSize = 20;
                 const allVersions = activeExam.generatedVersions;
                 const totalPages = Math.max(1, Math.ceil(allVersions.length / pageSize));
@@ -1284,6 +1751,10 @@ export function MathExamMixerApp({
                       {activeVersion.questions.map((mixedQ, idx) => {
                         const mapping = activeVersion.permutationMap[idx];
                         const origQ = activeExam.questions.find((o) => o.id === mixedQ.id);
+                        const uType = getUniversalQuestionType(mixedQ);
+                        const groupObj: QuestionGroup | undefined = mixedQ.groupId
+                          ? (activeExam.questionGroups ?? []).find((g) => g.id === mixedQ.groupId)
+                          : undefined;
                         return (
                           <div
                             key={`${activeVersion.code}-${mixedQ.id}`}
@@ -1296,9 +1767,15 @@ export function MathExamMixerApp({
                                   Gốc Câu {mapping.originalOrderNumber} ({origQ?.code})
                                 </span>
                                 <span className="text-[11px] text-slate-500">
+                                  {UNIVERSAL_QUESTION_TYPE_LABELS[uType]} ·{' '}
                                   {COGNITIVE_LEVEL_LABELS[mixedQ.cognitiveLevel]}
                                 </span>
                               </div>
+                              {groupObj && (
+                                <div className="rounded bg-blue-50/70 dark:bg-blue-950/30 px-2 py-1 text-[11px] text-blue-900 dark:text-blue-200">
+                                  Nhóm: {groupObj.title}
+                                </div>
+                              )}
                               <div className="text-slate-800 dark:text-slate-200">
                                 {origQ && <MathContentRenderer payload={origQ.stem} />}
                               </div>
@@ -1309,7 +1786,26 @@ export function MathExamMixerApp({
                                   ))}
                                 </div>
                               )}
-                              {origQ?.type === 'mcq' && origQ.options && (
+                              {uType === 'multi-select' && origQ && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
+                                  {(origQ.multiSelectOptions ?? origQ.options ?? []).map((opt, oIdx) => (
+                                    <div
+                                      key={opt.id}
+                                      className={`rounded px-2 py-1 ${
+                                        opt.isCorrect
+                                          ? 'bg-emerald-50 dark:bg-emerald-950/40 font-medium text-emerald-900 dark:text-emerald-200'
+                                          : 'text-slate-600 dark:text-slate-400'
+                                      }`}
+                                    >
+                                      <span className="font-mono-num font-bold mr-1">
+                                        {getOptionLetterLabel(oIdx)}.
+                                      </span>
+                                      <MathContentRenderer payload={opt.content} />
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {uType !== 'multi-select' && origQ?.type === 'mcq' && origQ.options && (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
                                   {origQ.options.map((opt) => (
                                     <div
@@ -1382,7 +1878,26 @@ export function MathExamMixerApp({
                                   ))}
                                 </div>
                               )}
-                              {mixedQ.type === 'mcq' && mixedQ.options && (
+                              {uType === 'multi-select' && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
+                                  {(mixedQ.multiSelectOptions ?? mixedQ.options ?? []).map((opt, oIdx) => (
+                                    <div
+                                      key={opt.id}
+                                      className={`rounded px-2 py-1 ${
+                                        opt.isCorrect
+                                          ? 'bg-emerald-50 dark:bg-emerald-950/40 font-medium text-emerald-900 dark:text-emerald-200'
+                                          : 'text-slate-700 dark:text-slate-300'
+                                      }`}
+                                    >
+                                      <span className="font-mono-num font-bold mr-1">
+                                        {getOptionLetterLabel(oIdx)}.
+                                      </span>
+                                      <MathContentRenderer payload={opt.content} />
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {uType !== 'multi-select' && mixedQ.type === 'mcq' && mixedQ.options && (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
                                   {mixedQ.options.map((opt, oIdx) => {
                                     const newLbl = (['A', 'B', 'C', 'D'] as const)[oIdx];
@@ -1426,7 +1941,25 @@ export function MathExamMixerApp({
                                   })}
                                 </div>
                               )}
-                              {mixedQ.type === 'short-answer' && mixedQ.universalType === 'matching' && mixedQ.matching && (
+                              {uType === 'fill-blank' && mixedQ.fillBlank && (
+                                <div className="space-y-1 pt-1 text-[11px]">
+                                  <div className="font-mono-num text-emerald-800 dark:text-emerald-300">
+                                    Đáp án chỗ trống:{' '}
+                                    {mixedQ.fillBlank.slots
+                                      .map((sl) => `(${sl.slotNumber}) ${sl.acceptedAnswers[0] ?? '?'}`)
+                                      .join(' · ')}
+                                  </div>
+                                  {mixedQ.fillBlank.wordBank && mixedQ.fillBlank.wordBank.length > 0 && (
+                                    <div className="text-slate-600 dark:text-slate-300">
+                                      Word Bank:{' '}
+                                      {mixedQ.fillBlank.wordBank
+                                        .map((w, bIdx) => `${getOptionLetterLabel(bIdx)}. ${w.content.rawSource}`)
+                                        .join(' · ')}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              {uType === 'matching' && mixedQ.matching && (
                                 <div className="grid grid-cols-2 gap-2 pt-1 text-[11px]">
                                   <div className="space-y-0.5">
                                     {mixedQ.matching.leftItems.map((li, lIdx) => (
@@ -1442,7 +1975,7 @@ export function MathExamMixerApp({
                                     {mixedQ.matching.rightItems.map((ri, rIdx) => (
                                       <div key={ri.id}>
                                         <span className="font-mono-num font-bold mr-1">
-                                          {String.fromCharCode(97 + rIdx)}.
+                                          {getStatementLetterLabel(rIdx)}.
                                         </span>
                                         <MathContentRenderer payload={ri.content} />
                                       </div>
@@ -1450,12 +1983,12 @@ export function MathExamMixerApp({
                                   </div>
                                 </div>
                               )}
-                              {mixedQ.type === 'short-answer' && mixedQ.universalType === 'ordering' && mixedQ.ordering && (
+                              {uType === 'ordering' && mixedQ.ordering && (
                                 <div className="space-y-0.5 pt-1 text-[11px]">
                                   {mixedQ.ordering.items.map((it, oIdx) => (
                                     <div key={it.id}>
                                       <span className="font-mono-num font-bold mr-1">
-                                        {String.fromCharCode(97 + oIdx)}.
+                                        {getStatementLetterLabel(oIdx)}.
                                       </span>
                                       <MathContentRenderer payload={it.content} />
                                     </div>
@@ -1463,14 +1996,15 @@ export function MathExamMixerApp({
                                 </div>
                               )}
                               {mixedQ.type === 'short-answer' &&
-                                mixedQ.universalType !== 'matching' &&
-                                mixedQ.universalType !== 'ordering' &&
+                                uType !== 'fill-blank' &&
+                                uType !== 'matching' &&
+                                uType !== 'ordering' &&
                                 mixedQ.shortAnswer && (
-                                <div className="pt-1 font-mono-num text-emerald-800 dark:text-emerald-300">
-                                  Đáp án cố định: {mixedQ.shortAnswer.answerValue}{' '}
-                                  {mixedQ.shortAnswer.unit}
-                                </div>
-                              )}
+                                  <div className="pt-1 font-mono-num text-emerald-800 dark:text-emerald-300">
+                                    Đáp án cố định: {mixedQ.shortAnswer.answerValue}{' '}
+                                    {mixedQ.shortAnswer.unit}
+                                  </div>
+                                )}
                             </div>
                           </div>
                         );
@@ -1484,11 +2018,14 @@ export function MathExamMixerApp({
         </div>
       )}
 
-      {/* Step 5: Pre-Export Integrity Verification Table & Gate */}
+      {/* Step 5: Pre-Export Integrity Verification, Universal Export Hub & A4 Print Preview */}
       {step === 5 && (() => {
         const versions = activeExam.generatedVersions;
         const blockedVersion = versions.find(
-          (v) => !v.integrityPassed || v.integrityStatus === 'BLOCKED' || v.integrityReport?.canExport === false
+          (v) =>
+            !v.integrityPassed ||
+            v.integrityStatus === 'BLOCKED' ||
+            v.integrityReport?.canExport === false
         );
         const warningVersion = versions.find((v) => v.integrityStatus === 'WARNING');
         const exportReport: MathIntegrityReport | null =
@@ -1496,46 +2033,32 @@ export function MathExamMixerApp({
           warningVersion?.integrityReport ??
           versions[0]?.integrityReport ??
           preMixReport;
-        const canExport =
-          versions.length > 0 &&
-          !blockedVersion &&
-          preMixReport?.status !== 'BLOCKED';
+        const canExport = Boolean(exportGate?.canExport);
 
         return (
           <div className="space-y-4">
             <div
               data-tour-id="math-export-gate"
-              className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5"
+              className="no-print rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5"
             >
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2 text-base font-semibold text-slate-950 dark:text-slate-50">
                     <Printer className="h-4 w-4 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                    <span>Bước 5: Kiểm chứng trước khi xuất đề &amp; In A4</span>
+                    <span>Bước 5: Kiểm chứng toàn vẹn &amp; Trung tâm xuất đề 6.0</span>
                     {exportReport && <MathIntegrityBadge status={exportReport.status} />}
                   </div>
                   <p className="text-xs text-slate-600 dark:text-slate-400 max-w-2xl">
-                    Mọi mã đề phải vượt qua 6 hạng mục kiểm tra toàn vẹn (công thức, hình vẽ/bảng biến thiên, cấu trúc ID, đáp án, quy tắc khóa, bố cục A4) trước khi cho phép xuất hoặc in.
+                    Mọi mã đề phải vượt qua kiểm tra toàn vẹn (công thức, hình vẽ/bảng biểu, cấu trúc ID, đáp án, quy tắc khóa) và kiểm chứng ngược OOXML hậu xuất trước khi phát hành.
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setStep(4)}
-                    className="rounded-[10px] border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
-                  >
-                    Quay lại đối soát mã đề
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!canExport}
-                    onClick={handleExportMixedBundleJson}
-                    className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 dark:hover:bg-blue-500 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed whitespace-nowrap"
-                  >
-                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Xuất bộ mã đề (JSON)</span>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setStep(4)}
+                  className="rounded-[10px] border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
+                >
+                  Quay lại đối soát mã đề
+                </button>
               </div>
 
               {!canExport && versions.length > 0 && (
@@ -1543,12 +2066,123 @@ export function MathExamMixerApp({
                   <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
                   <div>
                     <div className="font-semibold">
-                      Xuất đề bị CHẶN (BLOCKED) vì phát hiện lỗi toàn vẹn Toán học hoặc vi phạm Math Lock.
+                      Xuất đề bị CHẶN (BLOCKED) vì phát hiện lỗi toàn vẹn hoặc vi phạm quy tắc khóa.
                     </div>
                     <p className="mt-0.5">
-                      Vui lòng xử lý toàn bộ mục [BLOCKED] bên dưới và bấm "Kiểm tra toàn vẹn" lại trước khi xuất bản.
+                      {exportGate?.blockingReasons.join(' ') ||
+                        'Vui lòng xử lý toàn bộ mục [BLOCKED] bên dưới và bấm "Kiểm tra toàn vẹn" lại trước khi xuất bản.'}
                     </p>
                   </div>
+                </div>
+              )}
+
+              {/* Universal Export Hub */}
+              {versions.length > 0 && (
+                <div
+                  data-tour-id="math-export-hub"
+                  className="rounded-xl border border-blue-200/80 dark:border-blue-900/60 bg-blue-50/50 dark:bg-blue-950/20 p-4 space-y-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Xuất bản đề thi cục bộ (DOCX / ZIP / CSV / JSON / In A4 PDF)
+                    </span>
+                    <span className="font-mono-num text-[11px] text-slate-500">
+                      {versions.length} mã đề · {activeSubjectProfile.name}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={!canExport || exportBusy !== null}
+                      onClick={() => void handleExportZipBundle()}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700 dark:hover:bg-blue-500 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      <FileArchive className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {exportBusy === 'zip'
+                          ? 'Đang đóng gói & kiểm chứng ZIP...'
+                          : `Xuất trọn bộ .ZIP (${versions.length} mã DOCX + Đáp án)`}
+                      </span>
+                    </button>
+
+                    {activeVersion && (
+                      <button
+                        type="button"
+                        disabled={!canExport || exportBusy !== null}
+                        onClick={() => void handleExportSingleDocx(activeVersion.code)}
+                        className="inline-flex items-center gap-1.5 rounded-[10px] border border-blue-300 dark:border-blue-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-blue-900 dark:text-blue-200 hover:bg-blue-50 dark:hover:bg-blue-950/40 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportBusy === `docx-${activeVersion.code}`
+                            ? 'Đang xuất DOCX...'
+                            : `Xuất Mã ${activeVersion.code} (.DOCX)`}
+                        </span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={!canExport || exportBusy !== null}
+                      onClick={() => void handleExportAnswerKeyDocx()}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {exportBusy === 'answer-docx'
+                          ? 'Đang tạo đáp án DOCX...'
+                          : 'Đáp án & Ánh xạ (.DOCX)'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={!canExport || exportBusy !== null}
+                      onClick={handleExportAnswerCsv}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Bảng đáp án (.CSV)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={!canExport || exportBusy !== null}
+                      onClick={handleExportMixedBundleJson}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>JSON</span>
+                    </button>
+                  </div>
+
+                  {lastExportIntegrity && (
+                    <div
+                      className={`rounded-lg border p-3 text-xs space-y-1.5 ${
+                        lastExportIntegrity.verified
+                          ? 'border-emerald-300 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-950 dark:text-emerald-200'
+                          : 'border-red-300 dark:border-red-800 bg-red-50/80 dark:bg-red-950/40 text-red-900 dark:text-red-200'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-semibold">
+                        <span className="inline-flex items-center gap-1.5">
+                          <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                          Kiểm chứng hậu xuất gói ZIP (Layer 7):{' '}
+                          {lastExportIntegrity.verified ? 'PASS — Nguyên vẹn 100%' : 'BLOCKED'}
+                        </span>
+                        <span className="font-mono-num text-[11px]">
+                          {lastExportIntegrity.fileCount} tệp · {lastExportIntegrity.verifiedCodes.length} mã đề đạt
+                        </span>
+                      </div>
+                      <ul className="space-y-0.5 text-[11px]">
+                        {lastExportIntegrity.checks.map((chk) => (
+                          <li key={chk.id}>
+                            {chk.passed ? '✓' : '✗'} {chk.label}: {chk.detail}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1607,16 +2241,27 @@ export function MathExamMixerApp({
                             <div className="text-xs font-mono-num text-slate-600 dark:text-slate-400">
                               {ver.questions.length} câu hỏi · {ver.answerKeyRows.length} dòng đáp án
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedCodeTab(ver.code);
-                                setStep(4);
-                              }}
-                              className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                            >
-                              Xem đối soát mã {ver.code}
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedCodeTab(ver.code);
+                                  setStep(4);
+                                }}
+                                className="flex-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                              >
+                                Đối soát
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!canExport || exportBusy !== null}
+                                onClick={() => void handleExportSingleDocx(ver.code)}
+                                className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/30 px-2.5 py-1.5 text-[11px] font-medium text-blue-800 dark:text-blue-200 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50"
+                                title={`Tải Ma_de_${ver.code}.docx`}
+                              >
+                                DOCX
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
@@ -1627,10 +2272,36 @@ export function MathExamMixerApp({
             </div>
 
             {exportReport && (
-              <MathIntegrityReportPanel
-                report={exportReport}
-                title="Bảng kiểm tra toàn vẹn trước khi xuất đề (Pre-Export Verification)"
-                onManualCheck={() => void handleReverifyVersions()}
+              <div className="no-print">
+                <MathIntegrityReportPanel
+                  report={exportReport}
+                  title="Bảng kiểm tra toàn vẹn trước khi xuất đề (Pre-Export Verification)"
+                  onManualCheck={() => void handleReverifyVersions()}
+                />
+              </div>
+            )}
+
+            {versions.length > 0 && (
+              <MathExamPrintPreview
+                exam={activeExam}
+                selectedCode={activeVersion?.code ?? versions[0].code}
+                canExport={canExport}
+                onChangeExportSettings={(nextSettings: ExamExportSettings) =>
+                  handleExamChange({
+                    ...activeExam,
+                    exportSettings: nextSettings,
+                  })
+                }
+                onTriggerPrint={() => {
+                  if (!canExport) {
+                    onShowToast(
+                      'error',
+                      'Không thể in vì đề đang có lỗi toàn vẹn BLOCKED.'
+                    );
+                    return;
+                  }
+                  window.print();
+                }}
               />
             )}
           </div>
