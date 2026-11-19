@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -18,6 +18,7 @@ import {
   Shuffle,
   SlidersHorizontal,
   Trash2,
+  Upload,
   XCircle,
 } from 'lucide-react';
 import { ContextualAcademyBar } from '../tutorial/ContextualAcademyBar';
@@ -70,6 +71,10 @@ import {
   exportMixedExamZipBundle,
   verifyExportedDocxBuffer,
 } from '../../core/examExportEngine';
+import {
+  commitUniversalImportSessionToProject,
+  runUniversalImportSession,
+} from '../../core/universalImportAdapter';
 import { createEmptyMathExamProject } from '../../data/demoMathExams';
 import { createId } from '../../db/database';
 import { MathExamEditor } from '../math/MathExamEditor';
@@ -91,12 +96,12 @@ interface MathExamMixerAppProps {
   onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
 }
 
-const STEP_TABS: Array<{ step: MathExamStep; label: string }> = [
-  { step: 1, label: '1. Nhập đề & Hồ sơ môn' },
-  { step: 2, label: '2. Xác nhận đáp án gốc' },
-  { step: 3, label: '3. Quy tắc trộn & Số mã' },
-  { step: 4, label: '4. Kiểm tra & So sánh' },
-  { step: 5, label: '5. Kiểm chứng & Xuất đề' },
+const STEP_TABS: Array<{ step: MathExamStep; label: string; shortTitle: string }> = [
+  { step: 1, label: '1. Nhập đề & Hồ sơ môn', shortTitle: 'Tải file' },
+  { step: 2, label: '2. Xác nhận đáp án gốc', shortTitle: 'Xác nhận cấu trúc' },
+  { step: 3, label: '3. Quy tắc trộn & Số mã', shortTitle: 'Chọn mã đề' },
+  { step: 4, label: '4. Kiểm tra & So sánh', shortTitle: 'Kiểm tra' },
+  { step: 5, label: '5. Kiểm chứng & Xuất đề', shortTitle: 'Xuất' },
 ];
 
 function triggerBlobDownload(blob: Blob, fileName: string) {
@@ -510,123 +515,185 @@ export function MathExamMixerApp({
       <div className="no-print space-y-6">
         <ContextualAcademyBar
           tutorialId="tutorial.math-mixer"
-          label="Exam Mixer Pro 6.0"
-          description="Trộn đề đa môn 10 dạng câu hỏi với Hồ sơ môn học, khóa 5 lớp và xuất DOCX/ZIP/PDF đã kiểm chứng toàn vẹn."
+          label="Math Exam Mixer"
+          description="Trộn đề thi nhanh chóng, bảo toàn công thức toán học và kiểm tra độ chính xác."
         />
 
         <PageBanner
           tourId="math-header"
-          title="Exam Mixer Pro 6.0"
-          subtitle={`Đang mở: ${activeSubjectProfile.name} · Hoán vị khối dữ liệu bất biến theo ID · Xuất DOCX, ZIP & PDF A4 đã kiểm chứng toàn vẹn.`}
+          title="Math Exam Mixer"
+          subtitle="Trộn đề thi nhanh chóng, bảo toàn công thức toán học và kiểm tra độ chính xác."
           icon={<Shuffle className="h-5 w-5" aria-hidden="true" />}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void handleCreateExam()}
-            >
-              <FilePlus2 className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Đề mới</span>
-            </Button>
-
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void onDuplicateMathExam(activeExam)}
-            >
-              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Nhân bản</span>
-            </Button>
-
-            {tutorial && (
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="secondary"
                 size="sm"
-                data-tour-id="math-help-btn"
-                onClick={() =>
-                  tutorial.startTutorial('tutorial.math-mixer', { restart: true })
-                }
-                aria-label="Hướng dẫn sử dụng Math Exam Mixer Pro"
+                onClick={() => void handleCreateExam()}
               >
-                <HelpCircle className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                <span>Hướng dẫn</span>
+                <FilePlus2 className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Đề mới</span>
               </Button>
-            )}
 
-            {mathExams.length > 1 && (
-              <button
-                type="button"
-                onClick={() => {
-                  const nextTarget = mathExams.find((e) => e.id !== activeExam.id);
-                  void onDeleteMathExam(activeExam.id);
-                  if (nextTarget) setSelectedExamId(nextTarget.id);
-                }}
-                aria-label="Xóa đề Toán hiện tại"
-                className="rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/50"
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void onDuplicateMathExam(activeExam)}
               >
-                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            )}
-          </div>
-        }
-      >
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <label
-              htmlFor="math-exam-select"
-              className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap"
-            >
-              Đề kiểm tra đang mở:
-            </label>
-            <select
-              id="math-exam-select"
-              aria-label="Chọn đề thi Toán"
-              value={activeExam.id}
-              onChange={(e) => {
-                setSelectedExamId(e.target.value);
-                setMixErrors([]);
-                setMixWarnings([]);
-              }}
-              className="w-full max-w-md rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-900 dark:text-slate-100 focus:border-blue-600 focus:outline-none"
-            >
-              {mathExams.map((ex) => (
-                <option key={ex.id} value={ex.id}>
-                  {ex.title} ({ex.questions.length} câu)
-                </option>
-              ))}
-            </select>
-          </div>
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Nhân bản</span>
+              </Button>
 
-          {/* 5-Step Progress Strip */}
-          <nav
-            aria-label="Quy trình 5 bước trộn đề Toán"
-            data-tour-id="math-step-tabs"
-            className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-3 border-t border-slate-100 dark:border-slate-800"
-          >
-            {STEP_TABS.map((item) => {
-              const active = step === item.step;
-              return (
+              {tutorial && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-tour-id="math-help-btn"
+                  onClick={() =>
+                    tutorial.startTutorial('tutorial.math-mixer', { restart: true })
+                  }
+                  aria-label="Hướng dẫn sử dụng Math Exam Mixer Pro"
+                >
+                  <HelpCircle className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                  <span>Hướng dẫn</span>
+                </Button>
+              )}
+
+              {mathExams.length > 1 && (
                 <button
-                  key={item.step}
                   type="button"
                   onClick={() => {
-                    setStep(item.step);
-                    tutorial?.emitTutorialEvent('math-step-nav-clicked');
+                    const nextTarget = mathExams.find((e) => e.id !== activeExam.id);
+                    void onDeleteMathExam(activeExam.id);
+                    if (nextTarget) setSelectedExamId(nextTarget.id);
                   }}
-                  className={`rounded-xl border px-3 py-2 text-left text-xs font-medium transition-colors whitespace-nowrap truncate ${
-                    active
-                      ? 'border-blue-600 bg-blue-600 dark:bg-blue-600 text-white'
-                      : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
+                  aria-label="Xóa đề Toán hiện tại"
+                  className="rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/50"
                 >
-                  {item.label}
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
+              )}
+            </div>
+          }
+        >
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3 flex-1">
+                <label
+                  htmlFor="math-exam-select"
+                  className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap"
+                >
+                  Đề kiểm tra đang mở:
+                </label>
+                <select
+                  id="math-exam-select"
+                  aria-label="Chọn đề thi Toán"
+                  value={activeExam.id}
+                  onChange={(e) => {
+                    setSelectedExamId(e.target.value);
+                    setMixErrors([]);
+                    setMixWarnings([]);
+                  }}
+                  className="w-full max-w-md rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-900 dark:text-slate-100 focus:border-blue-600 focus:outline-none"
+                >
+                  {mathExams.map((ex) => (
+                    <option key={ex.id} value={ex.id}>
+                      {ex.title} ({ex.questions.length} câu)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Hồ sơ môn: <strong className="text-slate-800 dark:text-slate-200">{activeSubjectProfile.name}</strong>
+              </span>
+            </div>
+
+            {/* Connected 5-Step Progress Strip matching Reference Image 6 */}
+            <nav
+              aria-label="Quy trình 5 bước trộn đề Toán"
+              data-tour-id="math-step-tabs"
+              className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-3 border-t border-slate-100 dark:border-slate-800"
+            >
+              {STEP_TABS.map((item) => {
+                const active = step === item.step;
+                const done = step > item.step;
+                return (
+                  <button
+                    key={item.step}
+                    type="button"
+                    onClick={() => {
+                      setStep(item.step);
+                      tutorial?.emitTutorialEvent('math-step-nav-clicked');
+                    }}
+                    className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold transition-all whitespace-nowrap truncate ${
+                      active
+                        ? 'border-blue-600 bg-blue-600 text-white shadow-2xs'
+                        : done
+                        ? 'border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <span
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-mono-num font-bold ${
+                        active
+                          ? 'bg-white/20 text-white'
+                          : done
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {item.step}
+                    </span>
+                    <span className="truncate">{item.shortTitle}</span>
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        </PageBanner>
+
+        {/* Reference Image 6 Quick Mixer Card on Step 1 */}
+        {step === 1 && (
+          <QuickExamMixerCard
+            exam={activeExam}
+            onChangeExam={handleExamChange}
+            onRunQuickMix={async () => {
+              const readyExam: MathExamProject = activeExam.confirmedOriginalAnswers
+                ? activeExam
+                : { ...activeExam, confirmedOriginalAnswers: true };
+              if (!activeExam.confirmedOriginalAnswers) {
+                await onSaveMathExam(readyExam, true);
+              }
+              const res = await generateMixedExamsAsync(readyExam, { chunkSize: 5 });
+              if (res.errors.length > 0) {
+                onShowToast('error', res.errors[0]);
+                return;
+              }
+              const updated: MathExamProject = {
+                ...readyExam,
+                generatedVersions: res.versions,
+                lastIntegrityReport: preMixReport ?? undefined,
+                status: 'ready',
+                updatedAt: new Date().toISOString(),
+              };
+              await onSaveMathExam(updated, true);
+              setSelectedCodeTab(res.versions[0]?.code ?? '');
+              setCompareCodeTab(res.versions[1]?.code ?? res.versions[0]?.code ?? '');
+              onShowToast(
+                'success',
+                `Đã tạo nhanh ${res.versions.length} mã đề (${res.versions
+                  .slice(0, 4)
+                  .map((v) => v.code)
+                  .join(', ')}).`
               );
-            })}
-          </nav>
-        </div>
-      </PageBanner>
+            }}
+            onQuickPrint={() => {
+              setStep(5);
+              setTimeout(() => window.print(), 250);
+            }}
+            onShowToast={onShowToast}
+          />
+        )}
       </div>
 
       {/* Step 1 & Step 2 */}
@@ -2310,3 +2377,443 @@ export function MathExamMixerApp({
     </main>
   );
 }
+
+interface QuickExamMixerCardProps {
+  exam: MathExamProject;
+  onChangeExam: (next: MathExamProject) => void;
+  onRunQuickMix: () => Promise<void>;
+  onQuickPrint: () => void;
+  onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
+}
+
+function QuickExamMixerCard({
+  exam,
+  onChangeExam,
+  onRunQuickMix,
+  onQuickPrint,
+  onShowToast,
+}: QuickExamMixerCardProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [selectedPreviewCode, setSelectedPreviewCode] = useState<string>(
+    exam.generatedVersions[0]?.code || '101'
+  );
+  const [mathLockEnabled, setMathLockEnabled] = useState(true);
+  const [integrityCheckEnabled, setIntegrityCheckEnabled] = useState(true);
+
+  const examCount = exam.mixConfig.examCount || 4;
+  const startCodeNum = exam.mixConfig.startCodeNumber || 101;
+
+  const previewCodes = useMemo(() => {
+    if (exam.generatedVersions.length > 0) {
+      return exam.generatedVersions.slice(0, 8).map((v) => v.code);
+    }
+    return Array.from({ length: Math.min(8, examCount) }, (_, i) =>
+      String(startCodeNum + i)
+    );
+  }, [exam.generatedVersions, examCount, startCodeNum]);
+
+  useEffect(() => {
+    if (!previewCodes.includes(selectedPreviewCode)) {
+      setSelectedPreviewCode(previewCodes[0] ?? '101');
+    }
+  }, [previewCodes, selectedPreviewCode]);
+
+  const activePreviewAnswers = useMemo(() => {
+    const matchedVer = exam.generatedVersions.find(
+      (v) => v.code === selectedPreviewCode
+    );
+    if (matchedVer && matchedVer.answerKeyRows.length > 0) {
+      return matchedVer.answerKeyRows.slice(0, 10).map((row, idx) => ({
+        qNum: idx + 1,
+        ans: row.answer || 'A',
+      }));
+    }
+    return exam.questions.slice(0, 10).map((q, idx) => {
+      const correctIdx = (q.options ?? []).findIndex(
+        (o) => o.id === q.correctOptionId
+      );
+      const letter =
+        correctIdx >= 0 ? getOptionLetterLabel(correctIdx) : ['A', 'C', 'B', 'D'][idx % 4];
+      return {
+        qNum: idx + 1,
+        ans: letter,
+      };
+    });
+  }, [exam.generatedVersions, exam.questions, selectedPreviewCode]);
+
+  const updateCountAndStartCode = (nextCount: number, nextStart: number) => {
+    const clampedCount = Math.max(1, Math.min(MAX_EXAM_CODES, nextCount));
+    const codes = Array.from({ length: clampedCount }, (_, i) =>
+      String(nextStart + i)
+    );
+    onChangeExam({
+      ...exam,
+      mixConfig: {
+        ...exam.mixConfig,
+        examCount: clampedCount,
+        startCodeNumber: nextStart,
+        customCodeNames: codes,
+      },
+    });
+  };
+
+  const handleFileUpload = async (file: File) => {
+    if (file.size > 50 * 1024 * 1024) {
+      onShowToast('error', 'Tệp vượt quá dung lượng tối đa 50 MB.');
+      return;
+    }
+    setImporting(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const subjectId = resolveSubjectId(exam.subjectId || exam.subject);
+      const session = await runUniversalImportSession(
+        {
+          fileName: file.name,
+          mimeType: file.type,
+          buffer,
+        },
+        createId,
+        {
+          subjectId,
+          renderPreviews: false,
+        }
+      );
+
+      if (session.questions.length > 0) {
+        const nextExam = commitUniversalImportSessionToProject(exam, session, {
+          applySuggestedSubject: true,
+          replaceExisting: true,
+        });
+        onChangeExam(nextExam);
+        onShowToast(
+          'success',
+          `Đã nạp ${session.questions.length} câu hỏi từ "${file.name}".`
+        );
+      } else {
+        onShowToast(
+          'info',
+          `Đã đọc tệp "${file.name}". Hãy kiểm tra chi tiết ở khung nhập đề bên dưới.`
+        );
+      }
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể đọc tệp .docx.'
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const onFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) void handleFileUpload(file);
+  };
+
+  const onDropFile = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void handleFileUpload(file);
+  };
+
+  const shuffleQuestionsEnabled = exam.mixConfig.level >= 1;
+  const shuffleOptionsEnabled =
+    exam.mixConfig.level === 2 || exam.mixConfig.level === 4;
+
+  return (
+    <section
+      aria-label="Trộn đề nhanh"
+      className="space-y-4"
+    >
+      {/* Top 2-column grid: Dropzone + Quick Config matching Reference Image 6 */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-stretch">
+        {/* Left: .docx Dropzone */}
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragActive(true);
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={onDropFile}
+          className={`lg:col-span-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-6 sm:p-8 text-center transition-colors ${
+            dragActive
+              ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/50'
+              : 'border-blue-300/80 dark:border-blue-800/80 bg-blue-50/30 dark:bg-slate-900/80'
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".docx,.pdf,.txt,.md,.html"
+            onChange={onFileInputChange}
+            className="hidden"
+          />
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-100/80 dark:bg-blue-950 text-blue-600 dark:text-blue-400 mb-3">
+            <Upload className="h-6 w-6" aria-hidden="true" />
+          </div>
+          <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+            Kéo thả file đề thi vào đây
+          </h3>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            hoặc nhấn để chọn file .docx
+          </p>
+          <button
+            type="button"
+            disabled={importing}
+            onClick={() => fileInputRef.current?.click()}
+            className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2 text-xs font-semibold text-white shadow-2xs transition-colors disabled:opacity-60"
+          >
+            <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>{importing ? 'Đang đọc file...' : 'Chọn file .docx'}</span>
+          </button>
+          <p className="mt-3 text-[11px] text-slate-400 dark:text-slate-500">
+            Định dạng hỗ trợ: .docx · Dung lượng tối đa: 50 MB
+          </p>
+        </div>
+
+        {/* Right: Quick Mix Config */}
+        <div className="lg:col-span-6 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-6 shadow-2xs flex flex-col justify-between space-y-4">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-2">
+                Số lượng mã đề
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                {[4, 10, 20, 40].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => updateCountAndStartCode(preset, startCodeNum)}
+                    className={`rounded-xl border px-3.5 py-1.5 text-xs font-mono-num font-bold transition-colors ${
+                      examCount === preset
+                        ? 'border-blue-600 bg-blue-600 text-white shadow-2xs'
+                        : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+                <input
+                  type="number"
+                  min={1}
+                  max={MAX_EXAM_CODES}
+                  aria-label="Số lượng mã đề tùy chỉnh"
+                  value={examCount}
+                  onChange={(e) =>
+                    updateCountAndStartCode(
+                      Number.parseInt(e.target.value, 10) || 4,
+                      startCodeNum
+                    )
+                  }
+                  placeholder="Tùy chỉnh"
+                  className="w-24 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-mono-num font-semibold text-slate-800 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <label
+                htmlFor="quick-start-code"
+                className="text-xs font-bold text-slate-800 dark:text-slate-200 whitespace-nowrap"
+              >
+                Mã bắt đầu
+              </label>
+              <input
+                id="quick-start-code"
+                type="number"
+                min={1}
+                max={9999}
+                value={startCodeNum}
+                onChange={(e) =>
+                  updateCountAndStartCode(
+                    examCount,
+                    Number.parseInt(e.target.value, 10) || 101
+                  )
+                }
+                className="w-28 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-mono-num font-bold text-slate-900 dark:text-slate-100"
+              />
+            </div>
+
+            {/* 4 Toggle Rows matching Reference Image 6 */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                  Đảo câu
+                </span>
+                <input
+                  type="checkbox"
+                  checked={shuffleQuestionsEnabled}
+                  onChange={(e) =>
+                    onChangeExam({
+                      ...exam,
+                      mixConfig: {
+                        ...exam.mixConfig,
+                        level: e.target.checked
+                          ? shuffleOptionsEnabled
+                            ? 2
+                            : 1
+                          : 0,
+                      },
+                    })
+                  }
+                  className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                  Đảo đáp án
+                </span>
+                <input
+                  type="checkbox"
+                  checked={shuffleOptionsEnabled}
+                  onChange={(e) =>
+                    onChangeExam({
+                      ...exam,
+                      mixConfig: {
+                        ...exam.mixConfig,
+                        level: e.target.checked ? 2 : 1,
+                      },
+                    })
+                  }
+                  className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                  Math Lock
+                </span>
+                <input
+                  type="checkbox"
+                  checked={mathLockEnabled}
+                  onChange={(e) => setMathLockEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                  Integrity Check
+                </span>
+                <input
+                  type="checkbox"
+                  checked={integrityCheckEnabled}
+                  onChange={(e) => setIntegrityCheckEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Preview Card: Xem trước kết quả matching Reference Image 6 */}
+      <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-6 shadow-2xs space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+            Xem trước kết quả
+          </h3>
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {exam.questions.length} câu hỏi trong đề · Bảo toàn công thức Math Lock
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-center">
+          {/* Left: Các mã đề sẽ tạo */}
+          <div className="lg:col-span-5 space-y-2">
+            <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+              Các mã đề sẽ tạo ({examCount})
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {previewCodes.map((code) => {
+                const isSelected = selectedPreviewCode === code;
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => setSelectedPreviewCode(code)}
+                    className={`rounded-xl border px-3.5 py-2 text-left transition-all ${
+                      isSelected
+                        ? 'border-blue-600 bg-blue-50/80 dark:bg-blue-950/60 ring-1 ring-blue-500/40'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 hover:bg-white'
+                    }`}
+                  >
+                    <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                      Mã đề
+                    </div>
+                    <div className="text-sm font-mono-num font-bold text-blue-600 dark:text-blue-400">
+                      {code}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Right: Tóm tắt đáp án (mã 101) */}
+          <div className="lg:col-span-7 space-y-2">
+            <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+              Tóm tắt đáp án (mã {selectedPreviewCode})
+            </p>
+            <div className="overflow-x-auto rounded-xl border border-slate-200/80 dark:border-slate-800">
+              <table className="w-full text-center text-xs font-mono-num">
+                <thead>
+                  <tr className="border-b border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-500 dark:text-slate-400">
+                    <th className="px-2.5 py-1.5 font-semibold text-left">Câu</th>
+                    {activePreviewAnswers.map((item) => (
+                      <th key={item.qNum} className="px-2 py-1.5 font-semibold">
+                        {item.qNum}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="bg-white dark:bg-slate-900 font-bold text-slate-900 dark:text-slate-100">
+                    <td className="px-2.5 py-2 text-left font-sans font-semibold text-slate-500">
+                      Đáp án
+                    </td>
+                    {activePreviewAnswers.map((item) => (
+                      <td
+                        key={item.qNum}
+                        className="px-2 py-2 text-blue-600 dark:text-blue-400"
+                      >
+                        {item.ans}
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+          <button
+            type="button"
+            onClick={onQuickPrint}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+          >
+            <Printer className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <span>Xuất PDF</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void onRunQuickMix()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-5 py-2 text-xs font-semibold text-white shadow-2xs transition-colors"
+          >
+            <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Tạo mã đề</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+

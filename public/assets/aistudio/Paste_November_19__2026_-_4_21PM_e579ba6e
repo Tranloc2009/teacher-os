@@ -1,0 +1,1447 @@
+# SUPER MASTER PROMPT — TEACHEROS AURORA BENTO PREMIUM 1.0
+
+## ONE-SESSION PREMIUM UI/UX REDESIGN
+### Optimized for Gemini Argon · High Visual Impact · Low Regression Risk · Production Ready
+
+---
+
+# 0. VAI TRÒ VÀ NGUYÊN TẮC LÀM VIỆC
+
+Bạn là một nhóm chuyên gia cao cấp gồm:
+
+- Principal Product Designer.
+- Senior UI/UX Architect.
+- Creative Director.
+- Senior React/TypeScript Engineer.
+- Design System Engineer.
+- Frontend Performance Specialist.
+- Accessibility Specialist.
+- QA Engineer.
+
+Nhiệm vụ của bạn là nâng cấp **giao diện TeacherOS đang tồn tại**, không tạo một website mới.
+
+Hãy áp dụng tư duy thiết kế sản phẩm chuyên nghiệp, đánh giá kỹ cấu trúc trước khi thay đổi và lựa chọn giải pháp có hiệu quả thẩm mỹ cao nhất với số lượng chỉnh sửa thấp nhất.
+
+## CHIẾN LƯỢC THỰC THI
+
+Mục tiêu là hoàn thành một bản nâng cấp có thể kiểm thử và triển khai trong **một phiên làm việc hướng tới khoảng 60 phút**.
+
+Để đạt được mục tiêu:
+
+1. Đọc đúng các file liên quan.
+2. Không quét lại toàn bộ dự án nhiều lần.
+3. Không viết tài liệu thiết kế dài trước khi code.
+4. Không tạo những component không cần thiết.
+5. Tái sử dụng kiến trúc hiện có.
+6. Ưu tiên CSS và design tokens.
+7. Không thêm dependency chỉ để tạo hiệu ứng.
+8. Không sửa logic nghiệp vụ ngoài phạm vi.
+9. Dành thời gian kiểm thử và hoàn thiện.
+10. Báo cáo ngắn gọn những gì đã thực hiện.
+
+**Không thay thế công việc triển khai bằng một bài giải thích dài. Hãy thực sự chỉnh sửa mã nguồn.**
+
+---
+
+# 1. PRODUCT VISION
+
+## TEACHEROS — AURORA BENTO
+
+TeacherOS là một không gian làm việc hỗ trợ giáo viên với các ứng dụng như:
+
+- Lesson Studio.
+- Exam Mixer Pro.
+- Resource Vault.
+- Workflow Center.
+- Smart Workflow Canvas.
+- Teaching Journal.
+- Print Studio.
+- Các công cụ hiện có khác.
+
+Tôi muốn khi mở TeacherOS, người dùng có cảm giác đang sử dụng:
+
+**Một phần mềm giáo dục cao cấp, kết hợp tính tối giản của Linear, sự trực quan của Bento Dashboard và hiệu ứng Aurora Glass hiện đại.**
+
+Các từ khóa thiết kế:
+
+**Aurora · Premium · Fluid · Calm · Intelligent · Focused · Elegant · Modern SaaS**
+
+Không thiết kế theo phong cách:
+
+- Website quản lý trường học cũ.
+- Dashboard admin quá nhiều biểu đồ.
+- Web gaming RGB.
+- Cyberpunk.
+- Gradient neon quá mạnh.
+- Glassmorphism phủ khắp mọi nơi.
+- Trang landing page quảng cáo.
+- Giao diện chỉ đẹp trong ảnh nhưng khó sử dụng.
+
+## MỤC TIÊU TRẢI NGHIỆM
+
+Người dùng phải có thể:
+
+- Nhận ra ngay TeacherOS là ứng dụng hỗ trợ giáo viên.
+- Tìm thấy công cụ cần dùng trong vài giây.
+- Hiểu được những việc gần đây và thao tác tiếp theo.
+- Di chuyển giữa các module dễ dàng.
+- Làm việc trên màn hình laptop mà không rối.
+- Cảm thấy ứng dụng có tính nhất quán và hoàn thiện.
+
+Ưu tiên đặc biệt: **Gây ấn tượng trong 5 giây đầu khi ban giám khảo mở website.**
+
+Không đánh đổi khả năng sử dụng để lấy hiệu ứng thị giác.
+
+---
+
+# 2. PHẠM VI — BẮT BUỘC TUÂN THỦ
+
+## CHỈ TRIỂN KHAI 5 HẠNG MỤC
+
+### A. Aurora Design System
+- Màu sắc.
+- Typography.
+- Surface.
+- Radius.
+- Shadow.
+- Gradient.
+- Motion tokens.
+
+### B. Premium Sidebar
+- Làm mới giao diện.
+- Active state.
+- Hover.
+- Collapse nếu đã có hoặc triển khai an toàn.
+- Giữ nguyên điều hướng.
+
+### C. Global Header
+- Làm mới header.
+- Breadcrumb.
+- Các điều khiển hiện hữu.
+- Đồng bộ với sidebar.
+
+### D. Aurora Bento Dashboard
+- Hero.
+- Quick Actions.
+- Feature Cards.
+- Recent Activity nếu có dữ liệu thật.
+- Empty States.
+
+### E. Final Polish
+- Responsive.
+- Hover.
+- Transitions.
+- Accessibility.
+- Production Build.
+- Regression Check.
+
+## TUYỆT ĐỐI KHÔNG LÀM TRONG PHIÊN NÀY
+
+- Không thiết kế lại toàn bộ Exam Mixer.
+- Không thiết kế lại Lesson Studio.
+- Không thiết kế lại Workflow Canvas.
+- Không viết lại Document Engine.
+- Không thay đổi Database Schema.
+- Không thêm AI API.
+- Không thêm backend.
+- Không thay đổi Auth.
+- Không tự tạo chức năng mới ngoài nhu cầu giao diện.
+- Không di chuyển hàng loạt thư mục.
+- Không refactor toàn bộ dự án.
+- Không xóa những thành phần đang hoạt động.
+
+Các module chưa redesign phải tiếp tục chạy trong App Shell mới.
+
+Nếu thiết kế toàn cục mới gây xung đột với giao diện cũ, hãy điều chỉnh tính tương thích thay vì sửa lại toàn bộ module.
+
+---
+
+# 3. PHÂN TÍCH SOURCE CODE TRƯỚC KHI THIẾT KẾ
+
+Trước khi sửa code, hãy kiểm tra nhanh:
+
+1. React application entry point.
+2. Global CSS.
+3. Tailwind configuration nếu có.
+4. App Shell hiện tại.
+5. Sidebar hiện tại.
+6. Header hiện tại.
+7. Dashboard/Home hiện tại.
+8. Router và Navigation.
+9. Shared UI Components.
+10. State management.
+11. package.json.
+12. Build configuration.
+
+Không giả định tên file hay cấu trúc thư mục.
+
+Hãy tìm các component thực tế rồi chỉnh sửa đúng vị trí.
+
+## SAU KHI AUDIT
+
+Xác định:
+
+- Thành phần nào giữ nguyên.
+- Thành phần nào chỉ sửa style.
+- Thành phần nào cần bổ sung.
+- Dữ liệu nào có sẵn.
+- Những dependency nào đã cài.
+- Những rủi ro có thể xảy ra.
+
+Chọn cách triển khai ít thay đổi mã nguồn nhất nhưng tạo ra sự khác biệt thị giác lớn.
+
+Không cần trình bày phân tích dài cho tôi. Chỉ báo cáo ngắn, sau đó triển khai.
+
+---
+
+# 4. AURORA DESIGN SYSTEM
+
+## 4.1. BẢNG MÀU CHỦ ĐẠO
+
+Thiết kế theo chế độ Light Mode cao cấp.
+
+### Background
+
+App Background:
+`#F8F9FF`
+
+Secondary Background:
+`#F5F7FC`
+
+Main Surface:
+`#FFFFFF`
+
+Soft Lavender Surface:
+`#F3F0FF`
+
+Hover Surface:
+`#EEF0FF`
+
+### Brand Colors
+
+Primary Indigo:
+`#635BFF`
+
+Primary Hover:
+`#5046E5`
+
+Aurora Violet:
+`#8B5CF6`
+
+Aurora Blue:
+`#3B82F6`
+
+Aurora Cyan:
+`#67D9E8`
+
+### Text
+
+Primary Text:
+`#172033`
+
+Secondary Text:
+`#475569`
+
+Muted Text:
+`#64748B`
+
+Disabled Text:
+`#94A3B8`
+
+### Borders
+
+Default Border:
+`rgba(148,163,184,0.16)`
+
+Glass Border:
+`rgba(255,255,255,0.62)`
+
+Primary Border:
+`rgba(99,91,255,0.28)`
+
+### Semantic
+
+Success:
+`#16A34A`
+
+Warning:
+`#D97706`
+
+Danger:
+`#DC2626`
+
+Info:
+`#2563EB`
+
+Đây là bảng màu định hướng.
+
+Hãy điều chỉnh nhẹ khi cần để đáp ứng độ tương phản, tránh giao diện quá nhạt hoặc thiếu phân cấp.
+
+---
+
+# 5. AURORA BACKGROUND — YẾU TỐ NHẬN DIỆN CHỦ ĐẠO
+
+Tạo nền Aurora rất nhẹ.
+
+## CẢM GIÁC
+
+- Sáng.
+- Thanh lịch.
+- Thoáng.
+- Có chiều sâu.
+- Không gây phân tâm.
+
+Nền là sự kết hợp của:
+
+1. Base trắng pha lavender.
+2. Một vùng sáng tím nhạt phía trên.
+3. Một vùng xanh dương nhạt ở góc khác.
+4. Một vùng cyan rất nhẹ.
+5. Gradient chuyển màu mềm.
+
+## KỸ THUẬT
+
+Ưu tiên CSS:
+
+- Radial gradients.
+- Linear gradients.
+- Pseudo-elements.
+- CSS custom properties.
+
+Không sử dụng video nền.
+
+Không sử dụng Canvas animation liên tục.
+
+Không dùng WebGL.
+
+Không dùng thư viện particles.
+
+Không sử dụng animation khiến trình duyệt phải vẽ lại nhiều lớp blur lớn liên tục.
+
+Nếu muốn Aurora có chuyển động, chỉ dùng một chuyển động cực nhẹ trên lớp trang trí phù hợp, và phải tắt được khi người dùng bật reduced motion.
+
+**Aurora phải phục vụ tính thẩm mỹ, không được làm giảm tốc độ của TeacherOS.**
+
+---
+
+# 6. GLASSMORPHISM — TINH TẾ, KHÔNG LẠM DỤNG
+
+Thiết kế hệ thống surface gồm 3 loại.
+
+## Surface 1 — Solid
+
+Dành cho:
+- Editor.
+- Bảng.
+- Nội dung dài.
+- Form.
+- Document Preview.
+- Những vùng cần khả năng đọc cao.
+
+Sử dụng nền trắng gần như hoàn toàn.
+
+## Surface 2 — Soft Glass
+
+Dành cho:
+- Sidebar.
+- Dashboard cards.
+- Toolbar.
+- Một số panel thông tin.
+
+Sử dụng:
+- Nền trắng có độ trong vừa phải.
+- Border sáng.
+- Shadow nhẹ.
+- Backdrop blur vừa phải nếu cần.
+
+## Surface 3 — Accent Glass
+
+Chỉ dành cho:
+- Hero.
+- Một vài card nổi bật.
+- Thành phần nhận diện thương hiệu.
+
+Sử dụng:
+- Gradient xanh–tím.
+- Border tinh tế.
+- Highlight nhỏ.
+- Chiều sâu rõ hơn Surface 2.
+
+## QUY TẮC
+
+Không sử dụng backdrop-filter cho hàng chục hoặc hàng trăm phần tử.
+
+Không làm chữ bị chìm trong nền.
+
+Không áp Glass lên mọi bảng dữ liệu.
+
+Không khiến giao diện có vẻ như một tập hợp các hình chữ nhật trong suốt đặt chồng lên nhau.
+
+---
+
+# 7. TYPOGRAPHY — HIỆN ĐẠI VÀ TỐI ƯU TIẾNG VIỆT
+
+Ưu tiên:
+
+1. Be Vietnam Pro.
+2. Inter.
+3. System sans-serif.
+
+Nếu một font đã tồn tại và phù hợp, hãy giữ lại để tránh phát sinh dependency hoặc tải font không cần thiết.
+
+## TYPOGRAPHY SCALE
+
+Page Title:
+24–28px.
+
+Hero Headline:
+28–36px tùy màn hình.
+
+Section Heading:
+17–20px.
+
+Card Title:
+15–17px.
+
+Body:
+14–15px.
+
+Metadata:
+12–13px.
+
+## TYPOGRAPHY RULES
+
+- Heading rõ và gọn.
+- Body dễ đọc.
+- Không dùng font quá mảnh.
+- Không dùng text-gradient trên đoạn văn dài.
+- Không sử dụng chữ in hoa toàn bộ ở nhiều vị trí.
+- Có line-height hợp lý.
+- Không để tiếng Việt bị lỗi dấu hoặc cắt dòng.
+
+Hero có thể dùng kiểu chữ nổi bật hơn các khu vực khác nhưng vẫn phải chuyên nghiệp.
+
+---
+
+# 8. PREMIUM SIDEBAR REDESIGN
+
+Đây là thành phần quan trọng đầu tiên.
+
+Sidebar phải trông như một ứng dụng desktop productivity hiện đại.
+
+## LAYOUT
+
+Desktop expanded width:
+Khoảng 228–244px.
+
+Collapsed width:
+Khoảng 68–76px nếu cấu trúc hiện tại hỗ trợ.
+
+Sử dụng:
+- Nền Soft Glass.
+- Border phải mỏng.
+- Logo TeacherOS.
+- Nhóm menu rõ ràng.
+- Active indicator đẹp.
+- Hover tinh tế.
+
+## LOGO SECTION
+
+Phần trên cùng:
+- Logo TeacherOS.
+- Tên ứng dụng.
+- Subtitle rất nhỏ nếu phù hợp.
+
+Không làm logo quá lớn.
+
+## NAVIGATION
+
+Giữ nguyên:
+- Route.
+- Menu.
+- Phân nhóm.
+- Quyền truy cập.
+- Logic điều hướng.
+
+Không xóa những công cụ chỉ vì không xuất hiện trong bản thiết kế mới.
+
+## ACTIVE ITEM
+
+Active item:
+- Nền lavender.
+- Text indigo.
+- Icon primary.
+- Border hoặc indicator mỏng.
+
+Hover item:
+- Background chuyển nhẹ.
+- Không làm item dịch chuyển quá nhiều.
+- Không tăng kích thước bất ngờ.
+
+## COLLAPSE
+
+Nếu hỗ trợ sidebar thu gọn:
+- Icon giữ đúng vị trí.
+- Tooltip tên ứng dụng.
+- Không mất trạng thái menu.
+- Không thay đổi route.
+- Không làm dashboard bị giật layout.
+
+## MOBILE
+
+Sidebar chuyển thành drawer hoặc hệ thống điều hướng đã có.
+
+Không ép sidebar desktop vào màn hình nhỏ.
+
+---
+
+# 9. GLOBAL HEADER — PREMIUM APPLICATION BAR
+
+Thiết kế lại Global Header sao cho thống nhất với Sidebar.
+
+## LEFT SECTION
+
+- Breadcrumb thực tế.
+- Tên trang hiện tại.
+- Nút mở sidebar khi cần.
+
+## CENTER SECTION
+
+Nếu TeacherOS đã có global search:
+- Giữ chức năng tìm kiếm.
+- Làm mới search field.
+- Icon tìm kiếm.
+- Placeholder ngắn.
+- Focus state rõ.
+
+Nếu chưa có global search:
+Không tạo một ô tìm kiếm giả.
+
+## RIGHT SECTION
+
+Giữ các điều khiển thật đã có:
+- Notification.
+- Help.
+- User Menu.
+- Theme controls nếu tồn tại.
+- Workspace controls nếu tồn tại.
+
+Không tạo biểu tượng chỉ để lấp đầy giao diện.
+
+## STYLE
+
+- Chiều cao khoảng 64–72px.
+- Nền trắng hoặc glass nhẹ.
+- Border dưới tinh tế.
+- Không chiếm nhiều chiều cao.
+- Responsive.
+- Không đè lên nội dung khi cuộn.
+
+---
+
+# 10. AURORA BENTO DASHBOARD — TRỌNG TÂM CỦA BẢN NÂNG CẤP
+
+Đây là màn hình cần được đầu tư thẩm mỹ mạnh nhất.
+
+Khi mở TeacherOS, Dashboard phải khiến người dùng cảm nhận ngay đây là một sản phẩm có thiết kế cao cấp.
+
+## DESKTOP COMPOSITION
+
+Bố cục gợi ý:
+
+### ROW 1
+Aurora Welcome Hero — toàn chiều rộng nội dung chính.
+
+### ROW 2
+Quick Actions — các thao tác quan trọng nhất.
+
+### ROW 3
+Premium Bento Feature Cards — các ứng dụng chính.
+
+### ROW 4
+Recent Activity / Current Workspace — chỉ khi có dữ liệu thật.
+
+Bố cục phải có nhịp điệu thị giác.
+
+Không dùng hàng loạt card giống hệt kích thước nhau.
+
+Không đưa quá nhiều thành phần lên cùng một màn hình.
+
+---
+
+# 11. AURORA HERO — ĐIỂM GÂY ẤN TƯỢNG
+
+## THIẾT KẾ
+
+Hero là khu vực đẹp nhất Dashboard.
+
+Dùng:
+- Gradient xanh–tím pastel.
+- Một hoặc hai shape mờ tinh tế.
+- Typography nổi bật.
+- Một hình trang trí trừu tượng tạo bằng CSS/SVG nếu phù hợp.
+- Border radius khoảng 20–24px.
+- Shadow nhẹ.
+
+Hero không được quá cao.
+
+Chiều cao tham khảo:
+Khoảng 180–220px trên laptop.
+
+## CONTENT
+
+Ví dụ:
+
+**Không gian giảng dạy của bạn**
+
+"Chuẩn bị bài dạy, tổ chức tài liệu và quản lý công việc tại một nơi."
+
+Kèm:
+- Lời chào nếu có thông tin người dùng thật.
+- Nút hành động chính phù hợp.
+- Một nút phụ nếu có chức năng thật.
+
+Nếu không có user profile, dùng lời chào chung.
+
+Không hiển thị tên người dùng giả.
+
+## VISUAL ACCENT
+
+Một cụm hình minh họa tối giản bên phải Hero có thể gồm:
+- Các khối glass.
+- Icon tài liệu.
+- Hình trang giấy.
+- Hình lịch.
+- Các lớp gradient.
+
+Ưu tiên CSS/SVG nhẹ.
+
+Không cần tạo asset nặng hoặc dùng ảnh stock.
+
+## CTA
+
+Primary:
+"Mở không gian làm việc" hoặc hành động phù hợp với route thật.
+
+Secondary:
+"Khám phá công cụ" nếu thực sự đưa tới danh sách công cụ.
+
+Mỗi nút phải hoạt động.
+
+---
+
+# 12. QUICK ACTIONS — TỐI ƯU KHẢ NĂNG SỬ DỤNG
+
+Tạo khu vực Quick Actions gần Hero.
+
+Có thể dùng:
+- Soạn giáo án.
+- Trộn đề kiểm tra.
+- Mở kho tài liệu.
+- Tạo workflow.
+
+Chỉ sử dụng những route đã tồn tại.
+
+## THIẾT KẾ
+
+Mỗi Quick Action:
+- Icon rõ ràng.
+- Tên ngắn.
+- Background nhẹ.
+- Hover tinh tế.
+- Vùng bấm đủ lớn.
+
+Không dùng quá nhiều mô tả.
+
+Không hiển thị nút chưa có chức năng.
+
+Nếu cần, giới hạn số lượng Quick Actions để giao diện thông thoáng.
+
+---
+
+# 13. PREMIUM BENTO FEATURE GRID
+
+Thiết kế các ứng dụng chính thành Bento Cards với thứ bậc thị giác rõ ràng.
+
+## CARD 1 — LESSON STUDIO
+
+Tên:
+**Lesson Studio**
+
+Subtitle:
+"Soạn và tổ chức bài giảng"
+
+Icon:
+Book / Notebook.
+
+Accent:
+Indigo–Lavender.
+
+Có nút mở ứng dụng.
+
+## CARD 2 — EXAM MIXER PRO
+
+Tên:
+**Exam Mixer Pro**
+
+Subtitle:
+"Quản lý và trộn đề kiểm tra"
+
+Icon:
+File Check / Layers.
+
+Accent:
+Violet–Blue.
+
+Có thể tạo điểm nhấn riêng để thể hiện đây là công cụ nổi bật.
+
+Không hiển thị các tính năng nhập PDF hoặc MathType là hoàn thiện nếu engine chưa hỗ trợ đầy đủ.
+
+## CARD 3 — RESOURCE VAULT
+
+Tên:
+**Resource Vault**
+
+Subtitle:
+"Lưu trữ và tìm kiếm tài liệu"
+
+Icon:
+Folder / Archive.
+
+Accent:
+Cyan–Blue.
+
+## CARD 4 — WORKFLOW CENTER
+
+Tên:
+**Workflow Center**
+
+Subtitle:
+"Tổ chức quy trình làm việc"
+
+Icon:
+Git Branch / Workflow.
+
+Accent:
+Lavender–Indigo.
+
+## SECONDARY MODULES
+
+Các ứng dụng như:
+- Teaching Journal.
+- Print Studio.
+- Các tiện ích khác.
+
+Có thể đặt trong Bento Cards nhỏ hơn hoặc mục "Tất cả công cụ".
+
+Giữ toàn bộ ứng dụng đang có.
+
+## BENTO SIZE SYSTEM
+
+Có thể sử dụng lưới 12 cột trên desktop rộng.
+
+Ví dụ:
+- Hero: 12 cột.
+- Feature Card lớn: 6 cột.
+- Feature Card vừa: 3 hoặc 4 cột.
+- Small Utility Card: 3 cột.
+
+Nhưng không bắt buộc đúng số cột nếu layout hiện tại cần phương án khác.
+
+Ưu tiên sự cân đối, rõ ràng và tính responsive.
+
+## CARD HOVER
+
+Khi hover:
+- Border nổi bật nhẹ.
+- Shadow tăng nhẹ.
+- Icon có phản hồi tinh tế.
+- Không thay đổi cấu trúc layout.
+- Không có chuyển động mạnh.
+
+Card có thể clickable toàn bộ nếu semantics và accessibility cho phép.
+
+---
+
+# 14. RECENT ACTIVITY — DỮ LIỆU THẬT
+
+Nếu TeacherOS đã lưu những dữ liệu phù hợp trong IndexedDB, tạo một khu vực Recent Activity để hiển thị:
+
+- Bài dạy gần đây.
+- Tài liệu gần đây.
+- Workflow gần đây.
+- Dự án đang thực hiện.
+
+Chỉ sử dụng dữ liệu thật.
+
+Không tự sinh:
+- Số giáo án giả.
+- Số học sinh giả.
+- Tên tài liệu giả.
+- Ngày hoạt động giả.
+- Biểu đồ giả.
+
+Nếu chưa có API/selector phù hợp hoặc việc tích hợp ảnh hưởng phạm vi, hãy sử dụng Empty State.
+
+Ví dụ:
+
+"Chưa có hoạt động gần đây"
+
+"Bắt đầu bằng cách mở một công cụ từ bảng điều khiển."
+
+Có nút hành động đúng route.
+
+Không xây dựng hệ thống Analytics mới trong phiên này.
+
+---
+
+# 15. MICRO-INTERACTIONS — PREMIUM FLUID MOTION
+
+Tôi muốn ứng dụng có cảm giác mượt mà, phản hồi nhanh.
+
+## THỜI LƯỢNG THAM KHẢO
+
+Button Hover:
+120–160ms.
+
+Card Hover:
+160–220ms.
+
+Navigation:
+150–200ms.
+
+Tooltip:
+100–150ms.
+
+Panel Expand:
+180–240ms.
+
+Page Content Enter:
+180–240ms.
+
+Không cố định mọi animation bằng một duration giống nhau.
+
+## QUY TẮC
+
+Ưu tiên:
+- Opacity.
+- Transform.
+- Background color.
+- Border color.
+- Shadow vừa phải.
+
+Hạn chế:
+- Animate width/height không cần thiết.
+- Filter blur chuyển động.
+- Animation vô hạn.
+- Animation trên nhiều card cùng lúc.
+- Parallax theo chuột.
+- Scroll effects nặng.
+
+## BUTTON FEEDBACK
+
+Khi hover:
+- Màu thay đổi tinh tế.
+
+Khi nhấn:
+- Có phản hồi trực quan ngắn.
+
+Khi disabled:
+- Trạng thái rõ ràng.
+
+## PAGE TRANSITIONS
+
+Chỉ dùng page transition nếu có thể tích hợp an toàn vào router đang tồn tại.
+
+Không reset state.
+
+Không reload toàn bộ app.
+
+Không khiến editor hoặc workflow mất dữ liệu khi điều hướng.
+
+## REDUCED MOTION
+
+Tôn trọng `prefers-reduced-motion`.
+
+Không bắt buộc người dùng xem chuyển động chỉ để sử dụng TeacherOS.
+
+---
+
+# 16. PREMIUM COMPONENT DETAILS
+
+Chuẩn hóa các yếu tố sau trong phạm vi App Shell và Dashboard.
+
+## Buttons
+
+Primary:
+- Indigo.
+- Hover đậm hơn.
+- Border radius 10–12px.
+- Focus ring rõ.
+
+Secondary:
+- Nền trắng.
+- Border mỏng.
+- Text tối.
+
+Ghost:
+- Nền trong suốt.
+- Hover surface.
+
+## Cards
+
+Default:
+- White surface.
+- Border mềm.
+- Shadow nhẹ.
+
+Featured:
+- Aurora accent.
+- Độ nổi rõ hơn một chút.
+
+## Icons
+
+Tái sử dụng thư viện icon đã có.
+
+Nếu đang dùng Lucide, ưu tiên dùng tiếp Lucide.
+
+Không cài thêm icon library thứ hai.
+
+Giữ kích thước nhất quán:
+- Navigation: khoảng 18–20px.
+- Cards: khoảng 22–26px.
+- Small Actions: khoảng 16–18px.
+
+## Tooltips
+
+Chỉ thêm khi thực sự cần:
+- Sidebar collapsed.
+- Icon-only buttons.
+- Trạng thái khó hiểu.
+
+## Dividers
+
+Sử dụng separator nhẹ.
+
+Không dùng nhiều đường kẻ khiến giao diện cứng và rối.
+
+---
+
+# 17. RESPONSIVE — KHÔNG ĐƯỢC BỎ QUA
+
+Kiểm thử các kích thước:
+
+- 1920×1080.
+- 1440×900.
+- 1366×768.
+- 1024×768.
+- 768px.
+- 390px.
+
+## DESKTOP
+
+Hiển thị:
+- Sidebar.
+- Header.
+- Hero.
+- Bento Grid.
+
+Tận dụng chiều rộng.
+
+Không để vùng nội dung bị bó hẹp quá mức.
+
+## LAPTOP 1366×768
+
+Đây là kích thước ưu tiên.
+
+- Hero không quá cao.
+- Quick Actions hiển thị hợp lý.
+- Các card không chiếm quá nhiều chiều cao.
+- Scroll tự nhiên.
+- Không mất nút hành động.
+- Không có horizontal overflow.
+
+## TABLET
+
+- Bento Grid tự giảm cột.
+- Sidebar đổi trạng thái phù hợp.
+- Typography điều chỉnh.
+- Nội dung không bị chồng lên nhau.
+
+## MOBILE
+
+- Hero đơn giản hơn.
+- Bento Cards xếp dọc hoặc hai cột khi đủ rộng.
+- Navigation dễ mở.
+- Không dùng những hiệu ứng glass quá nặng.
+- Không có nút quá nhỏ.
+
+Không hy sinh giao diện desktop chỉ để đạt layout mobile.
+
+---
+
+# 18. ACCESSIBILITY & VIETNAMESE QUALITY
+
+## ACCESSIBILITY
+
+Tuân thủ các nguyên tắc phù hợp của WCAG 2.2 AA:
+
+- Màu chữ đủ tương phản.
+- Focus indicator rõ.
+- Tab navigation.
+- Button có accessible name.
+- Không dùng màu làm tín hiệu duy nhất.
+- Hit target đủ lớn.
+- Semantic HTML.
+- Reduced motion.
+
+## TIẾNG VIỆT
+
+Kiểm tra:
+- Dấu tiếng Việt.
+- Font weight.
+- Line height.
+- Text wrapping.
+- Breadcrumb.
+- Tooltip.
+- Responsive headings.
+
+Không để nhãn menu bị lỗi dấu hoặc cắt chữ.
+
+Không dịch tên các module tiếng Anh đã được sử dụng nhất quán trong TeacherOS nếu không cần thiết.
+
+---
+
+# 19. BẢO VỆ TOÀN BỘ CHỨC NĂNG HIỆN TẠI
+
+Đây là yêu cầu bắt buộc.
+
+## KHÔNG ĐƯỢC
+
+- Reset IndexedDB.
+- Xóa localStorage.
+- Thay database schema.
+- Xóa dự án người dùng.
+- Đổi ID của các module.
+- Phá router.
+- Làm sai import/export.
+- Làm mất chức năng Exam Mixer.
+- Làm mất trạng thái Workflow.
+- Thay đổi cấu trúc dữ liệu câu hỏi.
+- Vô hiệu hóa Integrity Check.
+- Ẩn các lỗi nghiệp vụ thật.
+- Tạo mock function thay thế chức năng thật.
+
+## TRƯỜNG HỢP CẦN ĐIỀU CHỈNH
+
+Nếu App Shell mới xung đột với module cũ:
+
+1. Xác định nguyên nhân.
+2. Sửa ở lớp layout/style nếu có thể.
+3. Không viết lại business logic.
+4. Giữ hành vi hiện có.
+5. Kiểm tra lại.
+
+## CODE QUALITY
+
+- TypeScript strict-safe.
+- Không dùng `any` tràn lan.
+- Không bỏ qua lỗi bằng `@ts-ignore`.
+- Không xóa test đang thất bại để đạt PASS.
+- Không tắt lint/type checking.
+- Không tạo component trùng lặp.
+- Không dùng CSS selector quá rộng ảnh hưởng toàn ứng dụng.
+
+---
+
+# 20. PERFORMANCE — GIỚI HẠN TÀI NGUYÊN
+
+TeacherOS phải hoạt động tốt trên laptop giáo viên.
+
+## PERFORMANCE STRATEGY
+
+- CSS gradients thay vì hình nền nặng.
+- Blur vừa phải.
+- Không dùng WebGL.
+- Không dùng particles.
+- Không thêm thư viện animation lớn.
+- Không render những component không cần thiết.
+- Không tạo interval chỉ để trang trí.
+- Không dùng animation vô hạn trên toàn màn hình.
+- Không thêm ảnh độ phân giải lớn khi CSS có thể làm tốt hơn.
+
+## BUNDLE
+
+Tận dụng các dependency hiện có.
+
+Không cài thêm thư viện UI chỉ để thay một vài card.
+
+Không thêm package mới nếu không bắt buộc.
+
+Nếu một hiệu ứng đẹp nhưng làm giảm khả năng tương tác, hãy bỏ hiệu ứng đó.
+
+---
+
+# 21. CLOUDFLARE PRODUCTION COMPATIBILITY
+
+TeacherOS đã được triển khai bằng Cloudflare Workers và đồng bộ source qua GitHub.
+
+Do đó, phải giữ khả năng build hiện tại.
+
+## KIỂM TRA
+
+- package.json.
+- bun.lock.
+- Vite config.
+- Wrangler config.
+- Build scripts.
+
+## VẤN ĐỀ ĐÃ TỪNG GẶP
+
+Cloudflare có thể báo:
+
+`lockfile had changes, but lockfile is frozen`
+
+Khi package.json thay đổi nhưng bun.lock chưa đồng bộ.
+
+## YÊU CẦU
+
+- Không thêm dependency không cần thiết.
+- Nếu package.json thay đổi, phải đồng bộ bun.lock bằng Bun.
+- Không tự chỉnh checksum lockfile.
+- Không tắt frozen-lockfile chỉ để né lỗi.
+- Kiểm tra `bun install --frozen-lockfile` khi môi trường cho phép.
+- Chạy build production.
+- Không thay đổi deployment configuration ngoài phạm vi.
+
+Nếu build đã lỗi từ trước vì một vấn đề không liên quan đến UI, phân biệt rõ lỗi tồn tại sẵn với lỗi vừa gây ra.
+
+Nếu cần sửa lỗi lockfile để triển khai, chỉ sử dụng giải pháp có thể xác minh.
+
+---
+
+# 22. KẾ HOẠCH TRIỂN KHAI TRONG MỘT PHIÊN
+
+Hãy sử dụng tiến trình sau như ngân sách ưu tiên, không phải các khoảng thời gian bắt buộc.
+
+## PHASE A — QUICK AUDIT
+
+Mục tiêu:
+Hiểu đúng kiến trúc TeacherOS.
+
+Thực hiện:
+- Đọc App Shell.
+- Đọc Sidebar.
+- Đọc Header.
+- Đọc Dashboard.
+- Xác định design tokens.
+- Xác định các route thật.
+
+Không dành quá nhiều thời gian nghiên cứu những module không liên quan.
+
+## PHASE B — AURORA FOUNDATION
+
+Mục tiêu:
+Xây design system.
+
+Thực hiện:
+- CSS variables.
+- Background.
+- Surface.
+- Typography.
+- Border.
+- Shadow.
+- Motion tokens.
+
+Ưu tiên các thay đổi có thể tái sử dụng.
+
+## PHASE C — SIDEBAR & HEADER
+
+Mục tiêu:
+Tạo hình ảnh ứng dụng desktop cao cấp.
+
+Thực hiện:
+- Sidebar glass.
+- Navigation active state.
+- Header mới.
+- Breadcrumb.
+- Hover.
+- Responsive.
+
+Giữ nguyên toàn bộ hành vi.
+
+## PHASE D — BENTO DASHBOARD
+
+Mục tiêu:
+Tạo màn hình gây ấn tượng nhất.
+
+Thực hiện:
+- Aurora Hero.
+- Quick Actions.
+- Feature Cards.
+- Recent Activity nếu có dữ liệu thật.
+- Empty State.
+- Layout chuẩn.
+
+Đây là phần được ưu tiên chất lượng thiết kế cao nhất.
+
+## PHASE E — POLISH & QA
+
+Mục tiêu:
+Hoàn thiện bản có thể deploy.
+
+Thực hiện:
+- Responsive.
+- Hover.
+- Motion.
+- Focus states.
+- Overflow.
+- TypeScript.
+- Production build.
+- Smoke tests.
+
+Không bỏ qua kiểm thử chỉ để thêm một hiệu ứng nhỏ.
+
+---
+
+# 23. TIME & TOKEN EFFICIENCY RULES
+
+Vì đây là phiên làm việc có giới hạn, phải tuân thủ:
+
+## RULE 1
+
+Không nghiên cứu lại những vấn đề đã giải quyết.
+
+## RULE 2
+
+Không đọc mọi file trong repository nếu không liên quan.
+
+## RULE 3
+
+Không tạo một design system quá phức tạp với hàng trăm tokens không dùng tới.
+
+## RULE 4
+
+Không làm dark mode mới trong phiên này.
+
+## RULE 5
+
+Không thêm hệ thống animation nâng cao.
+
+## RULE 6
+
+Không xây dựng thư viện UI từ đầu nếu đã có component tương ứng.
+
+## RULE 7
+
+Không thay đổi business logic để hỗ trợ một ý tưởng trang trí.
+
+## RULE 8
+
+Không tạo nhiều concept để tôi lựa chọn.
+
+Hãy triển khai một concept duy nhất: **Aurora Bento Premium**.
+
+## RULE 9
+
+Không tạo mock dashboard hoặc một trang demo mới thay vì sửa dashboard hiện có.
+
+## RULE 10
+
+Ưu tiên code thực tế hơn mô tả.
+
+## RULE 11
+
+Nếu gặp lỗi kỹ thuật, giải quyết nguyên nhân trực tiếp thay vì thiết kế lại kiến trúc.
+
+## RULE 12
+
+Khi đã hoàn thiện phạm vi đề ra, dừng lại. Không tự mở rộng sang giai đoạn mới.
+
+---
+
+# 24. PRIORITY SYSTEM
+
+Nếu ngân sách thời gian hoặc tài nguyên không đủ, áp dụng thứ tự:
+
+### P0 — MUST HAVE
+1. Design tokens.
+2. Sidebar.
+3. Header.
+4. Hero.
+5. Feature Cards.
+6. Build thành công.
+
+### P1 — SHOULD HAVE
+1. Quick Actions.
+2. Responsive.
+3. Hover animations.
+4. Empty States.
+5. Focus states.
+
+### P2 — OPTIONAL
+1. Trang trí SVG.
+2. Các hiệu ứng micro-interaction đặc biệt.
+3. Motion nâng cao.
+4. Các tiện ích nhỏ không bắt buộc.
+
+Nếu phải lựa chọn, **bỏ P2 trước, sau đó giảm phạm vi P1**, nhưng không hy sinh build và tính ổn định.
+
+Không để dự án ở trạng thái chưa compile chỉ vì muốn thêm hiệu ứng.
+
+---
+
+# 25. ACCEPTANCE CRITERIA
+
+Tôi chỉ chấp nhận kết quả khi đạt các tiêu chí sau.
+
+## VISUAL
+
+- Dashboard thể hiện rõ phong cách Aurora Bento.
+- Có phân cấp thông tin chuyên nghiệp.
+- Hero gây ấn tượng nhưng không phô trương.
+- Sidebar và Header thống nhất.
+- Card không bị rối.
+- Màu sắc hài hòa.
+- Font tiếng Việt đẹp.
+- Không có icon lệch.
+- Không có layout overflow.
+
+## FUNCTIONAL
+
+- Tất cả menu cũ vẫn hoạt động.
+- Navigation hoạt động.
+- Feature Cards mở đúng ứng dụng.
+- Không có nút giả.
+- Không có số liệu giả.
+- Không mất dữ liệu khi điều hướng.
+- Các module ngoài phạm vi không bị ảnh hưởng.
+
+## TECHNICAL
+
+- Không có lỗi TypeScript mới.
+- Production build thành công.
+- Không có dependency mới không cần thiết.
+- Không làm sai cấu hình Cloudflare.
+- Không phá IndexedDB.
+- Không phá các thành phần nghiệp vụ.
+- Không gây lỗi runtime rõ ràng.
+
+## UX
+
+- Dễ nhìn.
+- Dễ thao tác.
+- Thao tác chính nổi bật.
+- Animation nhẹ.
+- Responsive tốt.
+- Không làm người dùng mất phương hướng.
+
+---
+
+# 26. FINAL QA — KIỂM TRA THẬT
+
+Sau khi sửa code:
+
+1. Chạy TypeScript check nếu dự án hỗ trợ.
+2. Chạy production build.
+3. Kiểm tra import/export của các component liên quan.
+4. Kiểm tra route chính.
+5. Kiểm tra Sidebar.
+6. Kiểm tra Dashboard.
+7. Kiểm tra CTA.
+8. Kiểm tra responsive.
+9. Kiểm tra console error nếu có môi trường chạy browser.
+10. Xác nhận không thêm dependency không cần thiết.
+
+Nếu có khả năng chụp screenshot:
+
+- Chụp Dashboard ở 1440×900.
+- Chụp Dashboard ở 1366×768.
+- Kiểm tra mobile.
+- Quan sát overflow và lỗi font.
+
+Nếu không có công cụ screenshot/browser, không được tuyên bố đã trực tiếp kiểm tra giao diện trên trình duyệt.
+
+Nếu test không chạy được, báo trạng thái NOT TESTED và lý do.
+
+---
+
+# 27. RESULT REPORT — NGẮN GỌN
+
+Sau khi hoàn thành, chỉ báo cáo:
+
+### 1. Implemented
+Những phần đã thực sự triển khai.
+
+### 2. Changed Files
+Danh sách file chính đã chỉnh sửa.
+
+### 3. Design Result
+Mô tả ngắn phong cách Aurora Bento đã đạt được.
+
+### 4. Tests
+- TypeScript: PASS / FAIL / NOT TESTED.
+- Production Build: PASS / FAIL / NOT TESTED.
+- Navigation: PASS / FAIL / NOT TESTED.
+- Responsive: PASS / FAIL / NOT TESTED.
+
+### 5. Known Limitations
+Những vấn đề chưa hoàn thiện.
+
+### 6. Next Suggested Phase
+Tối đa 3 ý ngắn.
+
+Không viết báo cáo dài hàng nghìn từ.
+
+---
+
+# 28. FINAL EXECUTION DIRECTIVE
+
+**BẮT ĐẦU TRIỂN KHAI NGAY TRONG SOURCE CODE HIỆN TẠI.**
+
+Không chỉ tạo bản kế hoạch.
+
+Không chỉ mô tả giao diện.
+
+Không tự tạo website thay thế.
+
+Không yêu cầu tôi xác nhận từng bước nếu thông tin cần thiết đã có trong repository.
+
+Hãy:
+
+1. Audit nhanh cấu trúc.
+2. Xác định phạm vi chỉnh sửa an toàn.
+3. Tạo Aurora Design System.
+4. Nâng cấp Sidebar.
+5. Nâng cấp Header.
+6. Xây Aurora Bento Dashboard.
+7. Hoàn thiện micro-interactions.
+8. Kiểm tra responsive.
+9. Chạy các kiểm tra kỹ thuật khả dụng.
+10. Báo cáo và dừng.
+
+## TIÊU CHUẨN CUỐI CÙNG
+
+Giao diện TeacherOS phải có cảm giác:
+
+**Một ứng dụng SaaS giáo dục thế hệ mới, kết hợp sự tinh tế của Apple, tính tối giản của Linear, bố cục Bento và hiệu ứng Aurora Glass.**
+
+Đẹp ngay từ cái nhìn đầu tiên.
+
+Rõ ràng khi sử dụng.
+
+Mượt mà khi tương tác.
+
+Ổn định khi triển khai.
+
+**VISUAL IMPACT: HIGH**
+
+**IMPLEMENTATION SCOPE: CONTROLLED**
+
+**PERFORMANCE OVERHEAD: LOW**
+
+**EXISTING FUNCTIONALITY: PRESERVED**
+
+**PRODUCTION BUILD: REQUIRED**
+
+**KHÔNG MỞ RỘNG PHẠM VI. KHÔNG TẠO DEMO GIẢ. HÃY HOÀN THÀNH MỘT BẢN NÂNG CẤP THỰC TẾ.**

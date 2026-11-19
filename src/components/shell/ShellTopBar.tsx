@@ -79,105 +79,127 @@ export function ShellTopBar({
     };
   }, [notifOpen]);
 
+  const isDesktop = activeView === 'desktop';
   const isToolsHub = activeView === 'tools';
   const currentApp = activeView === 'tools' ? null : getAppById(activeView);
   const isSubTool = currentApp !== null && SUB_TOOL_IDS.has(currentApp.id);
 
+  const primaryBreadcrumbLabel = isDesktop
+    ? 'Trang chủ'
+    : isToolsHub
+    ? 'Tất cả công cụ'
+    : currentApp?.name ?? 'Trang chủ';
+
   return (
-    <header className="no-print sticky top-0 z-30 h-14 border-b border-slate-200/90 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm">
-      <div className="mx-auto flex h-full max-w-[1600px] items-center justify-between gap-3 px-4 sm:px-6">
-        {/* Left: Sidebar Toggle + Brand + Contextual Breadcrumb */}
+    <header className="no-print sticky top-0 z-30 h-16 border-b border-slate-200/70 dark:border-slate-800/80 bg-white/82 dark:bg-slate-900/84 backdrop-blur-md">
+      <div className="mx-auto flex h-full max-w-[1600px] items-center justify-between gap-4 px-4 sm:px-6">
+        {/* Left: Sidebar Toggle + Real Breadcrumb & Current Page Title */}
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
             onClick={onToggleSidebar}
             aria-label="Ẩn/hiện thanh điều hướng bên trái (Ctrl+B)"
             title="Ẩn/hiện Sidebar (Ctrl+B)"
-            className="hidden lg:inline-flex items-center justify-center rounded-lg p-1.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors shrink-0"
+            className="hidden lg:inline-flex items-center justify-center rounded-xl p-2 text-slate-500 dark:text-slate-400 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-100 transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
-            <PanelLeft className="h-4 w-4" aria-hidden="true" />
+            <PanelLeft className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
 
-          <button
-            type="button"
-            onClick={onSelectDesktop}
-            className="inline-flex items-center gap-2 text-left rounded-lg py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 shrink-0"
+          <nav
+            aria-label="Đường dẫn vị trí"
+            className="flex items-center gap-1.5 min-w-0 text-sm"
           >
-            <span className="text-base font-bold tracking-tight text-slate-950 dark:text-slate-50">
-              TeacherOS
-            </span>
-            <span className="rounded-md bg-blue-50 dark:bg-blue-950/70 px-1.5 py-0.5 text-[11px] font-semibold font-mono-num text-blue-600 dark:text-blue-400">
-              4.1
-            </span>
-          </button>
-
-          {(isToolsHub || isSubTool) && (
-            <nav
-              aria-label="Đường dẫn vị trí"
-              className="hidden md:flex items-center gap-1 min-w-0 text-xs text-slate-500 dark:text-slate-400"
+            <button
+              type="button"
+              onClick={onSelectDesktop}
+              aria-label="Về trang chủ TeacherOS"
+              className="inline-flex items-center gap-2 rounded-lg px-1 py-1 text-left font-bold tracking-tight text-[#172033] dark:text-slate-50 hover:text-[#635BFF] dark:hover:text-indigo-400 transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-[#635BFF]"
             >
-              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700" aria-hidden="true" />
-              <button
-                type="button"
-                onClick={onOpenToolsHub}
-                className={`rounded px-1.5 py-0.5 transition-colors whitespace-nowrap ${
-                  isToolsHub
-                    ? 'font-medium text-slate-900 dark:text-slate-100'
-                    : 'hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-800 dark:hover:text-slate-200'
-                }`}
-              >
-                Công cụ
-              </button>
-              {isSubTool && currentApp && (
-                <>
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700" aria-hidden="true" />
-                  <span className="font-medium text-slate-800 dark:text-slate-200 truncate max-w-[160px]">
-                    {currentApp.shortName}
-                  </span>
-                </>
-              )}
-            </nav>
-          )}
-
-          {!isToolsHub && !isSubTool && activeContextTitle && activeView !== 'desktop' && (
-            <nav
-              aria-label="Ngữ cảnh đang mở"
-              className="hidden xl:flex items-center gap-1 min-w-0 text-xs text-slate-500 dark:text-slate-400"
-            >
-              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700" aria-hidden="true" />
-              <span className="truncate max-w-[200px] text-slate-600 dark:text-slate-300">
-                {activeContextTitle}
+              <span className="inline-flex lg:hidden h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-[#635BFF] to-[#3B82F6] text-[11px] font-bold text-white">
+                T
               </span>
-            </nav>
-          )}
+              <span className={isDesktop ? 'inline' : 'hidden sm:inline'}>
+                TeacherOS
+              </span>
+            </button>
+
+            <ChevronRight
+              className={`${
+                isDesktop ? 'hidden sm:block' : 'block'
+              } h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700`}
+              aria-hidden="true"
+            />
+
+            {isSubTool && (
+              <>
+                <button
+                  type="button"
+                  onClick={onOpenToolsHub}
+                  className="hidden md:inline-flex items-center rounded-lg px-1.5 py-0.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-200 transition-colors whitespace-nowrap shrink-0"
+                >
+                  Công cụ
+                </button>
+                <ChevronRight
+                  className="hidden md:block h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700"
+                  aria-hidden="true"
+                />
+              </>
+            )}
+
+            <span
+              className={`${
+                isDesktop ? 'hidden sm:inline' : 'inline'
+              } font-semibold text-[#172033] dark:text-slate-100 truncate max-w-[160px] sm:max-w-[240px]`}
+            >
+              {primaryBreadcrumbLabel}
+            </span>
+
+            {!isDesktop && !isToolsHub && activeContextTitle && (
+              <>
+                <ChevronRight
+                  className="hidden xl:block h-3.5 w-3.5 shrink-0 text-slate-300 dark:text-slate-700"
+                  aria-hidden="true"
+                />
+                <span className="hidden xl:inline truncate max-w-[220px] text-xs font-medium text-slate-500 dark:text-slate-400">
+                  {activeContextTitle}
+                </span>
+              </>
+            )}
+          </nav>
         </div>
 
-        {/* Center: Clean Pill Universal Search (Ctrl+K) */}
+        {/* Center: Universal Search Bar (Ctrl+K) */}
         <div className="flex-1 max-w-md hidden sm:block">
           <button
             type="button"
             onClick={onOpenCommandPalette}
             data-tour-id="topbar-search-desktop"
             aria-label="Tìm kiếm nhanh toàn hệ thống (Ctrl+K)"
-            className="flex w-full items-center justify-between gap-3 rounded-full border border-slate-200 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/80 px-4 py-1.5 text-xs sm:text-sm text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600 hover:bg-white dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+            className="group flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200/85 dark:border-slate-700/80 bg-white/85 dark:bg-slate-800/80 px-3.5 py-2 text-xs sm:text-[13px] text-slate-500 dark:text-slate-400 shadow-[0_1px_2px_rgba(23,32,51,0.03)] hover:border-[#635BFF]/45 dark:hover:border-indigo-500/45 hover:bg-white dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-200 transition-all duration-150 focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
-            <span className="inline-flex items-center gap-2 truncate">
-              <Search className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
-              <span className="truncate">Tìm kiếm nhanh (Ctrl+K)</span>
+            <span className="inline-flex items-center gap-2.5 truncate">
+              <Search
+                className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-[#635BFF] dark:group-hover:text-indigo-400 transition-colors"
+                aria-hidden="true"
+              />
+              <span className="truncate">Tìm kiếm bài giảng, tài liệu, đề kiểm tra...</span>
             </span>
+            <kbd className="hidden md:inline-block rounded-md border border-slate-200/90 dark:border-slate-700 bg-[#F8F9FF] dark:bg-slate-900 px-1.5 py-0.5 text-[11px] font-mono-num font-medium text-slate-500 dark:text-slate-400 shrink-0">
+              Ctrl + K
+            </kbd>
           </button>
         </div>
 
-        {/* Right: Minimal Utility Icons Only */}
+        {/* Right: Real Application Controls */}
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
           <button
             type="button"
             onClick={onOpenCommandPalette}
             data-tour-id="topbar-search-mobile"
             aria-label="Tìm kiếm và bảng lệnh"
-            className="inline-flex sm:hidden items-center justify-center rounded-lg p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="inline-flex sm:hidden items-center justify-center rounded-xl p-2 text-slate-600 dark:text-slate-300 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 transition-colors focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
-            <Search className="h-4 w-4" aria-hidden="true" />
+            <Search className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
 
           <button
@@ -185,13 +207,13 @@ export function ShellTopBar({
             onClick={onOpenSettings}
             aria-label="Cài đặt & Sao lưu"
             title="Cài đặt & Sao lưu (Alt+0)"
-            className={`inline-flex items-center justify-center rounded-lg p-2 transition-colors ${
+            className={`inline-flex items-center justify-center rounded-xl p-2 transition-colors focus-visible:outline-2 focus-visible:outline-[#635BFF] ${
               activeView === 'settings'
-                ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                ? 'bg-[#F3F0FF] dark:bg-indigo-950/75 text-[#635BFF] dark:text-indigo-400'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-100'
             }`}
           >
-            <Settings className="h-4 w-4" aria-hidden="true" />
+            <Settings className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
 
           {/* Notifications */}
@@ -211,14 +233,13 @@ export function ShellTopBar({
                   : 'Thông báo hệ thống'
               }
               title="Thông báo & Nhật ký lưu cục bộ"
-              className="relative inline-flex items-center justify-center rounded-lg p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              className="relative inline-flex items-center justify-center rounded-xl p-2 text-slate-600 dark:text-slate-300 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-100 transition-colors focus-visible:outline-2 focus-visible:outline-[#635BFF]"
             >
-              <Bell className="h-4 w-4" aria-hidden="true" />
+              <Bell className="h-[18px] w-[18px]" aria-hidden="true" />
               {unreadCount > 0 && (
-                <span
-                  aria-hidden="true"
-                  className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-blue-600 dark:bg-blue-400 ring-2 ring-white dark:ring-slate-900"
-                />
+                <span className="ml-1 text-[11px] font-mono-num font-bold text-[#635BFF] dark:text-indigo-400">
+                  {unreadCount}
+                </span>
               )}
             </button>
 
@@ -226,10 +247,10 @@ export function ShellTopBar({
               <div
                 role="dialog"
                 aria-label="Nhật ký hoạt động và thông báo nội bộ"
-                className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3.5 shadow-lg z-50"
+                className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl border border-slate-200/90 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 shadow-xl z-50"
               >
                 <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2.5">
-                  <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  <span className="text-xs font-semibold text-[#172033] dark:text-slate-100">
                     Thông báo &amp; Nhật ký lưu cục bộ
                   </span>
                   <div className="flex items-center gap-2.5">
@@ -237,7 +258,7 @@ export function ShellTopBar({
                       <button
                         type="button"
                         onClick={onClearNotifications}
-                        className="text-[11px] font-medium text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                        className="text-[11px] font-medium text-slate-500 hover:text-[#172033] dark:hover:text-slate-200"
                       >
                         Xóa nhật ký
                       </button>
@@ -245,7 +266,7 @@ export function ShellTopBar({
                     <button
                       type="button"
                       onClick={() => setNotifOpen(false)}
-                      className="text-[11px] font-medium text-blue-600 dark:text-blue-400"
+                      className="text-[11px] font-semibold text-[#635BFF] dark:text-indigo-400"
                     >
                       Đóng
                     </button>
@@ -271,7 +292,7 @@ export function ShellTopBar({
                                 item.tone === 'error'
                                   ? 'text-red-600 dark:text-red-400'
                                   : item.tone === 'info'
-                                  ? 'text-blue-600 dark:text-blue-400'
+                                  ? 'text-[#635BFF] dark:text-indigo-400'
                                   : 'text-emerald-700 dark:text-emerald-400'
                               }`}
                             >
@@ -304,9 +325,9 @@ export function ShellTopBar({
               data-tour-id="topbar-help"
               aria-label="Mở TeacherOS Academy — Hướng dẫn tương tác"
               title="Hướng dẫn sử dụng (TeacherOS Academy)"
-              className="inline-flex items-center justify-center rounded-lg p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              className="inline-flex items-center justify-center rounded-xl p-2 text-slate-600 dark:text-slate-300 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-100 transition-colors focus-visible:outline-2 focus-visible:outline-[#635BFF]"
             >
-              <HelpCircle className="h-4 w-4" aria-hidden="true" />
+              <HelpCircle className="h-[18px] w-[18px]" aria-hidden="true" />
             </button>
           )}
 
@@ -323,12 +344,12 @@ export function ShellTopBar({
                 ? 'Chuyển sang giao diện sáng'
                 : 'Chuyển sang giao diện tối'
             }
-            className="inline-flex items-center justify-center rounded-lg p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="inline-flex items-center justify-center rounded-xl p-2 text-slate-600 dark:text-slate-300 hover:bg-[#EEF0FF] dark:hover:bg-slate-800 hover:text-[#172033] dark:hover:text-slate-100 transition-colors focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
             {theme === 'dark' ? (
-              <Sun className="h-4 w-4 text-amber-400" aria-hidden="true" />
+              <Sun className="h-[18px] w-[18px] text-amber-400" aria-hidden="true" />
             ) : (
-              <Moon className="h-4 w-4" aria-hidden="true" />
+              <Moon className="h-[18px] w-[18px]" aria-hidden="true" />
             )}
           </button>
         </div>

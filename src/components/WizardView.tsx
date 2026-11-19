@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Check,
+  CheckCircle2,
   Download,
+  FileText,
+  Printer,
   Redo2,
   RefreshCw,
   Save,
@@ -53,11 +57,11 @@ interface WizardViewProps {
 }
 
 const STEPS = [
-  { num: 1, short: 'Thông tin & Mục tiêu' },
-  { num: 2, short: 'Hoạt động 5–15p' },
-  { num: 3, short: 'Câu hỏi & Phân bổ' },
-  { num: 4, short: 'Biên tập Rubric' },
-  { num: 5, short: 'Xem trước & In A4' },
+  { num: 1, short: 'Thông tin chung' },
+  { num: 2, short: 'Hoạt động' },
+  { num: 3, short: 'Phiếu học tập' },
+  { num: 4, short: 'Rubric' },
+  { num: 5, short: 'Xem trước in' },
 ] as const;
 
 export function WizardView({
@@ -92,7 +96,6 @@ export function WizardView({
     }
   };
 
-  // Sync if user opens a different pack from Library or Home
   useEffect(() => {
     setPack(initialPack);
     setHistory(createHistoryState(initialPack));
@@ -103,7 +106,6 @@ export function WizardView({
     onAutosaveStateChange?.('saved');
   }, [initialPack.id]);
 
-  // Cảnh báo trình duyệt nếu rời trang khi còn dữ liệu chưa lưu xuống IndexedDB
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current || saveError !== null) {
@@ -115,7 +117,6 @@ export function WizardView({
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [saveError]);
 
-  // Debounced autosave to IndexedDB (only when dirty, deduplicated by pack.id)
   useEffect(() => {
     if (!dirtyRef.current) return;
     const timer = window.setTimeout(async () => {
@@ -136,7 +137,6 @@ export function WizardView({
           temporaryMode ? `Đã giữ tạm lúc ${time}` : `Đã tự lưu lúc ${time}`
         );
       } catch (err) {
-        // Giữ nguyên dữ liệu người dùng đang nhập và đánh dấu chưa lưu để không mất nội dung
         markDirty(true);
         setSaveError(classifyStorageError(err));
         onAutosaveStateChange?.('error');
@@ -220,7 +220,6 @@ export function WizardView({
   };
 
   const goToStep = async (nextStep: number) => {
-    // When moving forward, validate the step being exited
     if (nextStep > step) {
       const stepErrors = validateCurrentStep(step);
       const blockingErrors = { ...stepErrors };
@@ -255,115 +254,191 @@ export function WizardView({
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
 
+  // Compute live Document Inspector readiness checklist
+  const inspectorChecks = useMemo(() => {
+    const step1Valid =
+      pack.title.trim().length > 0 &&
+      pack.subject.trim().length > 0 &&
+      pack.grade.trim().length > 0 &&
+      pack.objectives.some((o) => o.trim().length > 0);
+
+    const totalMinutes = pack.activities.reduce((sum, a) => sum + (Number(a.durationMinutes) || 0), 0);
+    const step2Valid =
+      pack.activities.length > 0 && totalMinutes === pack.duration;
+
+    const step3Valid = pack.questions.length >= 6;
+
+    const rubricWeightSum = pack.rubric.reduce((sum, r) => sum + (Number(r.weightPercent) || 0), 0);
+    const step4Valid = pack.rubric.length >= 2 && rubricWeightSum === 100;
+
+    const items = [
+      {
+        id: 'info',
+        stepNum: 1,
+        label: 'Thông tin bài dạy đầy đủ',
+        detail: step1Valid
+          ? `${pack.subject} · ${pack.grade} (${pack.objectives.filter((o) => o.trim()).length} mục tiêu)`
+          : 'Cần bổ sung tên bài hoặc mục tiêu bài dạy',
+        passed: step1Valid,
+      },
+      {
+        id: 'activities',
+        stepNum: 2,
+        label: 'Có hoạt động dạy học',
+        detail: `${pack.activities.length} hoạt động · ${totalMinutes}/${pack.duration} phút`,
+        passed: step2Valid,
+      },
+      {
+        id: 'worksheet',
+        stepNum: 3,
+        label: 'Có phiếu học tập',
+        detail: `${pack.questions.length} câu hỏi phân hóa (Đề A/B/C)`,
+        passed: step3Valid,
+      },
+      {
+        id: 'rubric',
+        stepNum: 4,
+        label: 'Có rubric đánh giá',
+        detail: `${pack.rubric.length} tiêu chí · Tổng trọng số ${rubricWeightSum}%`,
+        passed: step4Valid,
+      },
+    ];
+
+    const passedCount = items.filter((i) => i.passed).length;
+    const readinessPercent = Math.round((passedCount / items.length) * 100);
+
+    return { items, passedCount, readinessPercent };
+  }, [pack]);
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 space-y-6 print:max-w-none print:m-0 print:p-0 print:space-y-0">
-      {/* Top Wizard Header (hidden when printing) */}
-      <div className="no-print flex flex-col gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-            <button
-              type="button"
-              onClick={onBackToLibrary}
-              className="inline-flex items-center gap-1 font-medium text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Kho của tôi</span>
-            </button>
-            <span aria-hidden="true">/</span>
-            <span className="text-slate-900 dark:text-slate-100 font-medium truncate max-w-[260px] sm:max-w-md">
-              {pack.title.trim() || 'Bộ tiết dạy mới'}
-            </span>
-            {pack.isDemo && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="font-semibold text-amber-700 dark:text-amber-300">
-                  Bộ mẫu DEMO
+    <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 space-y-5 print:max-w-none print:m-0 print:p-0 print:space-y-0">
+      {/* Top Lesson Summary Card & Tab Strip (hidden when printing) */}
+      <div className="no-print rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5 shadow-2xs space-y-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 border border-blue-200/70 dark:border-blue-800/70">
+              <FileText className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 truncate">
+                  Bài: {pack.title.trim() || 'Bộ tiết dạy mới'}
+                </h2>
+                {pack.isDemo && (
+                  <span className="rounded-md bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+                    DEMO
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <span className="font-medium text-slate-700 dark:text-slate-300">
+                  {pack.subject || 'Chưa chọn môn'} · {pack.grade || 'Chưa chọn lớp'}
                 </span>
-              </>
-            )}
-            <span aria-hidden="true">·</span>
-            <span>{pack.status === 'completed' ? 'Hoàn thành' : 'Bản nháp'}</span>
+                <span aria-hidden="true">|</span>
+                <span className="font-mono-num">
+                  {pack.duration === 90 ? '2 tiết (90 phút)' : '1 tiết (45 phút)'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={onBackToLibrary}
+                  className="inline-flex items-center gap-1 font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                >
+                  <ArrowLeft className="h-3 w-3" aria-hidden="true" />
+                  <span>Kho bộ tiết dạy</span>
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {lastSavedText && !saveError && (
-              <span className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">{lastSavedText}</span>
-            )}
-            {saveError && (
-              <span className="text-xs font-medium text-red-700 dark:text-red-400">
-                Chưa lưu được vào IndexedDB
-              </span>
-            )}
-
-            {/* Undo / Redo Controls */}
-            <div
-              role="group"
-              aria-label="Hoàn tác và Làm lại chỉnh sửa"
-              className="inline-flex items-center rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-0.5"
-            >
-              <button
-                type="button"
-                onClick={handleUndo}
-                disabled={!canUndo}
-                aria-label="Hoàn tác thao tác vừa sửa"
-                title="Hoàn tác (Undo)"
-                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
-              >
-                <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span className="hidden sm:inline">Hoàn tác</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleRedo}
-                disabled={!canRedo}
-                aria-label="Làm lại thao tác vừa hoàn tác"
-                title="Làm lại (Redo)"
-                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
-              >
-                <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span className="hidden sm:inline">Làm lại</span>
-              </button>
+          <div className="flex flex-wrap items-center justify-between lg:justify-end gap-3 shrink-0">
+            <div className="min-w-[180px] rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 px-3.5 py-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-slate-600 dark:text-slate-400">
+                  Mức hoàn thiện
+                </span>
+                <span className="font-mono-num font-bold text-blue-600 dark:text-blue-400">
+                  {inspectorChecks.readinessPercent}%
+                </span>
+              </div>
+              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                  style={{ width: `${inspectorChecks.readinessPercent}%` }}
+                />
+              </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => void handleManualSave()}
-              disabled={saving}
-              className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-60 whitespace-nowrap"
-            >
-              <Save className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-              <span>{saving ? 'Đang lưu...' : 'Lưu ngay'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              {lastSavedText && !saveError && (
+                <span className="hidden xl:inline text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+                  {lastSavedText}
+                </span>
+              )}
+
+              <div
+                role="group"
+                aria-label="Hoàn tác và Làm lại chỉnh sửa"
+                className="inline-flex items-center rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-0.5"
+              >
+                <button
+                  type="button"
+                  onClick={handleUndo}
+                  disabled={!canUndo}
+                  aria-label="Hoàn tác thao tác vừa sửa"
+                  title="Hoàn tác (Undo)"
+                  className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="hidden sm:inline">Hoàn tác</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRedo}
+                  disabled={!canRedo}
+                  aria-label="Làm lại thao tác vừa hoàn tác"
+                  title="Làm lại (Redo)"
+                  className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="hidden sm:inline">Làm lại</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* 5-Step Progress Bar */}
-        <nav aria-label="Các bước soạn bộ tiết dạy" data-tour-id="ls-wizard-nav">
-          <ol className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {/* Clean 5-Tab Bar matching Reference Image 4 */}
+        <nav
+          aria-label="Các bước soạn bộ tiết dạy"
+          data-tour-id="ls-wizard-nav"
+          className="border-t border-slate-100 dark:border-slate-800 pt-3.5"
+        >
+          <ol className="flex flex-wrap items-center gap-2">
             {STEPS.map((s) => {
               const isCurrent = step === s.num;
               const isDone = step > s.num;
               return (
-                <li key={s.num}>
+                <li key={s.num} className="flex-1 min-w-[130px]">
                   <button
                     type="button"
                     onClick={() => goToStep(s.num)}
                     aria-current={isCurrent ? 'step' : undefined}
-                    className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-blue-600 ${
+                    className={`flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition-all focus-visible:outline-2 focus-visible:outline-blue-600 ${
                       isCurrent
-                        ? 'border-blue-600 bg-blue-600 dark:bg-blue-600 dark:border-blue-500 text-white'
+                        ? 'border-blue-600 bg-blue-600 text-white shadow-2xs'
                         : isDone
                         ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700'
-                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-800'
+                        : 'border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-800'
                     }`}
                   >
                     <span
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-mono-num font-semibold ${
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-mono-num font-bold ${
                         isCurrent
                           ? 'bg-white/20 text-white'
                           : isDone
-                          ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300'
-                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
+                          ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                       }`}
                     >
                       {isDone ? <Check className="h-3 w-3" aria-hidden="true" /> : s.num}
@@ -414,67 +489,170 @@ export function WizardView({
         )}
       </div>
 
-      {/* Active Step Panel */}
+      {/* Main Content Area: 2-column with Document Inspector for steps 1-4; full width for step 5 A4 print preview */}
       <div
-        data-tour-id="ls-wizard-content"
-        className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-6 print:border-none print:p-0 print:rounded-none"
+        className={
+          step < 5
+            ? 'grid grid-cols-1 gap-6 lg:grid-cols-12 items-start'
+            : 'block'
+        }
       >
-        {step === 1 && (
-          <Step1Metadata pack={pack} errors={errors} onChange={handlePackChange} />
-        )}
-        {step === 2 && (
-          <Step2Activities pack={pack} errors={errors} onChange={handlePackChange} />
-        )}
-        {step === 3 && (
-          <Step3Questions pack={pack} errors={errors} onChange={handlePackChange} />
-        )}
-        {step === 4 && (
-          <Step4Rubric pack={pack} errors={errors} onChange={handlePackChange} />
-        )}
-        {step === 5 && (
-          <Step5PrintPreview
-            pack={pack}
-            settings={settings}
-            onMarkCompleted={handleMarkCompleted}
-            onOpenSettings={onOpenSettings}
-          />
-        )}
-      </div>
-
-      {/* Bottom Wizard Navigation (hidden when printing) */}
-      <div className="no-print flex items-center justify-between gap-4 border-t border-slate-200 dark:border-slate-800 pt-4">
-        <button
-          type="button"
-          onClick={() => goToStep(Math.max(1, step - 1))}
-          disabled={step === 1}
-          className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
+        <div
+          data-tour-id="ls-wizard-content"
+          className={`${
+            step < 5 ? 'lg:col-span-8' : ''
+          } rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-6 shadow-2xs print:border-none print:p-0 print:rounded-none print:shadow-none`}
         >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          <span>Quay lại</span>
-        </button>
+          {step === 1 && (
+            <Step1Metadata pack={pack} errors={errors} onChange={handlePackChange} />
+          )}
+          {step === 2 && (
+            <Step2Activities pack={pack} errors={errors} onChange={handlePackChange} />
+          )}
+          {step === 3 && (
+            <Step3Questions pack={pack} errors={errors} onChange={handlePackChange} />
+          )}
+          {step === 4 && (
+            <Step4Rubric pack={pack} errors={errors} onChange={handlePackChange} />
+          )}
+          {step === 5 && (
+            <Step5PrintPreview
+              pack={pack}
+              settings={settings}
+              onMarkCompleted={handleMarkCompleted}
+              onOpenSettings={onOpenSettings}
+            />
+          )}
 
-        <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-          Bước {step} / 5
+          {/* Bottom Wizard Navigation inside Editor Card */}
+          <div className="no-print mt-6 flex items-center justify-between gap-4 border-t border-slate-100 dark:border-slate-800 pt-4">
+            <button
+              type="button"
+              onClick={() => goToStep(Math.max(1, step - 1))}
+              disabled={step === 1}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Quay lại</span>
+            </button>
+
+            <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+              Bước {step} / 5
+            </div>
+
+            {step < 5 ? (
+              <button
+                type="button"
+                onClick={() => goToStep(step + 1)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 whitespace-nowrap shadow-2xs"
+              >
+                <span>Tiếp tục bước {step + 1}</span>
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleManualSave('completed')}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap shadow-2xs"
+              >
+                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Lưu &amp; Hoàn tất</span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {step < 5 ? (
-          <button
-            type="button"
-            onClick={() => goToStep(step + 1)}
-            className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 dark:hover:bg-blue-500 whitespace-nowrap"
+        {/* Right Sticky Sidebar: Kiểm tra bài dạy (Document Inspector) matching Reference Image 4 */}
+        {step < 5 && (
+          <aside
+            aria-label="Kiểm tra bài dạy"
+            className="no-print lg:col-span-4 lg:sticky lg:top-20 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xs space-y-4"
           >
-            <span>Tiếp tục bước {step + 1}</span>
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => handleManualSave('completed')}
-            className="inline-flex items-center gap-1.5 rounded-[10px] bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 whitespace-nowrap"
-          >
-            <Check className="h-4 w-4" aria-hidden="true" />
-            <span>Lưu &amp; Hoàn tất</span>
-          </button>
+            <div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                Kiểm tra bài dạy
+              </h3>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                Rà soát tiêu chuẩn giáo án trước khi xuất bản &amp; in A4
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                  Mức sẵn sàng
+                </span>
+                <span className="font-mono-num text-sm font-bold text-blue-600 dark:text-blue-400">
+                  {inspectorChecks.readinessPercent}%
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                  style={{ width: `${inspectorChecks.readinessPercent}%` }}
+                />
+              </div>
+            </div>
+
+            <ul className="space-y-2">
+              {inspectorChecks.items.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    onClick={() => goToStep(item.stepNum)}
+                    className={`w-full text-left rounded-xl border p-3 transition-colors ${
+                      step === item.stepNum
+                        ? 'border-blue-300 dark:border-blue-700 bg-blue-50/50 dark:bg-blue-950/30'
+                        : 'border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      {item.passed ? (
+                        <CheckCircle2
+                          className="h-4 w-4 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <AlertCircle
+                          className="h-4 w-4 text-amber-500 dark:text-amber-400 mt-0.5 shrink-0"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                          {item.label}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {item.detail}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            <div className="pt-2 space-y-2.5 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => void handleManualSave()}
+                disabled={saving}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white shadow-2xs transition-colors disabled:opacity-60"
+              >
+                <Save className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{saving ? 'Đang lưu bài dạy...' : 'Lưu bài dạy'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => goToStep(5)}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+              >
+                <Printer className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                <span>Xem trước in</span>
+              </button>
+            </div>
+          </aside>
         )}
       </div>
     </div>

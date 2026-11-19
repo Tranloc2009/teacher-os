@@ -1336,7 +1336,7 @@ export default function App() {
         launcherOpen={launcherOpen}
         paletteOpen={paletteOpen}
       />
-      <div className="min-h-screen bg-[#f8fafc] dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col pb-14 lg:pb-0">
+      <div className="min-h-screen aurora-app-canvas text-[#172033] dark:text-slate-100 flex flex-col pb-14 lg:pb-0">
         <TopBarWithTutorial
           activeView={activeView}
           activeContextTitle={activeContextTitle}
@@ -1402,7 +1402,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Workspace Canvas: Minimal 5-Item Sidebar + Keep-Alive Application Viewport */}
+      {/* Main Workspace Canvas: Aurora Soft Glass Sidebar + Keep-Alive Application Viewport */}
       <div className="flex-1 flex min-w-0">
         <ShellSidebar
           activeView={activeView}
@@ -1410,6 +1410,7 @@ export default function App() {
           lessonStudioHasDraftChanges={lessonStudioHasDraftChanges}
           onToggleCollapse={toggleSidebar}
           onSelectNav={handleSelectNav}
+          onOpenApp={openApp}
         />
 
         <div className="flex-1 min-w-0">
@@ -1417,12 +1418,15 @@ export default function App() {
             <ErrorBoundary moduleName="Desktop Home" packs={packs} settings={settings}>
               <DesktopHome
                 packs={packs}
+                mathExams={mathExams}
+                resources={resources}
                 workflows={workflows}
                 canvasBoards={canvasBoards}
                 canvasNodes={canvasNodes}
                 hasActiveUnsavedDraft={lessonStudioHasDraftChanges}
                 onCreateNewPack={handleCreateNew}
                 onOpenApp={openApp}
+                onOpenToolsHub={openToolsHub}
                 onOpenLibrary={() => {
                   setLessonStudioMode('library');
                   openApp('lesson-studio');
