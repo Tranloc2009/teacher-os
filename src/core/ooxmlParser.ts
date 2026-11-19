@@ -542,6 +542,200 @@ interface MediaDescriptor {
   dataUrl?: string;
 }
 
+interface DocxNumberingLevelDef {
+  start: number;
+  numFmt: string;
+  lvlText: string;
+}
+
+interface DocxNumberingRegistry {
+  abstractLevels: Map<string, Map<number, DocxNumberingLevelDef>>;
+  numToAbstract: Map<string, string>;
+  numStartOverrides: Map<string, Map<number, number>>;
+  counters: Map<string, Map<number, number>>;
+}
+
+function toRomanNumeral(num: number): string {
+  const table: Array<[number, string]> = [
+    [1000, 'M'],
+    [900, 'CM'],
+    [500, 'D'],
+    [400, 'CD'],
+    [100, 'C'],
+    [90, 'XC'],
+    [50, 'L'],
+    [40, 'XL'],
+    [10, 'X'],
+    [9, 'IX'],
+    [5, 'V'],
+    [4, 'IV'],
+    [1, 'I'],
+  ];
+  let n = Math.max(1, Math.min(3999, Math.floor(num)));
+  let out = '';
+  for (const [val, sym] of table) {
+    while (n >= val) {
+      out += sym;
+      n -= val;
+    }
+  }
+  return out;
+}
+
+function formatNumberingValue(val: number, numFmt: string): string {
+  const safeVal = Math.max(1, val);
+  switch (numFmt) {
+    case 'upperLetter':
+      return String.fromCharCode(65 + ((safeVal - 1) % 26));
+    case 'lowerLetter':
+      return String.fromCharCode(97 + ((safeVal - 1) % 26));
+    case 'upperRoman':
+      return toRomanNumeral(safeVal);
+    case 'lowerRoman':
+      return toRomanNumeral(safeVal).toLowerCase();
+    case 'bullet':
+    case 'none':
+      return '';
+    case 'decimal':
+    default:
+      return String(safeVal);
+  }
+}
+
+function parseDocxNumberingXml(xml: string): DocxNumberingRegistry {
+  const registry: DocxNumberingRegistry = {
+    abstractLevels: new Map(),
+    numToAbstract: new Map(),
+    numStartOverrides: new Map(),
+    counters: new Map(),
+  };
+
+  const tree = parseXmlTree(xml);
+  const abstractNodes = findAllDescendants(tree, 'w:abstractNum');
+  for (const absNode of abstractNodes) {
+    const absId = absNode.attrs?.['w:abstractNumId'];
+    if (!absId) continue;
+    const lvlMap = new Map<number, DocxNumberingLevelDef>();
+    const lvls = findChildren(absNode, 'w:lvl');
+    for (const lvl of lvls) {
+      const ilvl = Number.parseInt(lvl.attrs?.['w:ilvl'] ?? '0', 10);
+      const startVal = Number.parseInt(
+        findFirstDescendant(lvl, 'w:start')?.attrs?.['w:val'] ?? '1',
+        10
+      );
+      const numFmt = findFirstDescendant(lvl, 'w:numFmt')?.attrs?.['w:val'] ?? 'decimal';
+      const lvlText = findFirstDescendant(lvl, 'w:lvlText')?.attrs?.['w:val'] ?? `%${ilvl + 1}.`;
+      lvlMap.set(Number.isFinite(ilvl) ? ilvl : 0, {
+        start: Number.isFinite(startVal) ? startVal : 1,
+        numFmt,
+        lvlText,
+      });
+    }
+    registry.abstractLevels.set(absId, lvlMap);
+  }
+
+  const numNodes = findAllDescendants(tree, 'w:num');
+  for (const numNode of numNodes) {
+    const numId = numNode.attrs?.['w:numId'];
+    const absId = findFirstDescendant(numNode, 'w:abstractNumId')?.attrs?.['w:val'];
+    if (!numId || !absId) continue;
+    registry.numToAbstract.set(numId, absId);
+
+    const overrides = findChildren(numNode, 'w:lvlOverride');
+    if (overrides.length > 0) {
+      const ovMap = new Map<number, number>();
+      for (const ov of overrides) {
+        const ilvl = Number.parseInt(ov.attrs?.['w:ilvl'] ?? '0', 10);
+        const startOv = Number.parseInt(
+          findFirstDescendant(ov, 'w:startOverride')?.attrs?.['w:val'] ?? '',
+          10
+        );
+        if (Number.isFinite(ilvl) && Number.isFinite(startOv)) {
+          ovMap.set(ilvl, startOv);
+        }
+      }
+      if (ovMap.size > 0) {
+        registry.numStartOverrides.set(numId, ovMap);
+      }
+    }
+  }
+
+  return registry;
+}
+
+function resolveParagraphAutoNumberPrefix(
+  pNode: XmlNode,
+  rawText: string,
+  numbering: DocxNumberingRegistry
+): string {
+  const trimmed = rawText.trim();
+  if (!trimmed) return '';
+
+  const pPr = findChildren(pNode, 'w:pPr')[0];
+  const numPr = findChildren(pPr, 'w:numPr')[0];
+  if (!numPr) return '';
+
+  const numId = findFirstDescendant(numPr, 'w:numId')?.attrs?.['w:val'];
+  if (!numId || numId === '0') return '';
+
+  const ilvlRaw = Number.parseInt(findFirstDescendant(numPr, 'w:ilvl')?.attrs?.['w:val'] ?? '0', 10);
+  const ilvl = Number.isFinite(ilvlRaw) && ilvlRaw >= 0 ? ilvlRaw : 0;
+
+  const absId = numbering.numToAbstract.get(numId);
+  const lvlDef = absId ? numbering.abstractLevels.get(absId)?.get(ilvl) : undefined;
+  const numFmt = lvlDef?.numFmt ?? (ilvl === 0 ? 'decimal' : 'upperLetter');
+  if (numFmt === 'bullet' || numFmt === 'none') return '';
+
+  const startVal =
+    numbering.numStartOverrides.get(numId)?.get(ilvl) ?? lvlDef?.start ?? 1;
+
+  let counterMap = numbering.counters.get(numId);
+  if (!counterMap) {
+    counterMap = new Map<number, number>();
+    numbering.counters.set(numId, counterMap);
+  }
+
+  const nextVal = counterMap.has(ilvl) ? counterMap.get(ilvl)! + 1 : startVal;
+  counterMap.set(ilvl, nextVal);
+
+  // Reset deeper levels whenever a shallower numbering level advances
+  for (const existingLvl of Array.from(counterMap.keys())) {
+    if (existingLvl > ilvl) {
+      counterMap.delete(existingLvl);
+    }
+  }
+
+  // Never duplicate prefix if paragraph already carries an explicit marker
+  if (
+    /^(?:Câu|Cau|Question|Bài|Bai|Phần|Phan)\s*\d+/i.test(trimmed) ||
+    /^[A-Da-d][\.\)]\s*/.test(trimmed)
+  ) {
+    return '';
+  }
+
+  const formatted = formatNumberingValue(nextVal, numFmt);
+  if (!formatted) return '';
+
+  if (numFmt === 'upperLetter') {
+    return `${formatted}. `;
+  }
+  if (numFmt === 'lowerLetter') {
+    return `${formatted}) `;
+  }
+  if (numFmt === 'decimal' && ilvl === 0) {
+    const rawLvlText = lvlDef?.lvlText ?? '';
+    if (/(?:Câu|Cau|Question|Bài|Bai)/i.test(rawLvlText)) {
+      const expanded = rawLvlText.replace(/%\d+/g, formatted).trim();
+      return /[:.)]$/.test(expanded) ? `${expanded} ` : `${expanded}: `;
+    }
+    return `Câu ${formatted}: `;
+  }
+  if (numFmt === 'upperRoman' && ilvl === 0) {
+    return `Phần ${formatted}. `;
+  }
+  return `${formatted}. `;
+}
+
 interface DocxExtractionContext {
   relsById: Map<string, string>;
   mediaByTarget: Map<string, MediaDescriptor>;
@@ -555,6 +749,7 @@ interface DocxExtractionContext {
     wmfPreviewRefs: Set<string>;
   };
   unsupportedMediaRefs: Set<string>;
+  numbering: DocxNumberingRegistry;
   warnings: string[];
 }
 
@@ -779,6 +974,11 @@ function extractParagraphContent(
 
   walkParagraphNode(pNode);
 
+  const autoPrefix = resolveParagraphAutoNumberPrefix(pNode, text, ctx.numbering);
+  if (autoPrefix) {
+    text = `${autoPrefix}${text.trimStart()}`;
+  }
+
   return {
     text,
     ommlFragments,
@@ -786,6 +986,29 @@ function extractParagraphContent(
     hasBoldCorrectCue,
     hasLegacyOleEquation,
   };
+}
+
+const EXAM_HEADER_STRONG_RE =
+  /(?:SỞ\s+GIÁO\s+DỤC|PHÒNG\s+GIÁO\s+DỤC|BỘ\s+GIÁO\s+DỤC|UBND|TRƯỜNG\s+(?:THPT|THCS|TIỂU\s+HỌC|ĐẠI\s+HỌC)|ĐỀ\s+(?:KIỂM\s+TRA|THI)|KỲ\s+THI)/i;
+const EXAM_HEADER_META_RE =
+  /(?:MÃ\s+ĐỀ|THỜI\s+GIAN\s+LÀM\s+BÀI|HỌ\s+VÀ\s+TÊN|SỐ\s+BÁO\s+DANH|NĂM\s+HỌC|HỌC\s+K[ÌỲ]|MÔN\s*[:.]|ĐIỂM|LỜI\s+PHÊ|CHỮ\s+K[ÝÍ]|ĐỀ\s+CHÍNH\s+THỨC|TRANG\s+\d+\/\d+)/i;
+const VARIATION_OR_QUESTION_RE =
+  /(?:^\s*(?:Câu|Question|Bài)\s+\d+\s*[.:)\-–]|f'\s*\(|y'\s*\||-\s*∞|\+\s*∞|-\\infty|\+\\infty)/im;
+const CELL_NEWLINE_MARKER_RE =
+  /^\s*(?:(?:Câu|Question|Bài)\s+\d+\s*[.:)\-–]|PHẦN\s+[IVX\d]+|[A-D]\s*[.)]|[a-d]\s*[.)])/i;
+const QUESTION_BOUNDARY_RE = /^\s*(?:\*{1,2}|\[)?(?:Câu|Question|Bài)\s+\d{1,3}(?:\]|\*{1,2})?\s*[.:)\-–]/im;
+
+/**
+ * Nhận diện bảng khung tiêu đề đề thi (Sở GD&ĐT / Trường / Đề kiểm tra / Mã đề / Họ và tên)
+ * xuất hiện ở đầu tài liệu Word trước Câu 1, tránh đánh nhầm thành bảng dữ liệu câu hỏi hoặc nhóm ngữ liệu.
+ */
+export function isExamHeaderBannerTable(tableBody: string): boolean {
+  const trimmed = tableBody.trim();
+  if (!trimmed || trimmed.length > 1500) return false;
+  if (VARIATION_OR_QUESTION_RE.test(trimmed)) return false;
+  const hasStrong = EXAM_HEADER_STRONG_RE.test(trimmed);
+  const metaMatches = trimmed.match(new RegExp(EXAM_HEADER_META_RE.source, 'gi')) ?? [];
+  return (hasStrong && metaMatches.length >= 1) || metaMatches.length >= 2;
 }
 
 /**
@@ -884,6 +1107,19 @@ export async function extractDocxDocument(
     }
   }
 
+  let numbering: DocxNumberingRegistry = {
+    abstractLevels: new Map(),
+    numToAbstract: new Map(),
+    numStartOverrides: new Map(),
+    counters: new Map(),
+  };
+  const numberingFile = zip.file('word/numbering.xml');
+  if (numberingFile) {
+    const numberingXml = await numberingFile.async('string');
+    assertSafeXmlPayload(numberingXml, 'word/numbering.xml');
+    numbering = parseDocxNumberingXml(numberingXml);
+  }
+
   const docXml = await documentFile.async('string');
   assertSafeXmlPayload(docXml, 'word/document.xml');
   const docTree = parseXmlTree(docXml);
@@ -905,6 +1141,7 @@ export async function extractDocxDocument(
       wmfPreviewRefs: new Set<string>(),
     },
     unsupportedMediaRefs: new Set<string>(),
+    numbering,
     warnings,
   };
 
@@ -913,6 +1150,7 @@ export async function extractDocxDocument(
   let hasLegacyOleEquation = false;
   let tableOrdinal = 0;
   let paragraphOrdinal = 0;
+  let hasSeenQuestion = false;
 
   const bodyBlocks = collectBodyBlockElements(body);
 
@@ -927,6 +1165,9 @@ export async function extractDocxDocument(
       if (seg.hasLegacyOleEquation) hasLegacyOleEquation = true;
       allOmml.push(...seg.ommlFragments);
       if (seg.text.trim() || seg.assetIds.length > 0) {
+        if (QUESTION_BOUNDARY_RE.test(seg.text)) {
+          hasSeenQuestion = true;
+        }
         paragraphs.push(seg);
       }
     } else if (child.tag === 'w:tbl') {
@@ -951,37 +1192,51 @@ export async function extractDocxDocument(
             allOmml.push(...cs.ommlFragments);
             rowAssetIds.push(...cs.assetIds);
           }
-          cellTexts.push(
-            cellSegs
-              .map((s) => s.text.trim())
-              .filter(Boolean)
-              .join(' ')
-          );
+          const nonEmptyCellTexts = cellSegs
+            .map((s) => s.text.trim())
+            .filter(Boolean);
+          const preserveCellLineBreaks =
+            nonEmptyCellTexts.length > 1 &&
+            nonEmptyCellTexts.some((t) => CELL_NEWLINE_MARKER_RE.test(t));
+          cellTexts.push(nonEmptyCellTexts.join(preserveCellLineBreaks ? '\n' : ' '));
         }
         rowTexts.push(cellTexts.join(' | '));
       }
       const tableBody = rowTexts.filter(Boolean).join('\n');
       if (tableBody) {
-        tableOrdinal = nextTableOrdinal;
-        const tblAssetId = `docx-tbl-${tableOrdinal}`;
-        const tableAsset = createMathVisualAsset({
-          id: tblAssetId,
-          kind: 'data-table',
-          label: `Bảng dữ liệu DOCX #${tableOrdinal}`,
-          sourceData: tableBody,
-          altText: 'Bảng dữ liệu trích xuất từ file Word',
-          required: true,
-          sourcePartPath: 'word/document.xml',
-          sourceOrdinal: tableOrdinal,
-          sourceLocation: `w:body/w:tbl[${tableOrdinal}]`,
-        });
-        ctx.assets.push(tableAsset);
-        paragraphs.push({
-          text: `${tableBody}\n[[ASSET:${tblAssetId}]]`,
-          ommlFragments: [],
-          assetIds: [tblAssetId, ...rowAssetIds],
-          tableText: tableBody,
-        });
+        const isHeaderBanner = !hasSeenQuestion && isExamHeaderBannerTable(tableBody);
+        if (QUESTION_BOUNDARY_RE.test(tableBody)) {
+          hasSeenQuestion = true;
+        }
+        if (isHeaderBanner) {
+          paragraphs.push({
+            text: tableBody,
+            ommlFragments: [],
+            assetIds: [...rowAssetIds],
+            tableText: tableBody,
+          });
+        } else {
+          tableOrdinal = nextTableOrdinal;
+          const tblAssetId = `docx-tbl-${tableOrdinal}`;
+          const tableAsset = createMathVisualAsset({
+            id: tblAssetId,
+            kind: 'data-table',
+            label: `Bảng dữ liệu DOCX #${tableOrdinal}`,
+            sourceData: tableBody,
+            altText: 'Bảng dữ liệu trích xuất từ file Word',
+            required: true,
+            sourcePartPath: 'word/document.xml',
+            sourceOrdinal: tableOrdinal,
+            sourceLocation: `w:body/w:tbl[${tableOrdinal}]`,
+          });
+          ctx.assets.push(tableAsset);
+          paragraphs.push({
+            text: `${tableBody}\n[[ASSET:${tblAssetId}]]`,
+            ommlFragments: [],
+            assetIds: [tblAssetId, ...rowAssetIds],
+            tableText: tableBody,
+          });
+        }
       }
     }
   }

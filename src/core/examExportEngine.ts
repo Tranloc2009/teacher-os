@@ -818,9 +818,13 @@ export async function verifyExportedDocxBuffer(
     extractedParagraphCount = extracted.paragraphs.length;
 
     const fullText = extracted.plainTextWithMarkers;
+    const normalizedFull = fullText.replace(/\s+/g, ' ');
+    let orderCursor = 0;
+
     expectedVersion.questions.forEach((q, idx) => {
       const marker = `Câu ${idx + 1}:`;
-      if (!fullText.includes(marker)) {
+      const markerPos = normalizedFull.indexOf(marker, orderCursor);
+      if (markerPos === -1) {
         issues.push({
           id: `exp-missing-q-${expectedVersion.code}-${q.id}`,
           severity: 'error',
@@ -829,24 +833,38 @@ export async function verifyExportedDocxBuffer(
           questionId: q.id,
           questionNumber: idx + 1,
           code: q.code,
-          message: `File DOCX Mã đề ${expectedVersion.code} bị thiếu đánh số "${marker}".`,
+          message: `File DOCX Mã đề ${expectedVersion.code} bị thiếu hoặc sai vị trí đánh số "${marker}".`,
           recommendation: 'Kiểm tra lại quá trình đóng gói DOCX.',
         });
+        return;
       }
-      // Xác minh không làm mất nội dung stem (trừ trường hợp stem quá dài bị xuống dòng/marker asset)
+
+      const nextMarker = `Câu ${idx + 2}:`;
+      const nextMarkerPos =
+        idx + 1 < expectedVersion.questions.length
+          ? normalizedFull.indexOf(nextMarker, markerPos + marker.length)
+          : -1;
+      const questionSlice =
+        nextMarkerPos !== -1
+          ? normalizedFull.slice(markerPos, nextMarkerPos)
+          : normalizedFull.slice(markerPos);
+
+      orderCursor = markerPos + marker.length;
+
+      // Xác minh nội dung stem đúng thứ tự ngay trong khối của Câu idx+1 (không chỉ xuất hiện đâu đó trong tài liệu)
       const normalizedStem = q.stem.rawSource.replace(/\s+/g, ' ').trim();
       const snippet = normalizedStem.slice(0, Math.min(36, normalizedStem.length));
-      if (snippet && !fullText.replace(/\s+/g, ' ').includes(snippet)) {
+      if (snippet && !questionSlice.includes(snippet)) {
         issues.push({
-          id: `exp-stem-corrupt-${expectedVersion.code}-${q.id}`,
+          id: `exp-stem-order-mismatch-${expectedVersion.code}-${q.id}`,
           severity: 'error',
           tier: 'BLOCKED',
           scope: 'export',
           questionId: q.id,
           questionNumber: idx + 1,
           code: q.code,
-          message: `File DOCX Mã đề ${expectedVersion.code} không khớp nội dung gốc câu ${idx + 1} (${q.code}).`,
-          recommendation: 'Chặn xuất file vì có sai lệch ký tự trong tài liệu Word.',
+          message: `File DOCX Mã đề ${expectedVersion.code} không khớp nội dung hoặc thứ tự câu tại vị trí Câu ${idx + 1} (${q.code}).`,
+          recommendation: 'Chặn xuất file vì thứ tự hoặc nội dung câu hỏi trong file Word lệch với mã đề đã trộn.',
         });
       }
     });

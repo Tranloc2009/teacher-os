@@ -136,6 +136,7 @@ export function CanvasInspector({
   onClosePanel,
 }: CanvasInspectorProps) {
   const [newChecklistLabel, setNewChecklistLabel] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmDeleteMode, setConfirmDeleteMode] = useState<
     'none' | 'single' | 'subtree'
   >('none');
@@ -238,6 +239,23 @@ export function CanvasInspector({
             />
           </div>
 
+          {/* Collapsible Advanced Controls (Type, Lock, Tree Branch, Color) */}
+          <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((prev) => !prev)}
+              aria-expanded={showAdvanced}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800/70 transition-colors"
+            >
+              <span>Cấu trúc nhánh, màu sắc & khóa vị trí</span>
+              {showAdvanced ? (
+                <ChevronDown className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+              )}
+            </button>
+            {showAdvanced && (
+              <div className="px-3 pb-3 pt-1 space-y-3 border-t border-slate-200/70 dark:border-slate-800">
           {/* Type + Lock */}
           <div className="grid grid-cols-2 gap-2">
             <div>
@@ -471,6 +489,9 @@ export function CanvasInspector({
                 );
               })}
             </div>
+          </div>
+              </div>
+            )}
           </div>
 
           {/* Workflow / Task Metadata & Dependency Status */}

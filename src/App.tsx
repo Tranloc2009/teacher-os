@@ -10,6 +10,7 @@ import {
   createEmptyLessonPack,
   createId,
   createManualSnapshot,
+  deleteCanvasBoard,
   deleteCanvasEdge,
   deleteCanvasNode,
   deleteJournal,
@@ -567,6 +568,19 @@ export default function App() {
       await saveResource(item);
       setResources(await listResources());
       showToast('success', `Đã lưu học liệu "${item.title}" vào Resource Vault.`);
+    } catch (err) {
+      showToast('error', classifyStorageError(err).message);
+    }
+  };
+
+  const handleDeleteCanvasBoard = async (boardId: string) => {
+    setCanvasBoards((prev) => prev.filter((b) => b.id !== boardId));
+    setCanvasNodes((prev) => prev.filter((n) => n.boardId !== boardId));
+    setCanvasEdges((prev) => prev.filter((e) => e.boardId !== boardId));
+    setCanvasViewSettings((prev) => prev.filter((v) => v.boardId !== boardId));
+    if (temporaryMode) return;
+    try {
+      await deleteCanvasBoard(boardId);
     } catch (err) {
       showToast('error', classifyStorageError(err).message);
     }
@@ -1567,6 +1581,7 @@ export default function App() {
                   canvasEdges={canvasEdges}
                   canvasViewSettings={canvasViewSettings}
                   onSaveCanvasBoard={handleSaveCanvasBoard}
+                  onDeleteCanvasBoard={handleDeleteCanvasBoard}
                   onSaveCanvasNode={handleSaveCanvasNode}
                   onBulkSaveCanvasNodes={handleBulkSaveCanvasNodes}
                   onBulkSaveCanvasBundle={handleBulkSaveCanvasBundle}

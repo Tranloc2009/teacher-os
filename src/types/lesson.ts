@@ -160,14 +160,29 @@ export interface WorkflowStepItem {
   phase: WorkflowPhase;
   label: string;
   done: boolean;
-  targetApp?: 'lesson-studio' | 'print-studio' | 'resource-vault' | 'teaching-journal';
+  targetApp?:
+    | 'lesson-studio'
+    | 'print-studio'
+    | 'resource-vault'
+    | 'teaching-journal'
+    | 'math-mixer';
+  description?: string;
+  status?: 'todo' | 'in_progress' | 'done' | 'blocked';
+  priority?: 'low' | 'medium' | 'high';
+  dueDate?: string;
+  notes?: string;
+  linkedResourceId?: string;
 }
 
 export interface WorkflowRun {
   id: string;
   title: string;
+  description?: string;
   linkedPackId: string; // '' if general
   steps: WorkflowStepItem[];
+  canvasBoardId?: string;
+  templateId?: string;
+  archived?: boolean;
   updatedAt: string;
 }
 

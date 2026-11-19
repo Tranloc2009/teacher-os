@@ -171,6 +171,9 @@ export interface VisualWorkspaceCanvasProps {
   onOpenEntity: (ref: CanvasEntityRef) => void;
   onNavigateApp?: (appId: AppId) => void;
   onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
+  controlledBoardId?: string;
+  onBoardChange?: (boardId: string) => void;
+  onBackToHome?: () => void;
 }
 
 function CanvasInner({
@@ -196,6 +199,9 @@ function CanvasInner({
   onOpenEntity,
   onNavigateApp,
   onShowToast,
+  controlledBoardId,
+  onBoardChange,
+  onBackToHome,
 }: VisualWorkspaceCanvasProps) {
   const modeBoards = useMemo(
     () => boards.filter((b) => b.mode === mode),
@@ -203,8 +209,17 @@ function CanvasInner({
   );
 
   const [selectedBoardId, setSelectedBoardId] = useState<string>(
-    modeBoards[0]?.id ?? ''
+    controlledBoardId || modeBoards[0]?.id || ''
   );
+
+  useEffect(() => {
+    if (controlledBoardId && controlledBoardId !== selectedBoardId) {
+      setSelectedBoardId(controlledBoardId);
+      setSelectedNodeId(null);
+      setSelectedEdgeId(null);
+      setContextMenu(null);
+    }
+  }, [controlledBoardId, selectedBoardId]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [desktopOverviewOpen, setDesktopOverviewOpen] = useState(false);
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false);
@@ -497,14 +512,27 @@ function CanvasInner({
 
   const handleToggleTaskDone = useCallback((nodeId: string) => {
     const {
+      mode: curMode,
       boardNodes: curNodes,
+      boardEdges: curEdges,
       onSaveNode: saveNode,
+      onShowToast: toast,
       recordUndoSnapshot: snap,
     } = latestRef.current;
     const target = curNodes.find((n) => n.id === nodeId);
     if (!target) return;
     const currentEffective = getEffectiveTaskStatus(target) ?? target.status;
     const nextStatus = currentEffective === 'done' ? 'todo' : 'done';
+    if (curMode === 'workflow' && nextStatus === 'done') {
+      const depInfo = analyzeWorkflowDependencies(curNodes, curEdges).byNodeId[nodeId];
+      if (depInfo?.isDependencyBlocked) {
+        toast(
+          'error',
+          `Không thể đánh dấu xong vì đang chờ bước tiên quyết: ${depInfo.blockedByTitles.join(', ')}.`
+        );
+        return;
+      }
+    }
     snap(
       nextStatus === 'done'
         ? `Hoàn thành "${target.title}"`
@@ -1423,6 +1451,21 @@ function CanvasInner({
         return;
       }
 
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedNode) {
+          e.preventDefault();
+          handleDeleteSingleNode(selectedNode.id);
+          return;
+        }
+        if (selectedEdge) {
+          e.preventDefault();
+          recordUndoSnapshot('Xóa liên kết');
+          setSelectedEdgeId(null);
+          void onDeleteEdge(selectedEdge.id);
+          return;
+        }
+      }
+
       if (!selectedNode) return;
 
       if (
@@ -1476,6 +1519,7 @@ function CanvasInner({
   }, [
     contextMenu,
     focusRootNode,
+    handleDeleteSingleNode,
     handleFocusSubtree,
     handleInspectorUpdateNode,
     handleQuickAddChildNode,
@@ -1483,8 +1527,12 @@ function CanvasInner({
     handleToggleCollapseNode,
     handleToggleTaskDone,
     handleUndo,
+    onDeleteEdge,
+    recordUndoSnapshot,
+    selectedEdge,
     selectedNode,
     showSmartBuilderModal,
+    showSmartWorkflowGenModal,
     visibleSubtree.directChildrenCountMap,
   ]);
 
@@ -1736,11 +1784,16 @@ function CanvasInner({
         }}
         onSelectBoard={(id) => {
           setSelectedBoardId(id);
+          onBoardChange?.(id);
           setSelectedNodeId(null);
           setSelectedEdgeId(null);
           setDesktopOverviewOpen(false);
           setContextMenu(null);
         }}
+        onBackToHome={onBackToHome}
+        onFitView={() =>
+          void fitView({ padding: 0.2, duration: getTransitionDuration(220) })
+        }
         onOpenNewBoardForm={() => setShowNewBoardModal(true)}
         onSelectBreadcrumbNode={handleSelectAndCenterNode}
         onExitFocusSubtree={() => handleFocusSubtree(null)}

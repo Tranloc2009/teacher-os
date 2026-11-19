@@ -1043,11 +1043,9 @@ export function buildUniversalLockState(
   return {
     // Nguyên tắc bất biến: contentLocked luôn true, không bao giờ cho phép làm biến dạng công thức/ký hiệu
     contentLocked: true,
-    positionLock: Boolean(q.lockQuestionPosition || existing?.positionLock),
+    positionLock: Boolean(q.lockQuestionPosition),
     groupLockMode: groupMode,
-    optionShuffleLock: Boolean(
-      q.lockOptionShuffle || existing?.optionShuffleLock || policy.defaultLockOptionShuffle
-    ),
+    optionShuffleLock: Boolean(q.lockOptionShuffle || policy.defaultLockOptionShuffle),
     lockedOptionIds,
     referenceLockReasons: Array.from(
       new Set([...(existing?.referenceLockReasons ?? []), ...(q.dependencyFlags ?? [])])

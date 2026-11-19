@@ -50,12 +50,17 @@ import {
   evaluatePreMixIntegrity,
   getOptionLetterLabel,
   getStatementLetterLabel,
+  resolveEffectiveMixFlags,
   verifyMixedExamIntegrity,
 } from '../../core/mathIntegrity';
 import {
   EXAM_CODE_PRESETS,
   MAX_EXAM_CODES,
+  analyzeQuestionShuffleEligibility,
+  applyMixLevelPreset,
+  applyMixToggleUpdate,
   buildDefaultMatrixRules,
+  buildQuestionOrderDiagnostics,
   generateMixedExamsAsync,
   validateMixConfiguration,
 } from '../../core/mathShuffleEngine';
@@ -210,6 +215,16 @@ export function MathExamMixerApp({
     [activeExam]
   );
 
+  const shuffleEligibility = useMemo(
+    () => (activeExam ? analyzeQuestionShuffleEligibility(activeExam) : null),
+    [activeExam]
+  );
+
+  const effectiveMixFlags = useMemo(
+    () => (activeExam ? resolveEffectiveMixFlags(activeExam) : null),
+    [activeExam]
+  );
+
   const preMixReport = useMemo(
     () => (activeExam ? evaluatePreMixIntegrity(activeExam) : null),
     [activeExam]
@@ -217,6 +232,11 @@ export function MathExamMixerApp({
 
   const exportGate = useMemo(
     () => (activeExam ? checkExamExportGate(activeExam) : null),
+    [activeExam]
+  );
+
+  const questionOrderDiagnostics = useMemo(
+    () => (activeExam ? buildQuestionOrderDiagnostics(activeExam) : null),
     [activeExam]
   );
 
@@ -285,10 +305,20 @@ export function MathExamMixerApp({
       setCodeBatchPage(0);
       setLastExportIntegrity(null);
       setStep(4);
-      onShowToast(
-        'success',
-        `Đã tạo và kiểm chứng toàn vẹn ${res.versions.length} mã đề (${activeSubjectProfile.name}).`
-      );
+      const postDiag = buildQuestionOrderDiagnostics(updated);
+      if (postDiag.shuffleQuestionsEnabled && postDiag.allVersionsUnchanged) {
+        onShowToast(
+          'error',
+          `Đã tạo ${res.versions.length} mã đề nhưng thứ tự câu chưa đổi: ${
+            postDiag.nonShuffleReasons[0] ?? 'Kiểm tra khóa vị trí hoặc nhóm phụ thuộc.'
+          }`
+        );
+      } else {
+        onShowToast(
+          'success',
+          `Đã tạo và kiểm chứng toàn vẹn ${res.versions.length} mã đề (${activeSubjectProfile.name}).`
+        );
+      }
     } finally {
       setMixProgress(null);
       if (mixAbortRef.current === controller) {
@@ -679,15 +709,32 @@ export function MathExamMixerApp({
               await onSaveMathExam(updated, true);
               setSelectedCodeTab(res.versions[0]?.code ?? '');
               setCompareCodeTab(res.versions[1]?.code ?? res.versions[0]?.code ?? '');
-              onShowToast(
-                'success',
-                `Đã tạo nhanh ${res.versions.length} mã đề (${res.versions
-                  .slice(0, 4)
-                  .map((v) => v.code)
-                  .join(', ')}).`
-              );
+              const postDiag = buildQuestionOrderDiagnostics(updated);
+              if (postDiag.shuffleQuestionsEnabled && postDiag.allVersionsUnchanged) {
+                onShowToast(
+                  'error',
+                  `Thứ tự câu chưa đổi: ${
+                    postDiag.nonShuffleReasons[0] ?? 'Kiểm tra khóa vị trí hoặc nhóm phụ thuộc.'
+                  }`
+                );
+              } else {
+                onShowToast(
+                  'success',
+                  `Đã tạo nhanh ${res.versions.length} mã đề (${res.versions
+                    .slice(0, 4)
+                    .map((v) => v.code)
+                    .join(', ')}).`
+                );
+              }
             }}
-            onQuickPrint={() => {
+            onQuickPrint={async () => {
+              if (activeExam.generatedVersions.length === 0) {
+                onShowToast(
+                  'info',
+                  'Chưa có mã đề được trộn. Vui lòng nhấn "Tạo mã đề" trước khi xuất PDF.'
+                );
+                return;
+              }
               setStep(5);
               setTimeout(() => window.print(), 250);
             }}
@@ -733,17 +780,13 @@ export function MathExamMixerApp({
                       key={item.level}
                       type="button"
                       onClick={() => {
-                        const nextMatrixRules =
-                          item.level === 3 && activeExam.mixConfig.matrixRules.length === 0
-                            ? buildDefaultMatrixRules(activeExam.questions)
-                            : activeExam.mixConfig.matrixRules;
                         handleExamChange({
                           ...activeExam,
-                          mixConfig: {
-                            ...activeExam.mixConfig,
-                            level: item.level as MixLevel,
-                            matrixRules: nextMatrixRules,
-                          },
+                          mixConfig: applyMixLevelPreset(
+                            activeExam.mixConfig,
+                            item.level as MixLevel,
+                            activeExam.questions
+                          ),
                         });
                       }}
                       className={`w-full rounded-xl border p-3.5 text-left transition-colors ${
@@ -959,96 +1002,240 @@ export function MathExamMixerApp({
                 </div>
               )}
 
-              {/* Level 4 Granular Rules */}
-              {activeExam.mixConfig.level === 4 && (
-                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3.5 space-y-2.5 text-xs">
-                  <div className="font-semibold text-slate-900 dark:text-slate-100">
-                    Công tắc quy tắc tùy chỉnh sâu (Mức 4)
+              {/* Independent Shuffle Toggles & Question Constraints (always visible for all levels) */}
+              {effectiveMixFlags && (
+                <div className="rounded-xl border border-blue-200/80 dark:border-blue-900/70 bg-blue-50/40 dark:bg-blue-950/20 p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold text-slate-950 dark:text-slate-50">
+                      Công tắc trộn độc lập &amp; Ràng buộc câu hỏi
+                    </div>
+                    <span className="font-mono-num text-[11px] font-semibold text-blue-700 dark:text-blue-300">
+                      {effectiveMixFlags.shuffleQuestions && effectiveMixFlags.shuffleMcqOptions
+                        ? 'Đảo câu + Đảo đáp án'
+                        : effectiveMixFlags.shuffleQuestions
+                        ? 'Chỉ đảo thứ tự câu hỏi'
+                        : effectiveMixFlags.shuffleMcqOptions
+                        ? 'Chỉ đảo phương án A/B/C/D'
+                        : 'Giữ nguyên đề gốc'}
+                    </span>
                   </div>
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={activeExam.mixConfig.shuffleQuestions}
-                        onChange={(e) =>
-                          handleExamChange({
-                            ...activeExam,
-                            mixConfig: {
-                              ...activeExam.mixConfig,
-                              shuffleQuestions: e.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      <span>Trộn thứ tự câu hỏi</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={activeExam.mixConfig.shuffleMcqOptions}
-                        onChange={(e) =>
-                          handleExamChange({
-                            ...activeExam,
-                            mixConfig: {
-                              ...activeExam.mixConfig,
-                              shuffleMcqOptions: e.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      <span>Trộn phương án A/B/C/D</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={activeExam.mixConfig.keepVdcPositions}
-                        onChange={(e) =>
-                          handleExamChange({
-                            ...activeExam,
-                            mixConfig: {
-                              ...activeExam.mixConfig,
-                              keepVdcPositions: e.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      <span>Giữ nguyên vị trí câu Vận dụng cao</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={activeExam.mixConfig.shufflePerSectionOnly}
-                        onChange={(e) =>
-                          handleExamChange({
-                            ...activeExam,
-                            mixConfig: {
-                              ...activeExam.mixConfig,
-                              shufflePerSectionOnly: e.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      <span>Chỉ trộn bên trong từng phần I/II/III/IV</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
-                      <input
-                        type="checkbox"
-                        checked={activeExam.mixConfig.shuffleIndependentTrueFalseStatements}
-                        onChange={(e) =>
-                          handleExamChange({
-                            ...activeExam,
-                            mixConfig: {
-                              ...activeExam.mixConfig,
-                              shuffleIndependentTrueFalseStatements: e.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      <span>
-                        Cho phép đảo ý a/b/c/d ở câu Đúng/Sai đã bật cờ độc lập (tự chặn ý tham chiếu)
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="font-medium text-slate-800 dark:text-slate-200">
+                        Đảo thứ tự câu hỏi
                       </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.shuffleQuestions}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              shuffleQuestions: e.target.checked,
+                            }),
+                            generatedVersions: [],
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="font-medium text-slate-800 dark:text-slate-200">
+                        Đảo thứ tự phương án A/B/C/D
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.shuffleMcqOptions}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              shuffleMcqOptions: e.target.checked,
+                            }),
+                            generatedVersions: [],
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="text-slate-700 dark:text-slate-300">
+                        Giữ nguyên nhóm câu phụ thuộc
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.keepDependentGroups}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              keepDependentGroups: e.target.checked,
+                            }),
+                            subjectProfileOverrides: activeExam.subjectProfileOverrides
+                              ? {
+                                  ...activeExam.subjectProfileOverrides,
+                                  lockSharedPassageGroups: e.target.checked,
+                                }
+                              : undefined,
+                            generatedVersions: [],
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="text-slate-700 dark:text-slate-300">
+                        Chỉ trộn bên trong từng phần I/II/III/IV
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.shufflePerSectionOnly}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              shufflePerSectionOnly: e.target.checked,
+                            }),
+                            subjectProfileOverrides: activeExam.subjectProfileOverrides
+                              ? {
+                                  ...activeExam.subjectProfileOverrides,
+                                  shufflePerSectionOnly: e.target.checked,
+                                }
+                              : undefined,
+                            generatedVersions: [],
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="text-slate-700 dark:text-slate-300">
+                        Giữ nguyên vị trí câu Vận dụng cao
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.keepVdcPositions}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              keepVdcPositions: e.target.checked,
+                            }),
+                            generatedVersions: [],
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 cursor-pointer">
+                      <span className="text-slate-700 dark:text-slate-300">
+                        Đảo ý a/b/c/d ở câu Đúng/Sai độc lập
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={effectiveMixFlags.shuffleIndependentTrueFalseStatements}
+                        onChange={(e) =>
+                          handleExamChange({
+                            ...activeExam,
+                            mixConfig: applyMixToggleUpdate(activeExam.mixConfig, {
+                              shuffleIndependentTrueFalseStatements: e.target.checked,
+                            }),
+                            generatedVersions: [],
+                          })
+                        }
+                      />
                     </label>
                   </div>
+
+                  {/* Quick Question Lock Selector */}
+                  {activeExam.questions.length > 0 && (
+                    <div className="pt-2 border-t border-blue-200/60 dark:border-blue-900/50 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                          Khóa vị trí câu được chọn (nhấn để ghim/mở khóa nhanh):
+                        </span>
+                        {(activeExam.mixConfig.lockedQuestionIds.length > 0 ||
+                          activeExam.questions.some(
+                            (q) => q.lockQuestionPosition || q.universalLock?.positionLock
+                          )) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleExamChange({
+                                ...activeExam,
+                                mixConfig: {
+                                  ...activeExam.mixConfig,
+                                  lockedQuestionIds: [],
+                                },
+                                questions: activeExam.questions.map((q) => ({
+                                  ...q,
+                                  lockQuestionPosition: false,
+                                  universalLock: q.universalLock
+                                    ? { ...q.universalLock, positionLock: false }
+                                    : undefined,
+                                })),
+                                generatedVersions: [],
+                              })
+                            }
+                            className="text-[11px] font-medium text-blue-700 dark:text-blue-400 hover:underline"
+                          >
+                            Mở khóa tất cả
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                        {activeExam.questions.map((q, qIdx) => {
+                          const isLocked =
+                            q.lockQuestionPosition ||
+                            q.universalLock?.positionLock ||
+                            activeExam.mixConfig.lockedQuestionIds.includes(q.id);
+                          return (
+                            <button
+                              key={q.id}
+                              type="button"
+                              onClick={() => {
+                                const nextLocked = !isLocked;
+                                const nextLockedIds = nextLocked
+                                  ? Array.from(
+                                      new Set([...activeExam.mixConfig.lockedQuestionIds, q.id])
+                                    )
+                                  : activeExam.mixConfig.lockedQuestionIds.filter(
+                                      (id) => id !== q.id
+                                    );
+                                handleExamChange({
+                                  ...activeExam,
+                                  mixConfig: {
+                                    ...activeExam.mixConfig,
+                                    lockedQuestionIds: nextLockedIds,
+                                  },
+                                  questions: activeExam.questions.map((item) =>
+                                    item.id === q.id
+                                      ? {
+                                          ...item,
+                                          lockQuestionPosition: nextLocked,
+                                          universalLock: item.universalLock
+                                            ? {
+                                                ...item.universalLock,
+                                                positionLock: nextLocked,
+                                              }
+                                            : undefined,
+                                        }
+                                      : item
+                                  ),
+                                  generatedVersions: [],
+                                });
+                              }}
+                              aria-pressed={isLocked}
+                              className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-mono-num font-medium transition-colors ${
+                                isLocked
+                                  ? 'border-amber-500 bg-amber-100/80 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200'
+                                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                              }`}
+                            >
+                              {isLocked && <Lock className="h-2.5 w-2.5" aria-hidden="true" />}
+                              <span>C{qIdx + 1}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1310,24 +1497,57 @@ export function MathExamMixerApp({
                   />
                 </div>
 
-                {/* Math Lock Summary Card */}
-                {lockStats && (
-                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-3 space-y-1.5 text-xs">
+                {/* Math Lock & Question Shuffle Eligibility Summary Card */}
+                {lockStats && shuffleEligibility && (
+                  <div
+                    data-testid="shuffle-eligibility-summary"
+                    className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-3 space-y-2 text-xs"
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5">
                         <Lock className="h-3.5 w-3.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
-                        Tóm tắt quy tắc Math Lock
+                        Phân tích khả năng đảo câu &amp; Math Lock
                       </span>
                       <span className="font-mono-num text-[11px] text-slate-600 dark:text-slate-400">
                         Tối đa ~{maxDistinctPerms >= 100000 ? '100.000+' : maxDistinctPerms.toLocaleString('vi-VN')} hoán vị
                       </span>
                     </div>
-                    <div className="flex flex-wrap gap-3 font-mono-num text-[11px] text-slate-600 dark:text-slate-400">
-                      <span>Câu khóa: {lockStats.lockedQuestions}/{lockStats.totalQuestions}</span>
+                    <div className="grid grid-cols-2 gap-1.5 font-mono-num text-[11px] text-slate-700 dark:text-slate-300">
+                      <span>
+                        Đủ điều kiện đảo:{' '}
+                        <strong className="text-blue-700 dark:text-blue-300">
+                          {shuffleEligibility.eligibleQuestions}/{shuffleEligibility.totalQuestions}
+                        </strong>
+                      </span>
+                      <span>
+                        Câu bị khóa: <strong>{shuffleEligibility.lockedQuestions}</strong>
+                      </span>
+                      <span>
+                        Nhóm phụ thuộc: <strong>{shuffleEligibility.dependentGroupCount}</strong>
+                      </span>
+                      <span>
+                        Hoán vị thứ tự câu:{' '}
+                        <strong>
+                          {shuffleEligibility.maxQuestionPermutations >= 100000
+                            ? '100.000+'
+                            : shuffleEligibility.maxQuestionPermutations.toLocaleString('vi-VN')}
+                        </strong>
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-3 font-mono-num text-[11px] text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-200/70 dark:border-slate-700/60">
                       <span>Phương án khóa: {lockStats.lockedOptions}</span>
-                      <span>Nhóm: {(activeExam.questionGroups ?? []).length}</span>
                       <span>Hình/BBT: {lockStats.visualAssetsCount}</span>
                     </div>
+                    {shuffleEligibility.warnings.length > 0 && (
+                      <div className="rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/50 px-2.5 py-2 text-[11px] text-amber-900 dark:text-amber-200 space-y-1">
+                        {shuffleEligibility.warnings.map((w, idx) => (
+                          <div key={idx} className="flex items-start gap-1.5">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+                            <span>{w}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1578,6 +1798,107 @@ export function MathExamMixerApp({
                   </button>
                 </div>
               </div>
+
+              {questionOrderDiagnostics && questionOrderDiagnostics.rows.length > 1 && (
+                <section
+                  data-testid="question-order-debug-panel"
+                  aria-label="Bảng chẩn đoán thứ tự câu hỏi"
+                  className="rounded-xl border border-blue-200/80 dark:border-blue-900/70 bg-white dark:bg-slate-900 p-4 space-y-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-slate-900 dark:text-slate-100">
+                        Bảng chẩn đoán thứ tự câu hỏi (Question Order Debug)
+                      </span>
+                      <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
+                        Đủ điều kiện đảo: {questionOrderDiagnostics.eligibleQuestions}/
+                        {questionOrderDiagnostics.originalOrderIds.length} · Khóa:{' '}
+                        {questionOrderDiagnostics.lockedQuestions} · Nhóm:{' '}
+                        {questionOrderDiagnostics.dependentGroupCount}
+                      </span>
+                    </div>
+                    <span className="font-mono-num text-[11px] text-blue-700 dark:text-blue-300">
+                      Đảo câu: {questionOrderDiagnostics.shuffleQuestionsEnabled ? 'BẬT' : 'TẮT'} ·
+                      Đảo PA: {questionOrderDiagnostics.shuffleOptionsEnabled ? 'BẬT' : 'TẮT'}
+                    </span>
+                  </div>
+
+                  {questionOrderDiagnostics.nonShuffleReasons.length > 0 && (
+                    <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50/80 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-950 dark:text-amber-200 space-y-1">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        <span>Lý do thứ tự câu hỏi chưa đổi ở một số/toàn bộ mã đề:</span>
+                      </div>
+                      <ul className="list-disc pl-5 space-y-0.5">
+                        {questionOrderDiagnostics.nonShuffleReasons.map((reason, idx) => (
+                          <li key={idx}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 dark:bg-slate-800/70 text-[11px] text-slate-600 dark:text-slate-300">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">
+                            Mã đề
+                          </th>
+                          <th className="px-3 py-2 text-left font-semibold">
+                            Thứ tự ID câu gốc
+                          </th>
+                          <th className="px-3 py-2 text-right font-semibold whitespace-nowrap">
+                            Số vị trí thay đổi
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono-num">
+                        {questionOrderDiagnostics.rows.slice(0, 12).map((row) => {
+                          const previewList =
+                            row.questionCodes.length <= 16
+                              ? row.questionCodes.join(', ')
+                              : `${row.questionCodes.slice(0, 12).join(', ')}, … (+${
+                                  row.questionCodes.length - 12
+                                })`;
+                          return (
+                            <tr
+                              key={row.code}
+                              className={
+                                row.isOriginal
+                                  ? 'bg-slate-50/70 dark:bg-slate-950/40'
+                                  : 'bg-white dark:bg-slate-900'
+                              }
+                            >
+                              <td className="px-3 py-1.5 font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                {row.code}
+                              </td>
+                              <td
+                                className="px-3 py-1.5 text-[11px] text-slate-700 dark:text-slate-300 break-all"
+                                title={row.questionIds.join(', ')}
+                              >
+                                {previewList}
+                              </td>
+                              <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                                {row.isOriginal ? (
+                                  <span className="text-slate-500">0 / {row.totalQuestions}</span>
+                                ) : row.changedPositionsCount > 0 ? (
+                                  <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                                    {row.changedPositionsCount} / {row.totalQuestions}
+                                  </span>
+                                ) : (
+                                  <span className="font-bold text-amber-700 dark:text-amber-400">
+                                    0 / {row.totalQuestions}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
 
               {(mixWarnings.length > 0 || (activeVersion && activeVersion.integrityWarnings.length > 0)) && (
                 <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/40 p-3.5 text-xs text-amber-950 dark:text-amber-200 space-y-1">
@@ -2353,6 +2674,7 @@ export function MathExamMixerApp({
                 exam={activeExam}
                 selectedCode={activeVersion?.code ?? versions[0].code}
                 canExport={canExport}
+                onSelectCode={(code) => setSelectedCodeTab(code)}
                 onChangeExportSettings={(nextSettings: ExamExportSettings) =>
                   handleExamChange({
                     ...activeExam,
@@ -2382,7 +2704,7 @@ interface QuickExamMixerCardProps {
   exam: MathExamProject;
   onChangeExam: (next: MathExamProject) => void;
   onRunQuickMix: () => Promise<void>;
-  onQuickPrint: () => void;
+  onQuickPrint: () => void | Promise<void>;
   onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
 }
 
@@ -2397,51 +2719,92 @@ function QuickExamMixerCard({
   const [dragActive, setDragActive] = useState(false);
   const [importing, setImporting] = useState(false);
   const [selectedPreviewCode, setSelectedPreviewCode] = useState<string>(
-    exam.generatedVersions[0]?.code || '101'
+    exam.generatedVersions[0]?.code || '__ORIGINAL__'
   );
-  const [mathLockEnabled, setMathLockEnabled] = useState(true);
-  const [integrityCheckEnabled, setIntegrityCheckEnabled] = useState(true);
+  const prevVersionCountRef = useRef<number>(exam.generatedVersions.length);
 
   const examCount = exam.mixConfig.examCount || 4;
   const startCodeNum = exam.mixConfig.startCodeNumber || 101;
+  const effectiveFlags = useMemo(() => resolveEffectiveMixFlags(exam), [exam]);
+  const quickEligibility = useMemo(() => analyzeQuestionShuffleEligibility(exam), [exam]);
 
   const previewCodes = useMemo(() => {
     if (exam.generatedVersions.length > 0) {
       return exam.generatedVersions.slice(0, 8).map((v) => v.code);
     }
-    return Array.from({ length: Math.min(8, examCount) }, (_, i) =>
-      String(startCodeNum + i)
-    );
-  }, [exam.generatedVersions, examCount, startCodeNum]);
+    return [];
+  }, [exam.generatedVersions]);
 
   useEffect(() => {
-    if (!previewCodes.includes(selectedPreviewCode)) {
-      setSelectedPreviewCode(previewCodes[0] ?? '101');
+    const prevCount = prevVersionCountRef.current;
+    prevVersionCountRef.current = previewCodes.length;
+    if (previewCodes.length === 0) {
+      if (selectedPreviewCode !== '__ORIGINAL__') {
+        setSelectedPreviewCode('__ORIGINAL__');
+      }
+      return;
+    }
+    if (prevCount === 0 && previewCodes.length > 0) {
+      setSelectedPreviewCode(previewCodes[0]);
+      return;
+    }
+    if (
+      selectedPreviewCode !== '__ORIGINAL__' &&
+      !previewCodes.includes(selectedPreviewCode)
+    ) {
+      setSelectedPreviewCode(previewCodes[0] ?? '__ORIGINAL__');
     }
   }, [previewCodes, selectedPreviewCode]);
 
-  const activePreviewAnswers = useMemo(() => {
-    const matchedVer = exam.generatedVersions.find(
-      (v) => v.code === selectedPreviewCode
-    );
-    if (matchedVer && matchedVer.answerKeyRows.length > 0) {
-      return matchedVer.answerKeyRows.slice(0, 10).map((row, idx) => ({
-        qNum: idx + 1,
-        ans: row.answer || 'A',
-      }));
+  const activePreviewRows = useMemo(() => {
+    if (selectedPreviewCode !== '__ORIGINAL__') {
+      const matchedVer = exam.generatedVersions.find(
+        (v) => v.code === selectedPreviewCode
+      );
+      if (matchedVer && matchedVer.answerKeyRows.length > 0) {
+        return matchedVer.answerKeyRows.slice(0, 10).map((row, idx) => {
+          const mapEntry = matchedVer.permutationMap[idx];
+          const origNum = mapEntry?.originalOrderNumber ?? idx + 1;
+          return {
+            qNum: idx + 1,
+            origLabel: `G${origNum}`,
+            origCode: mapEntry?.originalCode ?? row.originalCode,
+            moved: origNum !== idx + 1,
+            ans: row.answer || '—',
+          };
+        });
+      }
     }
     return exam.questions.slice(0, 10).map((q, idx) => {
-      const correctIdx = (q.options ?? []).findIndex(
-        (o) => o.id === q.correctOptionId
-      );
-      const letter =
-        correctIdx >= 0 ? getOptionLetterLabel(correctIdx) : ['A', 'C', 'B', 'D'][idx % 4];
+      let ans = '—';
+      if (q.type === 'mcq' && q.options) {
+        const correctIdx = q.options.findIndex((o) => o.id === q.correctOptionId);
+        ans = correctIdx >= 0 ? getOptionLetterLabel(correctIdx) : '?';
+      } else if (q.type === 'true-false' && q.statements) {
+        ans = q.statements.map((s) => (s.isTrue ? 'Đ' : 'S')).join('');
+      } else if (q.type === 'short-answer' && q.shortAnswer) {
+        ans = q.shortAnswer.answerValue;
+      } else if (q.type === 'essay') {
+        ans = 'TL';
+      }
       return {
         qNum: idx + 1,
-        ans: letter,
+        origLabel: `G${idx + 1}`,
+        origCode: q.code,
+        moved: false,
+        ans,
       };
     });
   }, [exam.generatedVersions, exam.questions, selectedPreviewCode]);
+
+  const selectedVersionMovedCount = useMemo(() => {
+    if (selectedPreviewCode === '__ORIGINAL__') return 0;
+    const matchedVer = exam.generatedVersions.find((v) => v.code === selectedPreviewCode);
+    if (!matchedVer) return 0;
+    return matchedVer.permutationMap.filter(
+      (m) => m.newOrderNumber !== m.originalOrderNumber
+    ).length;
+  }, [exam.generatedVersions, selectedPreviewCode]);
 
   const updateCountAndStartCode = (nextCount: number, nextStart: number) => {
     const clampedCount = Math.max(1, Math.min(MAX_EXAM_CODES, nextCount));
@@ -2521,16 +2884,15 @@ function QuickExamMixerCard({
     if (file) void handleFileUpload(file);
   };
 
-  const shuffleQuestionsEnabled = exam.mixConfig.level >= 1;
-  const shuffleOptionsEnabled =
-    exam.mixConfig.level === 2 || exam.mixConfig.level === 4;
+  const shuffleQuestionsEnabled = effectiveFlags.shuffleQuestions;
+  const shuffleOptionsEnabled = effectiveFlags.shuffleMcqOptions;
 
   return (
     <section
       aria-label="Trộn đề nhanh"
       className="space-y-4"
     >
-      {/* Top 2-column grid: Dropzone + Quick Config matching Reference Image 6 */}
+      {/* Top 2-column grid: Dropzone + Quick Config */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-stretch">
         {/* Left: .docx Dropzone */}
         <div
@@ -2639,11 +3001,11 @@ function QuickExamMixerCard({
               />
             </div>
 
-            {/* 4 Toggle Rows matching Reference Image 6 */}
+            {/* 4 Independent Real Toggles */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
               <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
                 <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  Đảo câu
+                  Đảo thứ tự câu hỏi
                 </span>
                 <input
                   type="checkbox"
@@ -2651,14 +3013,10 @@ function QuickExamMixerCard({
                   onChange={(e) =>
                     onChangeExam({
                       ...exam,
-                      mixConfig: {
-                        ...exam.mixConfig,
-                        level: e.target.checked
-                          ? shuffleOptionsEnabled
-                            ? 2
-                            : 1
-                          : 0,
-                      },
+                      mixConfig: applyMixToggleUpdate(exam.mixConfig, {
+                        shuffleQuestions: e.target.checked,
+                      }),
+                      generatedVersions: [],
                     })
                   }
                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
@@ -2667,7 +3025,7 @@ function QuickExamMixerCard({
 
               <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
                 <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  Đảo đáp án
+                  Đảo phương án A/B/C/D
                 </span>
                 <input
                   type="checkbox"
@@ -2675,10 +3033,10 @@ function QuickExamMixerCard({
                   onChange={(e) =>
                     onChangeExam({
                       ...exam,
-                      mixConfig: {
-                        ...exam.mixConfig,
-                        level: e.target.checked ? 2 : 1,
-                      },
+                      mixConfig: applyMixToggleUpdate(exam.mixConfig, {
+                        shuffleMcqOptions: e.target.checked,
+                      }),
+                      generatedVersions: [],
                     })
                   }
                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
@@ -2687,50 +3045,117 @@ function QuickExamMixerCard({
 
               <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
                 <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  Math Lock
+                  Giữ nguyên nhóm phụ thuộc
                 </span>
                 <input
                   type="checkbox"
-                  checked={mathLockEnabled}
-                  onChange={(e) => setMathLockEnabled(e.target.checked)}
+                  checked={effectiveFlags.keepDependentGroups}
+                  onChange={(e) =>
+                    onChangeExam({
+                      ...exam,
+                      mixConfig: applyMixToggleUpdate(exam.mixConfig, {
+                        keepDependentGroups: e.target.checked,
+                      }),
+                      subjectProfileOverrides: exam.subjectProfileOverrides
+                        ? {
+                            ...exam.subjectProfileOverrides,
+                            lockSharedPassageGroups: e.target.checked,
+                          }
+                        : undefined,
+                      generatedVersions: [],
+                    })
+                  }
                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                 />
               </label>
 
               <label className="flex items-center justify-between rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 cursor-pointer">
                 <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  Integrity Check
+                  Chỉ trộn trong từng phần
                 </span>
                 <input
                   type="checkbox"
-                  checked={integrityCheckEnabled}
-                  onChange={(e) => setIntegrityCheckEnabled(e.target.checked)}
+                  checked={effectiveFlags.shufflePerSectionOnly}
+                  onChange={(e) =>
+                    onChangeExam({
+                      ...exam,
+                      mixConfig: applyMixToggleUpdate(exam.mixConfig, {
+                        shufflePerSectionOnly: e.target.checked,
+                      }),
+                      subjectProfileOverrides: exam.subjectProfileOverrides
+                        ? {
+                            ...exam.subjectProfileOverrides,
+                            shufflePerSectionOnly: e.target.checked,
+                          }
+                        : undefined,
+                      generatedVersions: [],
+                    })
+                  }
                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                 />
               </label>
             </div>
+
+            {/* Live Eligibility Strip */}
+            <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/40 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono-num">
+                Đủ điều kiện đảo: <strong className="text-blue-700 dark:text-blue-300">{quickEligibility.eligibleQuestions}/{quickEligibility.totalQuestions}</strong> câu · Khóa: <strong>{quickEligibility.lockedQuestions}</strong> · Nhóm: <strong>{quickEligibility.dependentGroupCount}</strong>
+              </span>
+              <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                Math Lock &amp; Integrity luôn bật
+              </span>
+            </div>
+
+            {quickEligibility.warnings.length > 0 && (
+              <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/80 dark:bg-amber-950/40 px-3 py-2 text-[11px] text-amber-900 dark:text-amber-200 flex items-start gap-1.5">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>{quickEligibility.warnings[0]}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Bottom Preview Card: Xem trước kết quả matching Reference Image 6 */}
+      {/* Bottom Preview Card: Xem trước kết quả (Đề gốc vs Mã 101..104) */}
       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-6 shadow-2xs space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
-            Xem trước kết quả
+            Xem trước kết quả &amp; Thứ tự câu hỏi
           </h3>
           <span className="text-xs text-slate-500 dark:text-slate-400">
-            {exam.questions.length} câu hỏi trong đề · Bảo toàn công thức Math Lock
+            {exam.questions.length} câu hỏi trong đề ·{' '}
+            {selectedPreviewCode === '__ORIGINAL__'
+              ? 'Đang xem Đề gốc'
+              : exam.generatedVersions.some((v) => v.code === selectedPreviewCode)
+              ? `Mã ${selectedPreviewCode}: ${selectedVersionMovedCount}/${exam.questions.length} câu đổi vị trí`
+              : 'Nhấn "Tạo mã đề" để xem thứ tự câu sau khi trộn'}
           </span>
         </div>
 
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-center">
-          {/* Left: Các mã đề sẽ tạo */}
+          {/* Left: Đề gốc + Các mã đề sẽ tạo */}
           <div className="lg:col-span-5 space-y-2">
             <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
-              Các mã đề sẽ tạo ({examCount})
+              Chuyển đổi Đề gốc &amp; Các mã đề ({examCount})
             </p>
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedPreviewCode('__ORIGINAL__')}
+                className={`rounded-xl border px-3.5 py-2 text-left transition-all ${
+                  selectedPreviewCode === '__ORIGINAL__'
+                    ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
+                    : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 hover:bg-white text-slate-700 dark:text-slate-200'
+                }`}
+              >
+                <div className="text-[10px] font-medium opacity-75">Bản chuẩn</div>
+                <div className="text-sm font-bold">Đề gốc</div>
+              </button>
+              {previewCodes.length === 0 && (
+                <div className="flex items-center rounded-xl border border-dashed border-slate-300 dark:border-slate-700 px-3 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  Chưa tạo mã đề — nhấn "Tạo mã đề" để trộn thứ tự câu hỏi
+                </div>
+              )}
               {previewCodes.map((code) => {
                 const isSelected = selectedPreviewCode === code;
                 return (
@@ -2756,17 +3181,19 @@ function QuickExamMixerCard({
             </div>
           </div>
 
-          {/* Right: Tóm tắt đáp án (mã 101) */}
+          {/* Right: Tóm tắt thứ tự câu gốc & đáp án */}
           <div className="lg:col-span-7 space-y-2">
             <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
-              Tóm tắt đáp án (mã {selectedPreviewCode})
+              {selectedPreviewCode === '__ORIGINAL__'
+                ? 'Thứ tự & đáp án Đề gốc (10 câu đầu)'
+                : `Thứ tự câu gốc & đáp án (Mã ${selectedPreviewCode})`}
             </p>
             <div className="overflow-x-auto rounded-xl border border-slate-200/80 dark:border-slate-800">
               <table className="w-full text-center text-xs font-mono-num">
                 <thead>
                   <tr className="border-b border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-slate-500 dark:text-slate-400">
-                    <th className="px-2.5 py-1.5 font-semibold text-left">Câu</th>
-                    {activePreviewAnswers.map((item) => (
+                    <th className="px-2.5 py-1.5 font-semibold text-left">Câu mới</th>
+                    {activePreviewRows.map((item) => (
                       <th key={item.qNum} className="px-2 py-1.5 font-semibold">
                         {item.qNum}
                       </th>
@@ -2774,11 +3201,29 @@ function QuickExamMixerCard({
                   </tr>
                 </thead>
                 <tbody>
+                  <tr className="border-b border-slate-100 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-900/60 text-[11px]">
+                    <td className="px-2.5 py-1.5 text-left font-sans font-semibold text-slate-500">
+                      Câu gốc
+                    </td>
+                    {activePreviewRows.map((item) => (
+                      <td
+                        key={item.qNum}
+                        title={item.origCode}
+                        className={`px-2 py-1.5 font-semibold ${
+                          item.moved
+                            ? 'text-emerald-700 dark:text-emerald-400'
+                            : 'text-slate-500 dark:text-slate-400'
+                        }`}
+                      >
+                        {item.origLabel}
+                      </td>
+                    ))}
+                  </tr>
                   <tr className="bg-white dark:bg-slate-900 font-bold text-slate-900 dark:text-slate-100">
                     <td className="px-2.5 py-2 text-left font-sans font-semibold text-slate-500">
                       Đáp án
                     </td>
-                    {activePreviewAnswers.map((item) => (
+                    {activePreviewRows.map((item) => (
                       <td
                         key={item.qNum}
                         className="px-2 py-2 text-blue-600 dark:text-blue-400"

@@ -427,8 +427,35 @@ export interface MixConfig {
   preserveTopicRatios: boolean;
   shufflePerSectionOnly: boolean;
   shuffleIndependentTrueFalseStatements: boolean;
+  /** Giữ nguyên nhóm câu phụ thuộc liền khối khi đảo câu (mặc định true) */
+  keepDependentGroups?: boolean;
   lockedQuestionIds: string[];
   matrixRules: ExamMatrixRule[];
+}
+
+export interface QuestionShuffleSectionEligibility {
+  sectionTitle: string;
+  totalQuestions: number;
+  eligibleQuestions: number;
+  lockedQuestions: number;
+  dependentGroupCount: number;
+  swappableUnits: number;
+  maxPermutations: number;
+}
+
+export interface QuestionShuffleEligibilityReport {
+  shuffleQuestionsEnabled: boolean;
+  shuffleOptionsEnabled: boolean;
+  keepDependentGroups: boolean;
+  totalQuestions: number;
+  eligibleQuestions: number;
+  lockedQuestions: number;
+  dependentGroupCount: number;
+  swappableUnits: number;
+  maxQuestionPermutations: number;
+  canChangeQuestionOrder: boolean;
+  sections: QuestionShuffleSectionEligibility[];
+  warnings: string[];
 }
 
 export interface OptionPermutationEntry {
@@ -548,6 +575,7 @@ export interface OriginalGroupFingerprint {
   assetChecksums: Record<string, string>;
   lockGroupPosition: boolean;
   moveAsUnit: boolean;
+  lockInternalQuestionOrder?: boolean;
   startIndex: number;
 }
 
@@ -612,6 +640,10 @@ export interface MixedExamVersion {
   integrityStatus?: MathIntegrityStatus;
   integrityReport?: MathIntegrityReport;
   integrityWarnings: string[];
+  /** Chuỗi ID câu hỏi theo đúng thứ tự xuất hiện để đối chiếu và phát hiện trùng thứ tự */
+  questionOrderSignature?: string;
+  /** Cảnh báo nếu mã đề trùng thứ tự câu hỏi với mã khác do thiếu hoán vị khả dụng */
+  duplicateQuestionOrderWarning?: string;
 }
 
 export type MathExamStep = 1 | 2 | 3 | 4 | 5;

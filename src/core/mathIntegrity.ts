@@ -514,22 +514,94 @@ function hashQuestionContent(q: MathQuestion): OriginalQuestionFingerprint {
   };
 }
 
+export interface ResolvedMixFlags {
+  shuffleQuestions: boolean;
+  shuffleMcqOptions: boolean;
+  keepVdcPositions: boolean;
+  shufflePerSectionOnly: boolean;
+  shuffleIndependentTrueFalseStatements: boolean;
+  keepDependentGroups: boolean;
+}
+
+/**
+ * Nguồn chân lý duy nhất để đọc cấu hình trộn hiệu lực từ mixConfig.
+ * Tôn trọng trực tiếp hai công tắc độc lập shuffleQuestions & shuffleMcqOptions
+ * (không âm thầm bỏ qua khi level = 1/2/3 hay bị ghi đè ẩn bởi subjectProfileOverrides).
+ */
+export function resolveEffectiveMixFlags(exam: MathExamProject): ResolvedMixFlags {
+  const cfg = exam.mixConfig;
+  const ov = exam.subjectProfileOverrides;
+  const keepDependentGroups =
+    typeof cfg.keepDependentGroups === 'boolean'
+      ? cfg.keepDependentGroups
+      : typeof ov?.lockSharedPassageGroups === 'boolean'
+      ? ov.lockSharedPassageGroups
+      : true;
+
+  const shufflePerSectionOnly =
+    typeof ov?.shufflePerSectionOnly === 'boolean'
+      ? ov.shufflePerSectionOnly
+      : typeof cfg.shufflePerSectionOnly === 'boolean'
+      ? cfg.shufflePerSectionOnly
+      : true;
+
+  if (cfg.level === 0) {
+    return {
+      shuffleQuestions: false,
+      shuffleMcqOptions: false,
+      keepVdcPositions: true,
+      shufflePerSectionOnly,
+      shuffleIndependentTrueFalseStatements: false,
+      keepDependentGroups,
+    };
+  }
+
+  const defaultQuestions = true;
+  const defaultOptions = cfg.level === 1 ? false : true;
+
+  const shuffleQuestions =
+    typeof cfg.shuffleQuestions === 'boolean' ? cfg.shuffleQuestions : defaultQuestions;
+  const shuffleMcqOptions =
+    cfg.level === 1
+      ? false
+      : typeof cfg.shuffleMcqOptions === 'boolean'
+      ? cfg.shuffleMcqOptions
+      : defaultOptions;
+
+  return {
+    shuffleQuestions,
+    shuffleMcqOptions,
+    keepVdcPositions: Boolean(cfg.keepVdcPositions),
+    shufflePerSectionOnly,
+    shuffleIndependentTrueFalseStatements: Boolean(cfg.shuffleIndependentTrueFalseStatements),
+    keepDependentGroups,
+  };
+}
+
+export function isQuestionPositionLocked(
+  q: MathQuestion,
+  lockedIds: Set<string>,
+  keepVdcPositions: boolean
+): boolean {
+  return Boolean(
+    q.lockQuestionPosition ||
+      q.universalLock?.positionLock ||
+      lockedIds.has(q.id) ||
+      (keepVdcPositions && q.cognitiveLevel === 'van-dung-cao')
+  );
+}
+
 /**
  * Tạo bản chụp đề gốc bất biến kèm checksum/hash độc lập vị trí trước khi trộn.
  */
 export function createOriginalExamSnapshot(exam: MathExamProject): OriginalExamSnapshot {
   const fingerprintsByQuestionId: Record<string, OriginalQuestionFingerprint> = {};
   const lockedIds = new Set(exam.mixConfig.lockedQuestionIds);
+  const flags = resolveEffectiveMixFlags(exam);
 
   exam.questions.forEach((q, idx) => {
     const fp = hashQuestionContent(q);
-    if (
-      q.lockQuestionPosition ||
-      lockedIds.has(q.id) ||
-      (exam.mixConfig.level === 4 &&
-        exam.mixConfig.keepVdcPositions &&
-        q.cognitiveLevel === 'van-dung-cao')
-    ) {
+    if (isQuestionPositionLocked(q, lockedIds, flags.keepVdcPositions)) {
       fp.lockedPositionIndex = idx;
     }
     fingerprintsByQuestionId[q.id] = fp;
@@ -549,6 +621,7 @@ export function createOriginalExamSnapshot(exam: MathExamProject): OriginalExamS
       assetChecksums,
       lockGroupPosition: grp.lockGroupPosition,
       moveAsUnit: grp.moveAsUnit,
+      lockInternalQuestionOrder: grp.lockInternalQuestionOrder !== false,
       startIndex: firstIdx,
     };
   });
@@ -588,19 +661,16 @@ function factorialCapped(n: number, cap = 10000): number {
  */
 export function estimateMaxDistinctPermutations(exam: MathExamProject): number {
   const cfg = exam.mixConfig;
-  if (cfg.level === 0) return 1;
+  const flags = resolveEffectiveMixFlags(exam);
+  if (!flags.shuffleQuestions && !flags.shuffleMcqOptions) return 1;
 
-  const shuffleQuestions =
-    cfg.level === 4 ? cfg.shuffleQuestions : true;
-  const shuffleMcqOptions =
-    cfg.level === 1 ? false : cfg.level === 4 ? cfg.shuffleMcqOptions : true;
-  const keepVdc =
-    cfg.level === 4 ? cfg.keepVdcPositions : false;
-  const shufflePerSection =
-    cfg.level === 4 ? cfg.shufflePerSectionOnly : true;
+  const shuffleQuestions = flags.shuffleQuestions;
+  const shuffleMcqOptions = flags.shuffleMcqOptions;
+  const keepVdc = flags.keepVdcPositions;
+  const shufflePerSection = flags.shufflePerSectionOnly;
 
   const lockedIds = new Set(cfg.lockedQuestionIds);
-  const groups = exam.questionGroups ?? [];
+  const groups = flags.keepDependentGroups ? (exam.questionGroups ?? []) : [];
   const groupById = new Map<string, QuestionGroup>(groups.map((g) => [g.id, g]));
 
   let total = 1;
@@ -615,10 +685,7 @@ export function estimateMaxDistinctPermutations(exam: MathExamProject): number {
       slices.set(bucketKey, arr);
     });
 
-    const isQLocked = (q: MathQuestion) =>
-      q.lockQuestionPosition ||
-      lockedIds.has(q.id) ||
-      (keepVdc && q.cognitiveLevel === 'van-dung-cao');
+    const isQLocked = (q: MathQuestion) => isQuestionPositionLocked(q, lockedIds, keepVdc);
 
     for (const slice of slices.values()) {
       const units: Array<{ len: number; pinned: boolean }> = [];
@@ -786,16 +853,10 @@ export function detectLockConflictsAndCapacity(exam: MathExamProject): MathInteg
       }
 
       // Mâu thuẫn: nhóm cho phép di chuyển nguyên khối nhưng có câu bên trong lại bị khóa vị trí cố định
+      const flagsForLock = resolveEffectiveMixFlags(exam);
       const lockedMembers = grp.questionIds.filter((qid) => {
         const q = exam.questions.find((item) => item.id === qid);
-        return (
-          q &&
-          (q.lockQuestionPosition ||
-            lockedIds.has(q.id) ||
-            (exam.mixConfig.level === 4 &&
-              exam.mixConfig.keepVdcPositions &&
-              q.cognitiveLevel === 'van-dung-cao'))
-        );
+        return q && isQuestionPositionLocked(q, lockedIds, flagsForLock.keepVdcPositions);
       });
       if (!grp.lockGroupPosition && grp.moveAsUnit && lockedMembers.length > 0) {
         issues.push({
@@ -810,8 +871,13 @@ export function detectLockConflictsAndCapacity(exam: MathExamProject): MathInteg
     }
   });
 
-  // Kiểm tra khả năng tạo đủ số mã đề khác nhau dưới các ràng buộc khóa
-  if (exam.mixConfig.level > 0 && exam.mixConfig.examCount > 1 && exam.questions.length > 0) {
+  // Kiểm tra khả năng tạo đủ số mã đề khác nhau dưới các ràng buộc khóa (chỉ áp dụng khi có bật đảo câu hoặc đảo phương án)
+  const effectiveFlags = resolveEffectiveMixFlags(exam);
+  if (
+    (effectiveFlags.shuffleQuestions || effectiveFlags.shuffleMcqOptions) &&
+    exam.mixConfig.examCount > 1 &&
+    exam.questions.length > 0
+  ) {
     const maxPerms = estimateMaxDistinctPermutations(exam);
     if (exam.mixConfig.examCount > maxPerms) {
       issues.push({
@@ -2200,8 +2266,9 @@ export function verifyMixedExamIntegrity(
     }
   });
 
-  // 8. Kiểm tra nguyên vẹn Nhóm câu hỏi (không tách nhóm, giữ đúng thứ tự nội bộ, giữ vị trí nếu lockGroupPosition)
-  if (originalExam.mixConfig.level !== 3) {
+  // 8. Kiểm tra nguyên vẹn Nhóm câu hỏi (không tách nhóm, giữ đúng thứ tự nội bộ nếu khóa, giữ vị trí nếu lockGroupPosition)
+  const mixFlags = resolveEffectiveMixFlags(originalExam);
+  if (originalExam.mixConfig.level !== 3 && mixFlags.keepDependentGroups) {
     Object.values(snapshot.groupFingerprints).forEach((grpFp) => {
       if (grpFp.questionIds.length === 0) return;
       const mixedIndices = grpFp.questionIds.map((qid) => mixedIndexById.get(qid));
@@ -2217,8 +2284,11 @@ export function verifyMixedExamIntegrity(
         return;
       }
       const nums = mixedIndices as number[];
+      const sortedNums = [...nums].sort((a, b) => a - b);
+      const isContiguous = sortedNums.every((val, i) => i === 0 || val === sortedNums[i - 1] + 1);
       const contiguousAndOrdered = nums.every((val, i) => i === 0 || val === nums[i - 1] + 1);
-      if (!contiguousAndOrdered) {
+      const requireInternalOrder = grpFp.lockInternalQuestionOrder !== false;
+      if ((requireInternalOrder && !contiguousAndOrdered) || (!requireInternalOrder && !isContiguous)) {
         issues.push({
           id: `mixed-grp-split-${mixed.code}-${grpFp.groupId}`,
           severity: 'error',
@@ -2228,13 +2298,13 @@ export function verifyMixedExamIntegrity(
           recommendation: 'Chặn xuất đề vì vi phạm khóa nhóm câu hỏi.',
         });
       }
-      if (grpFp.lockGroupPosition && grpFp.startIndex >= 0 && nums[0] !== grpFp.startIndex) {
+      if (grpFp.lockGroupPosition && grpFp.startIndex >= 0 && sortedNums[0] !== grpFp.startIndex) {
         issues.push({
           id: `mixed-grp-moved-${mixed.code}-${grpFp.groupId}`,
           severity: 'error',
           tier: 'BLOCKED',
           scope: 'lock',
-          message: `Mã đề ${mixed.code}: Nhóm câu hỏi đã khóa vị trí #${grpFp.startIndex + 1} nhưng bị di chuyển sang #${nums[0] + 1}.`,
+          message: `Mã đề ${mixed.code}: Nhóm câu hỏi đã khóa vị trí #${grpFp.startIndex + 1} nhưng bị di chuyển sang #${sortedNums[0] + 1}.`,
           recommendation: 'Chặn xuất đề.',
         });
       }

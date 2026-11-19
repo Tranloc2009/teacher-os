@@ -6,11 +6,15 @@ import {
   MathIntegrityIssue,
   MathQuestion,
   McqOption,
+  MixConfig,
+  MixLevel,
   MixedExamAnswerRow,
   MixedExamVersion,
   MixedQuestionMapping,
   OriginalExamSnapshot,
   QuestionGroup,
+  QuestionShuffleEligibilityReport,
+  QuestionShuffleSectionEligibility,
   TrueFalseStatement,
 } from '../types/mathExam';
 import {
@@ -22,6 +26,8 @@ import {
   evaluatePreMixIntegrity,
   getOptionLetterLabel,
   getStatementLetterLabel,
+  isQuestionPositionLocked,
+  resolveEffectiveMixFlags,
   verifyMixedExamIntegrity,
 } from './mathIntegrity';
 import { getUniversalQuestionType } from './subjectProfileRegistry';
@@ -232,96 +238,397 @@ interface EffectiveMixRules {
   keepVdcPositions: boolean;
   shufflePerSectionOnly: boolean;
   shuffleIndependentTrueFalseStatements: boolean;
+  keepDependentGroups: boolean;
   lockedIds: Set<string>;
 }
 
-function applySubjectOverride(
-  base: EffectiveMixRules,
-  exam: MathExamProject
-): EffectiveMixRules {
-  const ov = exam.subjectProfileOverrides;
-  if (!ov) return base;
+/**
+ * Cập nhật đồng bộ cấu hình khi giáo viên chọn preset Mức 0–4,
+ * đảm bảo các công tắc độc lập shuffleQuestions / shuffleMcqOptions luôn khớp.
+ */
+export function applyMixLevelPreset(
+  prev: MixConfig,
+  level: MixLevel,
+  questions: MathQuestion[]
+): MixConfig {
+  const nextMatrixRules =
+    level === 3 && prev.matrixRules.length === 0
+      ? buildDefaultMatrixRules(questions)
+      : prev.matrixRules;
+
+  if (level === 0) {
+    return {
+      ...prev,
+      level: 0,
+      shuffleQuestions: false,
+      shuffleMcqOptions: false,
+      keepVdcPositions: true,
+      shuffleIndependentTrueFalseStatements: false,
+      keepDependentGroups: prev.keepDependentGroups ?? true,
+      matrixRules: nextMatrixRules,
+    };
+  }
+  if (level === 1) {
+    return {
+      ...prev,
+      level: 1,
+      shuffleQuestions: true,
+      shuffleMcqOptions: false,
+      keepVdcPositions: false,
+      shufflePerSectionOnly: true,
+      keepDependentGroups: prev.keepDependentGroups ?? true,
+      matrixRules: nextMatrixRules,
+    };
+  }
+  if (level === 2) {
+    return {
+      ...prev,
+      level: 2,
+      shuffleQuestions: true,
+      shuffleMcqOptions: true,
+      keepVdcPositions: false,
+      shufflePerSectionOnly: true,
+      keepDependentGroups: prev.keepDependentGroups ?? true,
+      matrixRules: nextMatrixRules,
+    };
+  }
+  if (level === 3) {
+    return {
+      ...prev,
+      level: 3,
+      shuffleQuestions: true,
+      shuffleMcqOptions: true,
+      keepVdcPositions: false,
+      shufflePerSectionOnly: true,
+      keepDependentGroups: prev.keepDependentGroups ?? true,
+      matrixRules: nextMatrixRules,
+    };
+  }
   return {
-    ...base,
-    shuffleQuestions:
-      typeof ov.shuffleQuestions === 'boolean' && exam.mixConfig.level > 0
-        ? ov.shuffleQuestions
-        : base.shuffleQuestions,
-    shuffleMcqOptions:
-      typeof ov.shuffleOptions === 'boolean' && exam.mixConfig.level >= 2
-        ? ov.shuffleOptions
-        : base.shuffleMcqOptions,
-    shufflePerSectionOnly:
-      typeof ov.shufflePerSectionOnly === 'boolean'
-        ? ov.shufflePerSectionOnly
-        : base.shufflePerSectionOnly,
+    ...prev,
+    level: 4,
+    keepDependentGroups: prev.keepDependentGroups ?? true,
+    matrixRules: nextMatrixRules,
+  };
+}
+
+/**
+ * Cập nhật hai công tắc độc lập (Đảo thứ tự câu hỏi / Đảo phương án A/B/C/D) và các ràng buộc.
+ * Hỗ trợ đầy đủ cả 4 tổ hợp:
+ * - Chỉ đảo câu hỏi (Questions ON, Options OFF)
+ * - Chỉ đảo phương án (Questions OFF, Options ON)
+ * - Đảo cả câu hỏi và phương án (Both ON)
+ * - Không đảo cả hai (Both OFF)
+ */
+export function applyMixToggleUpdate(
+  prev: MixConfig,
+  patch: Partial<
+    Pick<
+      MixConfig,
+      | 'shuffleQuestions'
+      | 'shuffleMcqOptions'
+      | 'keepDependentGroups'
+      | 'shufflePerSectionOnly'
+      | 'keepVdcPositions'
+      | 'shuffleIndependentTrueFalseStatements'
+    >
+  >
+): MixConfig {
+  const baseShuffleQ =
+    prev.level === 0
+      ? false
+      : typeof prev.shuffleQuestions === 'boolean'
+      ? prev.shuffleQuestions
+      : true;
+  const baseShuffleO =
+    prev.level === 0 || prev.level === 1
+      ? false
+      : typeof prev.shuffleMcqOptions === 'boolean'
+      ? prev.shuffleMcqOptions
+      : true;
+
+  const nextShuffleQ = patch.shuffleQuestions ?? baseShuffleQ;
+  const nextShuffleO = patch.shuffleMcqOptions ?? baseShuffleO;
+  const nextKeepGroups = patch.keepDependentGroups ?? (prev.keepDependentGroups ?? true);
+  const nextPerSection = patch.shufflePerSectionOnly ?? prev.shufflePerSectionOnly;
+  const nextKeepVdc = patch.keepVdcPositions ?? (prev.level === 0 ? false : prev.keepVdcPositions);
+  const nextTf = patch.shuffleIndependentTrueFalseStatements ?? prev.shuffleIndependentTrueFalseStatements;
+
+  let nextLevel: MixLevel;
+  if (prev.level === 3) {
+    nextLevel = 3;
+  } else if (!nextShuffleQ && !nextShuffleO) {
+    nextLevel = 0;
+  } else if (
+    nextShuffleQ &&
+    !nextShuffleO &&
+    !nextKeepVdc &&
+    nextPerSection &&
+    !nextTf &&
+    nextKeepGroups
+  ) {
+    nextLevel = 1;
+  } else if (
+    nextShuffleQ &&
+    nextShuffleO &&
+    !nextKeepVdc &&
+    nextPerSection &&
+    !nextTf &&
+    nextKeepGroups
+  ) {
+    nextLevel = 2;
+  } else {
+    nextLevel = 4;
+  }
+
+  return {
+    ...prev,
+    level: nextLevel,
+    shuffleQuestions: nextShuffleQ,
+    shuffleMcqOptions: nextShuffleO,
+    keepDependentGroups: nextKeepGroups,
+    shufflePerSectionOnly: nextPerSection,
+    keepVdcPositions: nextKeepVdc,
+    shuffleIndependentTrueFalseStatements: nextTf,
   };
 }
 
 function getEffectiveRules(exam: MathExamProject): EffectiveMixRules {
-  const cfg = exam.mixConfig;
-  const lockedIds = new Set<string>(cfg.lockedQuestionIds);
+  const flags = resolveEffectiveMixFlags(exam);
+  const lockedIds = new Set<string>(exam.mixConfig.lockedQuestionIds);
+  return {
+    ...flags,
+    lockedIds,
+  };
+}
 
-  if (cfg.level === 0) {
-    return {
-      shuffleQuestions: false,
-      shuffleMcqOptions: false,
-      keepVdcPositions: true,
-      shufflePerSectionOnly: true,
-      shuffleIndependentTrueFalseStatements: false,
-      lockedIds,
-    };
+function factorialCappedLocal(n: number, cap = 100000): number {
+  let res = 1;
+  for (let i = 2; i <= n; i++) {
+    res *= i;
+    if (res >= cap) return cap;
   }
-  if (cfg.level === 1) {
-    return applySubjectOverride(
-      {
-        shuffleQuestions: true,
-        shuffleMcqOptions: false,
-        keepVdcPositions: false,
-        shufflePerSectionOnly: true,
-        shuffleIndependentTrueFalseStatements: false,
-        lockedIds,
-      },
-      exam
+  return res;
+}
+
+interface AtomicMixUnit {
+  id: string;
+  items: MathQuestion[];
+  pinned: boolean;
+  group?: QuestionGroup;
+}
+
+function buildAtomicUnits(
+  slice: MathQuestion[],
+  rules: EffectiveMixRules,
+  groups: QuestionGroup[]
+): AtomicMixUnit[] {
+  const isQLocked = (q: MathQuestion) =>
+    isQuestionPositionLocked(q, rules.lockedIds, rules.keepVdcPositions);
+
+  const activeGroups = rules.keepDependentGroups ? groups : [];
+  const groupMap = new Map<string, QuestionGroup>(activeGroups.map((g) => [g.id, g]));
+  const units: AtomicMixUnit[] = [];
+  let cursor = 0;
+
+  while (cursor < slice.length) {
+    const current = slice[cursor];
+    if (current.groupId && groupMap.has(current.groupId)) {
+      const grp = groupMap.get(current.groupId)!;
+      const memberSet = new Set(grp.questionIds);
+      const contiguousItems: MathQuestion[] = [];
+      while (
+        cursor < slice.length &&
+        slice[cursor].groupId === grp.id &&
+        memberSet.has(slice[cursor].id)
+      ) {
+        contiguousItems.push(slice[cursor]);
+        cursor += 1;
+      }
+      const anyMemberLocked = contiguousItems.some(isQLocked);
+      units.push({
+        id: `grp-${grp.id}`,
+        items: contiguousItems,
+        pinned: grp.lockGroupPosition || !grp.moveAsUnit || anyMemberLocked,
+        group: grp,
+      });
+    } else {
+      units.push({
+        id: current.id,
+        items: [current],
+        pinned: isQLocked(current),
+      });
+      cursor += 1;
+    }
+  }
+
+  return units;
+}
+
+function countSliceQuestionOrderPermutations(units: AtomicMixUnit[]): {
+  swappableUnits: number;
+  maxPermutations: number;
+} {
+  let maxPermutations = 1;
+  let swappableUnits = 0;
+
+  // Hoán vị nội bộ trong nhóm nếu lockInternalQuestionOrder === false
+  for (const u of units) {
+    if (u.group && u.group.lockInternalQuestionOrder === false && u.items.length > 1) {
+      maxPermutations = Math.min(
+        100000,
+        maxPermutations * factorialCappedLocal(u.items.length, 100000)
+      );
+      swappableUnits += u.items.length;
+    }
+  }
+
+  const hasMultiItemGroup = units.some((u) => u.items.length > 1);
+  if (!hasMultiItemGroup) {
+    const freeCount = units.filter((u) => !u.pinned).length;
+    if (freeCount > 1) {
+      maxPermutations = Math.min(100000, maxPermutations * factorialCappedLocal(freeCount, 100000));
+      swappableUnits += freeCount;
+    }
+    return { swappableUnits, maxPermutations };
+  }
+
+  let segCount = 0;
+  for (const u of units) {
+    if (u.pinned) {
+      if (segCount > 1) {
+        maxPermutations = Math.min(100000, maxPermutations * factorialCappedLocal(segCount, 100000));
+        swappableUnits += segCount;
+      }
+      segCount = 0;
+    } else {
+      segCount += 1;
+    }
+  }
+  if (segCount > 1) {
+    maxPermutations = Math.min(100000, maxPermutations * factorialCappedLocal(segCount, 100000));
+    swappableUnits += segCount;
+  }
+
+  return { swappableUnits, maxPermutations };
+}
+
+/**
+ * Phân tích chính xác số câu đủ điều kiện đảo thứ tự, số câu bị khóa, số nhóm phụ thuộc
+ * và số hoán vị thứ tự câu tối đa theo từng phần (section) và toàn đề.
+ */
+export function analyzeQuestionShuffleEligibility(
+  exam: MathExamProject
+): QuestionShuffleEligibilityReport {
+  const rules = getEffectiveRules(exam);
+  const groups = exam.questionGroups ?? [];
+  const isQLocked = (q: MathQuestion) =>
+    isQuestionPositionLocked(q, rules.lockedIds, rules.keepVdcPositions);
+
+  const sectionOrder: string[] = [];
+  const bySection = new Map<string, MathQuestion[]>();
+
+  for (const q of exam.questions) {
+    const key = rules.shufflePerSectionOnly ? q.sectionTitle || q.type : 'Toàn bộ đề thi';
+    if (!bySection.has(key)) {
+      sectionOrder.push(key);
+      bySection.set(key, []);
+    }
+    bySection.get(key)!.push(q);
+  }
+
+  const sections: QuestionShuffleSectionEligibility[] = [];
+  let totalLocked = 0;
+  let totalEligible = 0;
+  let totalDependentGroups = 0;
+  let totalSwappableUnits = 0;
+  let maxQuestionPermutations = 1;
+
+  for (const secTitle of sectionOrder) {
+    const slice = bySection.get(secTitle)!;
+    const units = buildAtomicUnits(slice, rules, groups);
+    const lockedCount = slice.filter(isQLocked).length;
+    const depGroupsInSec = units.filter((u) => Boolean(u.group)).length;
+    const { swappableUnits, maxPermutations } = countSliceQuestionOrderPermutations(units);
+
+    let eligibleInSec = 0;
+    const hasMultiItemGroup = units.some((u) => u.items.length > 1);
+    if (!hasMultiItemGroup) {
+      const freeUnits = units.filter((u) => !u.pinned);
+      if (freeUnits.length >= 2) {
+        eligibleInSec = freeUnits.reduce((sum, u) => sum + u.items.length, 0);
+      }
+    } else {
+      let segment: AtomicMixUnit[] = [];
+      const flushSeg = () => {
+        if (segment.length >= 2) {
+          eligibleInSec += segment.reduce((sum, u) => sum + u.items.length, 0);
+        } else if (segment.length === 1 && segment[0].group?.lockInternalQuestionOrder === false && segment[0].items.length >= 2) {
+          eligibleInSec += segment[0].items.length;
+        }
+        segment = [];
+      };
+      for (const u of units) {
+        if (u.pinned) {
+          flushSeg();
+          if (u.group?.lockInternalQuestionOrder === false && u.items.length >= 2) {
+            eligibleInSec += u.items.length;
+          }
+        } else {
+          segment.push(u);
+        }
+      }
+      flushSeg();
+    }
+
+    sections.push({
+      sectionTitle: secTitle,
+      totalQuestions: slice.length,
+      eligibleQuestions: eligibleInSec,
+      lockedQuestions: lockedCount,
+      dependentGroupCount: depGroupsInSec,
+      swappableUnits,
+      maxPermutations,
+    });
+
+    totalLocked += lockedCount;
+    totalEligible += eligibleInSec;
+    totalDependentGroups += depGroupsInSec;
+    totalSwappableUnits += swappableUnits;
+    maxQuestionPermutations = Math.min(100000, maxQuestionPermutations * maxPermutations);
+  }
+
+  const canChangeQuestionOrder = maxQuestionPermutations > 1;
+  const warnings: string[] = [];
+
+  if (rules.shuffleQuestions && exam.questions.length > 0 && !canChangeQuestionOrder) {
+    warnings.push(
+      'Không đủ câu độc lập để đảo: tất cả câu trong từng phần đều đang bị khóa vị trí, nằm trong cùng một nhóm phụ thuộc hoặc mỗi phần chỉ có 1 đơn vị câu.'
+    );
+  } else if (
+    rules.shuffleQuestions &&
+    canChangeQuestionOrder &&
+    exam.mixConfig.examCount > maxQuestionPermutations
+  ) {
+    warnings.push(
+      `Số mã đề yêu cầu (${exam.mixConfig.examCount}) vượt quá số hoán vị thứ tự câu tối đa (${maxQuestionPermutations}). Một số mã đề sẽ trùng thứ tự câu hỏi (nhưng vẫn cố gắng khác phương án nếu bật đảo A/B/C/D).`
     );
   }
-  if (cfg.level === 2) {
-    return applySubjectOverride(
-      {
-        shuffleQuestions: true,
-        shuffleMcqOptions: true,
-        keepVdcPositions: false,
-        shufflePerSectionOnly: true,
-        shuffleIndependentTrueFalseStatements: false,
-        lockedIds,
-      },
-      exam
-    );
-  }
-  if (cfg.level === 3) {
-    return applySubjectOverride(
-      {
-        shuffleQuestions: true,
-        shuffleMcqOptions: true,
-        keepVdcPositions: false,
-        shufflePerSectionOnly: true,
-        shuffleIndependentTrueFalseStatements: false,
-        lockedIds,
-      },
-      exam
-    );
-  }
-  return applySubjectOverride(
-    {
-      shuffleQuestions: cfg.shuffleQuestions,
-      shuffleMcqOptions: cfg.shuffleMcqOptions,
-      keepVdcPositions: cfg.keepVdcPositions,
-      shufflePerSectionOnly: cfg.shufflePerSectionOnly,
-      shuffleIndependentTrueFalseStatements: cfg.shuffleIndependentTrueFalseStatements,
-      lockedIds,
-    },
-    exam
-  );
+
+  return {
+    shuffleQuestionsEnabled: rules.shuffleQuestions,
+    shuffleOptionsEnabled: rules.shuffleMcqOptions,
+    keepDependentGroups: rules.keepDependentGroups,
+    totalQuestions: exam.questions.length,
+    eligibleQuestions: totalEligible,
+    lockedQuestions: totalLocked,
+    dependentGroupCount: totalDependentGroups,
+    swappableUnits: totalSwappableUnits,
+    maxQuestionPermutations,
+    canChangeQuestionOrder,
+    sections,
+    warnings,
+  };
 }
 
 function selectQuestionsByMatrix(
@@ -350,12 +657,6 @@ function selectQuestionsByMatrix(
   return selected;
 }
 
-interface AtomicMixUnit {
-  id: string;
-  items: MathQuestion[];
-  pinned: boolean;
-}
-
 /**
  * Gom nhóm câu hỏi thành các đơn vị nguyên tử (câu đơn hoặc nhóm câu chung dữ kiện/hình vẽ),
  * sau đó chỉ hoán vị các đơn vị tự do trong từng đoạn giữa các mốc khóa cố định để bảo toàn 100% vị trí khóa.
@@ -366,40 +667,15 @@ function shuffleQuestionGroupSlice(
   groups: QuestionGroup[],
   rng: () => number
 ): MathQuestion[] {
-  const isQuestionLocked = (q: MathQuestion) =>
-    q.lockQuestionPosition ||
-    rules.lockedIds.has(q.id) ||
-    (rules.keepVdcPositions && q.cognitiveLevel === 'van-dung-cao');
-
-  const groupMap = new Map<string, QuestionGroup>(groups.map((g) => [g.id, g]));
-  const units: AtomicMixUnit[] = [];
-  let cursor = 0;
-
-  while (cursor < slice.length) {
-    const current = slice[cursor];
-    if (current.groupId && groupMap.has(current.groupId)) {
-      const grp = groupMap.get(current.groupId)!;
-      const memberSet = new Set(grp.questionIds);
-      const contiguousItems: MathQuestion[] = [];
-      while (cursor < slice.length && slice[cursor].groupId === grp.id && memberSet.has(slice[cursor].id)) {
-        contiguousItems.push(slice[cursor]);
-        cursor += 1;
-      }
-      const anyMemberLocked = contiguousItems.some(isQuestionLocked);
-      units.push({
-        id: `grp-${grp.id}`,
-        items: contiguousItems,
-        pinned: grp.lockGroupPosition || !grp.moveAsUnit || anyMemberLocked,
-      });
-    } else {
-      units.push({
-        id: current.id,
-        items: [current],
-        pinned: isQuestionLocked(current),
-      });
-      cursor += 1;
+  const units = buildAtomicUnits(slice, rules, groups).map((u) => {
+    if (u.group && u.group.lockInternalQuestionOrder === false && u.items.length > 1) {
+      return {
+        ...u,
+        items: shuffleArrayWithRng(u.items, rng),
+      };
     }
-  }
+    return u;
+  });
 
   // Nếu không có nhóm độ dài > 1, dùng shuffleWithPinnedSlots chuẩn trên đơn vị 1-1
   const hasMultiItemGroup = units.some((u) => u.items.length > 1);
@@ -479,10 +755,11 @@ function mixSingleQuestion(
   const cloned: MathQuestion = structuredClone(orig);
   const warnings: string[] = [];
   const uType = getUniversalQuestionType(orig);
-  const lockedPositionApplied =
-    orig.lockQuestionPosition ||
-    rules.lockedIds.has(orig.id) ||
-    (rules.keepVdcPositions && orig.cognitiveLevel === 'van-dung-cao');
+  const lockedPositionApplied = isQuestionPositionLocked(
+    orig,
+    rules.lockedIds,
+    rules.keepVdcPositions
+  );
 
   if (uType === 'multi-select') {
     const origOpts = cloned.multiSelectOptions ?? cloned.options ?? [];
@@ -965,6 +1242,12 @@ function buildVersionFingerprint(version: MixedExamVersion): string {
     .join(';');
 }
 
+export function buildVersionQuestionOrderSignature(
+  questions: ReadonlyArray<Pick<MathQuestion, 'id'>>
+): string {
+  return questions.map((q) => q.id).join(',');
+}
+
 function buildUnverifiedSingleVersion(
   exam: MathExamProject,
   code: string,
@@ -1009,6 +1292,7 @@ function buildUnverifiedSingleVersion(
     questions: mixedQuestions,
     permutationMap,
     answerKeyRows,
+    questionOrderSignature: buildVersionQuestionOrderSignature(mixedQuestions),
     integrityPassed: true,
     integrityWarnings: Array.from(collectedWarnings),
   };
@@ -1029,6 +1313,107 @@ function finalizeVerifiedVersion(
       .forEach((i) => version.integrityWarnings.push(i.message));
   }
   return version;
+}
+
+/**
+ * Chọn ứng viên mã đề tốt nhất theo thứ tự ưu tiên:
+ * - Tầng 1 (khi bật Đảo câu và đủ câu độc lập): khác thứ tự đề gốc, khác thứ tự câu của mọi mã trước đó, và khác fingerprint toàn phần.
+ * - Tầng 2 (khi bật Đảo câu nhưng đã cạn hoán vị thứ tự câu khác đề gốc): chấp nhận khác thứ tự đề gốc (hoặc khác mã trước) và khác fingerprint toàn phần; cảnh báo rõ nếu trùng thứ tự câu với một mã trước đó.
+ * - Tầng 3 (khi chỉ đảo phương án hoặc không đủ hoán vị thứ tự câu): ưu tiên khác fingerprint toàn phần; cảnh báo nếu trùng hoàn toàn.
+ */
+function selectBestCandidateForCode(params: {
+  exam: MathExamProject;
+  snapshot: OriginalExamSnapshot;
+  code: string;
+  idx: number;
+  baseSeed: string;
+  rules: EffectiveMixRules;
+  originalOrderSig: string;
+  canChangeQuestionOrder: boolean;
+  seenFullFingerprints: Set<string>;
+  seenQuestionOrderSignatures: Set<string>;
+}): MixedExamVersion {
+  const {
+    exam,
+    snapshot,
+    code,
+    idx,
+    baseSeed,
+    rules,
+    originalOrderSig,
+    canChangeQuestionOrder,
+    seenFullFingerprints,
+    seenQuestionOrderSignatures,
+  } = params;
+
+  const isAnyShuffleOn = rules.shuffleQuestions || rules.shuffleMcqOptions;
+  const wantDistinctQuestionOrder = rules.shuffleQuestions && canChangeQuestionOrder;
+  const maxAttempts = !isAnyShuffleOn ? 1 : wantDistinctQuestionOrder ? 80 : 40;
+
+  let bestTier2DistinctFull: MixedExamVersion | null = null;
+  let bestTier2DistinctOrderFromOrig: MixedExamVersion | null = null;
+  let lastCandidate: MixedExamVersion | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const attemptSeed = `${baseSeed}::code=${code}::idx=${idx}::try=${attempt}`;
+    const candidate = buildUnverifiedSingleVersion(exam, code, attemptSeed, rules);
+    const fullFp = buildVersionFingerprint(candidate);
+    const qOrderSig = candidate.questionOrderSignature ?? buildVersionQuestionOrderSignature(candidate.questions);
+    candidate.questionOrderSignature = qOrderSig;
+    lastCandidate = candidate;
+
+    const isDistinctFull = !seenFullFingerprints.has(fullFp);
+    const isDistinctFromOriginalOrder = qOrderSig !== originalOrderSig;
+    const isDistinctQuestionOrder = !seenQuestionOrderSignatures.has(qOrderSig);
+
+    if (wantDistinctQuestionOrder) {
+      if (isDistinctFromOriginalOrder && isDistinctQuestionOrder && isDistinctFull) {
+        seenFullFingerprints.add(fullFp);
+        seenQuestionOrderSignatures.add(qOrderSig);
+        return finalizeVerifiedVersion(exam, snapshot, candidate);
+      }
+      if (!bestTier2DistinctOrderFromOrig && isDistinctQuestionOrder && isDistinctFull) {
+        bestTier2DistinctOrderFromOrig = candidate;
+      }
+      if (!bestTier2DistinctFull && isDistinctFull) {
+        bestTier2DistinctFull = candidate;
+      }
+    } else if (isDistinctFull) {
+      seenFullFingerprints.add(fullFp);
+      seenQuestionOrderSignatures.add(qOrderSig);
+      return finalizeVerifiedVersion(exam, snapshot, candidate);
+    }
+  }
+
+  const chosen = bestTier2DistinctOrderFromOrig ?? bestTier2DistinctFull ?? lastCandidate!;
+  const chosenFullFp = buildVersionFingerprint(chosen);
+  const chosenOrderSig = chosen.questionOrderSignature ?? buildVersionQuestionOrderSignature(chosen.questions);
+  chosen.questionOrderSignature = chosenOrderSig;
+
+  if (wantDistinctQuestionOrder && seenQuestionOrderSignatures.has(chosenOrderSig)) {
+    const dupOrderMsg = `Mã đề ${code} có thứ tự câu hỏi trùng với một mã đề khác do giới hạn số hoán vị câu hỏi khả dụng.`;
+    chosen.duplicateQuestionOrderWarning = dupOrderMsg;
+    if (!chosen.integrityWarnings.includes(dupOrderMsg)) {
+      chosen.integrityWarnings.push(dupOrderMsg);
+    }
+  } else if (wantDistinctQuestionOrder && chosenOrderSig === originalOrderSig) {
+    const sameOrigMsg = `Mã đề ${code} giữ nguyên thứ tự câu như đề gốc do đã dùng hết các hoán vị thứ tự câu khác đề gốc.`;
+    chosen.duplicateQuestionOrderWarning = sameOrigMsg;
+    if (!chosen.integrityWarnings.includes(sameOrigMsg)) {
+      chosen.integrityWarnings.push(sameOrigMsg);
+    }
+  }
+
+  if (seenFullFingerprints.has(chosenFullFp) && isAnyShuffleOn) {
+    const dupFullMsg = `Mã đề ${code} có cấu trúc trùng với một mã đề khác do ràng buộc khóa chặt hoặc số câu tự do quá ít.`;
+    if (!chosen.integrityWarnings.includes(dupFullMsg)) {
+      chosen.integrityWarnings.push(dupFullMsg);
+    }
+  }
+
+  seenFullFingerprints.add(chosenFullFp);
+  seenQuestionOrderSignatures.add(chosenOrderSig);
+  return finalizeVerifiedVersion(exam, snapshot, chosen);
 }
 
 /**
@@ -1059,40 +1444,34 @@ export function generateMixedExams(exam: MathExamProject): {
   const snapshot = createOriginalExamSnapshot(exam);
   const codes = resolveExamCodes(exam);
   const rules = getEffectiveRules(exam);
+  const eligibility = analyzeQuestionShuffleEligibility(exam);
+  const mergedWarnings = Array.from(new Set([...warnings, ...eligibility.warnings]));
   const baseSeed = exam.mixConfig.seed.trim() || 'teacheros-math-2025';
+  const originalOrderSig = buildVersionQuestionOrderSignature(exam.questions);
   const versions: MixedExamVersion[] = [];
-  const seenFingerprints = new Set<string>();
+  const seenFullFingerprints = new Set<string>();
+  const seenQuestionOrderSignatures = new Set<string>();
 
   codes.forEach((code, idx) => {
-    let chosenVersion: MixedExamVersion | null = null;
-    const maxAttempts = rules.shuffleQuestions || rules.shuffleMcqOptions ? 40 : 1;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const attemptSeed = `${baseSeed}::code=${code}::idx=${idx}::try=${attempt}`;
-      const candidate = buildUnverifiedSingleVersion(exam, code, attemptSeed, rules);
-      const fp = buildVersionFingerprint(candidate);
-
-      if (!seenFingerprints.has(fp) || attempt === maxAttempts - 1) {
-        if (seenFingerprints.has(fp) && exam.mixConfig.level > 0) {
-          candidate.integrityWarnings.push(
-            `Mã đề ${code} có cấu trúc trùng với một mã đề khác do ràng buộc khóa chặt hoặc số câu tự do quá ít.`
-          );
-        }
-        seenFingerprints.add(fp);
-        chosenVersion = finalizeVerifiedVersion(exam, snapshot, candidate);
-        break;
-      }
-    }
-
-    if (chosenVersion) {
-      versions.push(chosenVersion);
-    }
+    const chosenVersion = selectBestCandidateForCode({
+      exam,
+      snapshot,
+      code,
+      idx,
+      baseSeed,
+      rules,
+      originalOrderSig,
+      canChangeQuestionOrder: eligibility.canChangeQuestionOrder,
+      seenFullFingerprints,
+      seenQuestionOrderSignatures,
+    });
+    versions.push(chosenVersion);
   });
 
   return {
     versions,
     snapshot,
-    warnings,
+    warnings: mergedWarnings,
     errors: [],
   };
 }
@@ -1133,9 +1512,13 @@ export async function generateMixedExamsAsync(
   const snapshot = createOriginalExamSnapshot(exam);
   const codes = resolveExamCodes(exam);
   const rules = getEffectiveRules(exam);
+  const eligibility = analyzeQuestionShuffleEligibility(exam);
+  const mergedWarnings = Array.from(new Set([...warnings, ...eligibility.warnings]));
   const baseSeed = exam.mixConfig.seed.trim() || 'teacheros-math-2025';
+  const originalOrderSig = buildVersionQuestionOrderSignature(exam.questions);
   const versions: MixedExamVersion[] = [];
-  const seenFingerprints = new Set<string>();
+  const seenFullFingerprints = new Set<string>();
+  const seenQuestionOrderSignatures = new Set<string>();
   const chunkSize = Math.max(1, options?.chunkSize ?? 5);
 
   for (let idx = 0; idx < codes.length; idx++) {
@@ -1143,36 +1526,26 @@ export async function generateMixedExamsAsync(
       return {
         versions: [],
         snapshot: null,
-        warnings,
+        warnings: mergedWarnings,
         errors: [],
         cancelled: true,
       };
     }
 
     const code = codes[idx];
-    let chosenVersion: MixedExamVersion | null = null;
-    const maxAttempts = rules.shuffleQuestions || rules.shuffleMcqOptions ? 40 : 1;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const attemptSeed = `${baseSeed}::code=${code}::idx=${idx}::try=${attempt}`;
-      const candidate = buildUnverifiedSingleVersion(exam, code, attemptSeed, rules);
-      const fp = buildVersionFingerprint(candidate);
-
-      if (!seenFingerprints.has(fp) || attempt === maxAttempts - 1) {
-        if (seenFingerprints.has(fp) && exam.mixConfig.level > 0) {
-          candidate.integrityWarnings.push(
-            `Mã đề ${code} có cấu trúc trùng với một mã đề khác do ràng buộc khóa chặt hoặc số câu tự do quá ít.`
-          );
-        }
-        seenFingerprints.add(fp);
-        chosenVersion = finalizeVerifiedVersion(exam, snapshot, candidate);
-        break;
-      }
-    }
-
-    if (chosenVersion) {
-      versions.push(chosenVersion);
-    }
+    const chosenVersion = selectBestCandidateForCode({
+      exam,
+      snapshot,
+      code,
+      idx,
+      baseSeed,
+      rules,
+      originalOrderSig,
+      canChangeQuestionOrder: eligibility.canChangeQuestionOrder,
+      seenFullFingerprints,
+      seenQuestionOrderSignatures,
+    });
+    versions.push(chosenVersion);
 
     options?.onProgress?.(idx + 1, codes.length);
     if ((idx + 1) % chunkSize === 0 && idx + 1 < codes.length) {
@@ -1183,7 +1556,145 @@ export async function generateMixedExamsAsync(
   return {
     versions,
     snapshot,
-    warnings,
+    warnings: mergedWarnings,
     errors: [],
   };
 }
+
+export interface QuestionOrderDiagnosticRow {
+  code: string;
+  isOriginal: boolean;
+  questionIds: string[];
+  questionCodes: string[];
+  changedPositionsCount: number;
+  totalQuestions: number;
+  sameAsOriginal: boolean;
+  integrityStatus: 'PASS' | 'WARNING' | 'BLOCKED';
+}
+
+export interface QuestionOrderDiagnosticsReport {
+  originalOrderIds: string[];
+  originalOrderCodes: string[];
+  rows: QuestionOrderDiagnosticRow[];
+  shuffleQuestionsEnabled: boolean;
+  shuffleOptionsEnabled: boolean;
+  eligibleQuestions: number;
+  lockedQuestions: number;
+  dependentGroupCount: number;
+  swappableUnits: number;
+  anyVersionUnchanged: boolean;
+  allVersionsUnchanged: boolean;
+  nonShuffleReasons: string[];
+}
+
+/**
+ * Trích xuất chẩn đoán thứ tự câu hỏi thực tế từ dữ liệu đề gốc và các mã đề đã sinh (không hardcode).
+ * Nếu có mã đề không đổi thứ tự dù đã bật Đảo thứ tự câu hỏi, chỉ rõ nguyên nhân chính xác.
+ */
+export function buildQuestionOrderDiagnostics(
+  exam: MathExamProject
+): QuestionOrderDiagnosticsReport {
+  const eligibility = analyzeQuestionShuffleEligibility(exam);
+  const preMix = evaluatePreMixIntegrity(exam);
+  const originalOrderIds = exam.questions.map((q) => q.id);
+  const originalOrderCodes = exam.questions.map((q) => q.code);
+  const totalQuestions = exam.questions.length;
+
+  const rows: QuestionOrderDiagnosticRow[] = [
+    {
+      code: 'Gốc',
+      isOriginal: true,
+      questionIds: originalOrderIds,
+      questionCodes: originalOrderCodes,
+      changedPositionsCount: 0,
+      totalQuestions,
+      sameAsOriginal: true,
+      integrityStatus: preMix.status,
+    },
+  ];
+
+  for (const ver of exam.generatedVersions) {
+    const qIds = ver.questions.map((q) => q.id);
+    const qCodes = ver.questions.map((q) => q.code);
+    let changed = 0;
+    for (let i = 0; i < qIds.length; i++) {
+      if (qIds[i] !== originalOrderIds[i]) {
+        changed += 1;
+      }
+    }
+    const status: 'PASS' | 'WARNING' | 'BLOCKED' =
+      ver.integrityStatus ?? (ver.integrityPassed ? 'PASS' : 'BLOCKED');
+    rows.push({
+      code: ver.code,
+      isOriginal: false,
+      questionIds: qIds,
+      questionCodes: qCodes,
+      changedPositionsCount: changed,
+      totalQuestions: qIds.length,
+      sameAsOriginal: changed === 0,
+      integrityStatus: status,
+    });
+  }
+
+  const versionRows = rows.slice(1);
+  const anyVersionUnchanged = versionRows.some((r) => r.sameAsOriginal);
+  const allVersionsUnchanged = versionRows.length > 0 && versionRows.every((r) => r.sameAsOriginal);
+
+  const nonShuffleReasons: string[] = [];
+  if (!eligibility.shuffleQuestionsEnabled) {
+    nonShuffleReasons.push('Chưa bật tùy chọn "Đảo thứ tự câu hỏi" (shuffleQuestions = false).');
+  }
+  if (preMix.status === 'BLOCKED') {
+    const blockedCount = preMix.issues.filter((i) => i.severity === 'error').length;
+    nonShuffleReasons.push(
+      `Integrity validation đang chặn trộn (BLOCKED: ${blockedCount} lỗi nghiêm trọng).`
+    );
+  }
+  if (totalQuestions < 2) {
+    nonShuffleReasons.push(
+      `Parser chỉ tách được ${totalQuestions} câu hỏi — không đủ tối thiểu 2 câu để đảo thứ tự.`
+    );
+  } else if (eligibility.shuffleQuestionsEnabled && !eligibility.canChangeQuestionOrder) {
+    if (eligibility.lockedQuestions >= totalQuestions - 1) {
+      nonShuffleReasons.push(
+        `Đa số/tất cả câu đang bị khóa vị trí (${eligibility.lockedQuestions}/${totalQuestions} câu bị khóa).`
+      );
+    }
+    if (eligibility.dependentGroupCount > 0) {
+      nonShuffleReasons.push(
+        `Nhóm phụ thuộc (${eligibility.dependentGroupCount} nhóm) đang gom các câu lại thành 1 khối duy nhất trong phần.`
+      );
+    }
+    if (
+      eligibility.sections.length > 0 &&
+      eligibility.sections.every((s) => s.swappableUnits < 2)
+    ) {
+      nonShuffleReasons.push(
+        'Mỗi phần hiện có dưới 2 đơn vị câu độc lập để đổi chỗ (hãy mở khóa câu, tách nhóm phụ thuộc hoặc tắt "Chỉ trộn trong từng phần").'
+      );
+    }
+    if (nonShuffleReasons.length === 0) {
+      nonShuffleReasons.push('Không đủ ít nhất 2 đơn vị câu độc lập để đảo thứ tự.');
+    }
+  } else if (eligibility.shuffleQuestionsEnabled && anyVersionUnchanged) {
+    nonShuffleReasons.push(
+      'Một mã đề có hoán vị trùng thứ tự gốc do số lượng hoán vị khả dụng ít hơn số mã đề cần tạo.'
+    );
+  }
+
+  return {
+    originalOrderIds,
+    originalOrderCodes,
+    rows,
+    shuffleQuestionsEnabled: eligibility.shuffleQuestionsEnabled,
+    shuffleOptionsEnabled: eligibility.shuffleOptionsEnabled,
+    eligibleQuestions: eligibility.eligibleQuestions,
+    lockedQuestions: eligibility.lockedQuestions,
+    dependentGroupCount: eligibility.dependentGroupCount,
+    swappableUnits: eligibility.swappableUnits,
+    anyVersionUnchanged,
+    allVersionsUnchanged,
+    nonShuffleReasons,
+  };
+}
+

@@ -283,6 +283,9 @@ export function MathExamEditor({
     const nextQuestions = exam.questions.map((q) => ({
       ...q,
       lockQuestionPosition: locked,
+      universalLock: q.universalLock
+        ? { ...q.universalLock, positionLock: locked }
+        : undefined,
     }));
     onChangeExam({
       ...exam,
@@ -1712,10 +1715,16 @@ export function MathExamEditor({
                     aria-label={`${isLocked ? 'Mở khóa' : 'Khóa'} vị trí câu ${globalIdx} (${q.code})`}
                     title={isLocked ? 'Đang khóa vị trí câu' : 'Nhấn để khóa vị trí câu'}
                     onClick={() =>
-                      updateQuestion(q.id, (item) => ({
-                        ...item,
-                        lockQuestionPosition: !item.lockQuestionPosition,
-                      }))
+                      updateQuestion(q.id, (item) => {
+                        const nextLocked = !item.lockQuestionPosition;
+                        return {
+                          ...item,
+                          lockQuestionPosition: nextLocked,
+                          universalLock: item.universalLock
+                            ? { ...item.universalLock, positionLock: nextLocked }
+                            : undefined,
+                        };
+                      })
                     }
                     className={`mt-0.5 shrink-0 rounded border p-1 transition-colors ${
                       isLocked
@@ -1873,10 +1882,16 @@ export function MathExamEditor({
                   <button
                     type="button"
                     onClick={() =>
-                      updateQuestion(activeQuestion.id, (q) => ({
-                        ...q,
-                        lockQuestionPosition: !q.lockQuestionPosition,
-                      }))
+                      updateQuestion(activeQuestion.id, (q) => {
+                        const nextLocked = !q.lockQuestionPosition;
+                        return {
+                          ...q,
+                          lockQuestionPosition: nextLocked,
+                          universalLock: q.universalLock
+                            ? { ...q.universalLock, positionLock: nextLocked }
+                            : undefined,
+                        };
+                      })
                     }
                     className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium whitespace-nowrap ${
                       activeQuestion.lockQuestionPosition

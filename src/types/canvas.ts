@@ -67,6 +67,9 @@ export interface CanvasNodeRecord {
   entityRef?: CanvasEntityRef | null;
   suggestedAppId?: AppId;
   checklist?: CanvasChecklistItem[];
+  orderIndex?: number;
+  notes?: string;
+  linkedResourceId?: string;
   collapsed?: boolean;
   locked?: boolean;
   createdAt: string;
@@ -90,6 +93,9 @@ export interface CanvasBoard {
   subject?: string;
   grade?: string;
   linkedWorkflowId?: string;
+  linkedPackId?: string;
+  templateId?: string;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
 }

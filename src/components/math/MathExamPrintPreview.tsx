@@ -1,5 +1,5 @@
 import { CSSProperties, useMemo, useState } from 'react';
-import { Printer, ShieldAlert } from 'lucide-react';
+import { Eye, EyeOff, Printer, ShieldAlert } from 'lucide-react';
 import {
   ExamExportSettings,
   MathExamProject,
@@ -25,6 +25,7 @@ interface MathExamPrintPreviewProps {
   exam: MathExamProject;
   selectedCode: string;
   canExport: boolean;
+  onSelectCode?: (code: string) => void;
   onChangeExportSettings: (next: ExamExportSettings) => void;
   onTriggerPrint: () => void;
 }
@@ -287,15 +288,74 @@ export function MathExamPrintPreview({
   exam,
   selectedCode,
   canExport,
+  onSelectCode,
   onChangeExportSettings,
   onTriggerPrint,
 }: MathExamPrintPreviewProps) {
   const [previewMode, setPreviewMode] = useState<PrintPreviewMode>('student-single');
+  const [viewingOriginal, setViewingOriginal] = useState(false);
+  const [showTeacherVerifyTable, setShowTeacherVerifyTable] = useState(false);
   const settings = resolveExportSettings(exam);
   const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
 
   const targetVersion =
     exam.generatedVersions.find((v) => v.code === selectedCode) ?? exam.generatedVersions[0] ?? null;
+
+  const originalPreviewVersion = useMemo<MixedExamVersion>(() => {
+    return {
+      code: 'ĐỀ GỐC',
+      seedUsed: 'original',
+      generatedAt: exam.updatedAt,
+      questions: exam.questions,
+      permutationMap: exam.questions.map((q, idx) => ({
+        newOrderNumber: idx + 1,
+        originalOrderNumber: idx + 1,
+        questionId: q.id,
+        originalCode: q.code,
+        sectionTitle: q.sectionTitle,
+        type: q.type,
+        cognitiveLevel: q.cognitiveLevel,
+        topic: q.topic,
+        groupId: q.groupId,
+        exactAnswerSummary: '',
+        lockedPositionApplied: Boolean(q.lockQuestionPosition),
+        lockedOptionShuffleApplied: Boolean(q.lockOptionShuffle),
+      })),
+      answerKeyRows: exam.questions.map((q, idx) => {
+        let ans = '—';
+        if (q.type === 'mcq' && q.options) {
+          const cIdx = q.options.findIndex((o) => o.id === q.correctOptionId);
+          ans = cIdx >= 0 ? getOptionLetterLabel(cIdx) : '?';
+        } else if (q.type === 'true-false' && q.statements) {
+          ans = q.statements
+            .map((st, sIdx) => `${getStatementLetterLabel(sIdx)}-${st.isTrue ? 'Đ' : 'S'}`)
+            .join(' ');
+        } else if (q.type === 'short-answer' && q.shortAnswer) {
+          ans = q.shortAnswer.answerValue;
+        } else if (q.type === 'essay') {
+          ans = `Tự luận (${q.points}đ)`;
+        }
+        return {
+          number: idx + 1,
+          questionId: q.id,
+          originalCode: q.code,
+          type: q.type,
+          cognitiveLevel: q.cognitiveLevel,
+          answer: ans,
+        };
+      }),
+      integrityPassed: true,
+      integrityWarnings: [],
+    };
+  }, [exam.questions, exam.updatedAt]);
+
+  const activeSingleSheetVersion = viewingOriginal ? originalPreviewVersion : targetVersion;
+  const movedQuestionsCount = useMemo(() => {
+    if (!targetVersion || viewingOriginal) return 0;
+    return targetVersion.permutationMap.filter(
+      (m) => m.newOrderNumber !== m.originalOrderNumber
+    ).length;
+  }, [targetVersion, viewingOriginal]);
 
   const marginStyle: CSSProperties = {
     fontFamily:
@@ -441,37 +501,196 @@ export function MathExamPrintPreview({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-          {(
-            [
-              ['student-single', `Đề học sinh (Mã ${targetVersion?.code ?? ''})`],
-              ['student-all', `Tất cả đề học sinh (${exam.generatedVersions.length} mã)`],
-              ['answer-matrix', 'Bảng đáp án & Ánh xạ'],
-              ['integrity', 'Báo cáo toàn vẹn'],
-            ] as Array<[PrintPreviewMode, string]>
-          ).map(([m, label]) => (
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+          <div className="flex flex-wrap items-center gap-2">
+            {(
+              [
+                [
+                  'student-single',
+                  viewingOriginal
+                    ? 'Xem đề gốc (A4)'
+                    : `Đề học sinh (Mã ${targetVersion?.code ?? ''})`,
+                ],
+                ['student-all', `Tất cả đề học sinh (${exam.generatedVersions.length} mã)`],
+                ['answer-matrix', 'Bảng đáp án & Ánh xạ'],
+                ['integrity', 'Báo cáo toàn vẹn'],
+              ] as Array<[PrintPreviewMode, string]>
+            ).map(([m, label]) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setPreviewMode(m)}
+                className={`rounded-[10px] border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                  previewMode === m
+                    ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900'
+                    : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {previewMode === 'student-single' && (
             <button
-              key={m}
               type="button"
-              onClick={() => setPreviewMode(m)}
-              className={`rounded-[10px] border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
-                previewMode === m
-                  ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900'
+              onClick={() => setShowTeacherVerifyTable((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 rounded-[10px] border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                showTeacherVerifyTable
+                  ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/50 text-blue-800 dark:text-blue-200'
                   : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
             >
-              {label}
+              {showTeacherVerifyTable ? (
+                <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>Bảng đối chiếu giáo viên (không in)</span>
             </button>
-          ))}
+          )}
         </div>
+
+        {/* Code Switcher Bar: Đề gốc vs Mã 101, 102, ... */}
+        {previewMode === 'student-single' && (
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mr-1">
+                Chuyển xem nhanh:
+              </span>
+              <button
+                type="button"
+                onClick={() => setViewingOriginal(true)}
+                className={`rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors ${
+                  viewingOriginal
+                    ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
+                    : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                Đề gốc
+              </button>
+              {exam.generatedVersions.slice(0, 10).map((ver) => {
+                const isSelected = !viewingOriginal && targetVersion?.code === ver.code;
+                return (
+                  <button
+                    key={ver.code}
+                    type="button"
+                    onClick={() => {
+                      setViewingOriginal(false);
+                      onSelectCode?.(ver.code);
+                    }}
+                    className={`rounded-lg border px-2.5 py-1 text-xs font-mono-num font-semibold transition-colors ${
+                      isSelected
+                        ? 'border-blue-600 bg-blue-600 text-white'
+                        : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    Mã {ver.code}
+                  </button>
+                );
+              })}
+              {exam.generatedVersions.length > 10 && (
+                <select
+                  aria-label="Chọn mã đề xem trước bản in"
+                  value={viewingOriginal ? '__ORIGINAL__' : targetVersion?.code ?? ''}
+                  onChange={(e) => {
+                    if (e.target.value === '__ORIGINAL__') {
+                      setViewingOriginal(true);
+                    } else {
+                      setViewingOriginal(false);
+                      onSelectCode?.(e.target.value);
+                    }
+                  }}
+                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-mono-num font-semibold"
+                >
+                  <option value="__ORIGINAL__">Đề gốc</option>
+                  {exam.generatedVersions.map((ver) => (
+                    <option key={ver.code} value={ver.code}>
+                      Mã {ver.code}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            {!viewingOriginal && targetVersion && (
+              <span className="text-[11px] font-mono-num font-medium text-blue-700 dark:text-blue-300">
+                {movedQuestionsCount}/{targetVersion.questions.length} câu đổi vị trí so với đề gốc
+              </span>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Optional Teacher-Only Verification Table (strictly no-print, never exported into student files) */}
+      {previewMode === 'student-single' && showTeacherVerifyTable && activeSingleSheetVersion && (
+        <div
+          data-testid="teacher-verification-table"
+          className="no-print rounded-2xl border border-blue-200 dark:border-blue-800 bg-blue-50/40 dark:bg-blue-950/20 p-4 space-y-2.5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-xs font-bold text-blue-950 dark:text-blue-100">
+              Bảng đối chiếu thứ tự câu dành riêng cho giáo viên — {viewingOriginal ? 'Đề gốc' : `Mã đề ${activeSingleSheetVersion.code}`}
+            </h4>
+            <span className="text-[11px] text-blue-700 dark:text-blue-300">
+              Chỉ hiển thị trên màn hình (tự động ẩn khi in PDF &amp; không đưa vào DOCX học sinh)
+            </span>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-blue-200/80 dark:border-blue-800/80 bg-white dark:bg-slate-900">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/70 text-[11px] text-slate-600 dark:text-slate-300">
+                <tr>
+                  <th className="px-3 py-1.5 text-left font-semibold">Câu hiển thị</th>
+                  <th className="px-3 py-1.5 text-left font-semibold">ID câu gốc</th>
+                  <th className="px-3 py-1.5 text-left font-semibold">Vị trí gốc</th>
+                  <th className="px-3 py-1.5 text-left font-semibold">Đổi vị trí</th>
+                  <th className="px-3 py-1.5 text-left font-semibold">Đáp án mới</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono-num">
+                {activeSingleSheetVersion.permutationMap.map((m, idx) => {
+                  const moved = m.newOrderNumber !== m.originalOrderNumber;
+                  return (
+                    <tr key={m.questionId}>
+                      <td className="px-3 py-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                        Câu {m.newOrderNumber}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-700 dark:text-slate-300">
+                        {m.originalCode} <span className="text-[10px] text-slate-400">({m.questionId})</span>
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-600 dark:text-slate-400">
+                        Câu {m.originalOrderNumber}
+                      </td>
+                      <td className="px-3 py-1.5">
+                        {moved ? (
+                          <span className="font-sans text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                            Đã đổi ({m.originalOrderNumber} → {m.newOrderNumber})
+                          </span>
+                        ) : m.lockedPositionApplied ? (
+                          <span className="font-sans text-[11px] text-amber-700 dark:text-amber-400">
+                            Khóa vị trí
+                          </span>
+                        ) : (
+                          <span className="font-sans text-[11px] text-slate-500">Giữ nguyên</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 font-bold text-blue-700 dark:text-blue-300">
+                        {activeSingleSheetVersion.answerKeyRows[idx]?.answer ?? m.exactAnswerSummary}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Printable A4 Sheets */}
       <div className="print-container space-y-6">
-        {previewMode === 'student-single' && targetVersion && (
+        {previewMode === 'student-single' && activeSingleSheetVersion && (
           <StudentExamA4Sheet
             exam={exam}
-            version={targetVersion}
+            version={activeSingleSheetVersion}
             settings={settings}
             subjectName={subjectProfile.name}
             marginStyle={marginStyle}

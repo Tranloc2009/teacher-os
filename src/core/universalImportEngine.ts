@@ -26,7 +26,11 @@ import {
   detectDependentStatements,
 } from './mathIntegrity';
 import { detectClipboardMathArtifacts } from './mathTextParser';
-import { ExtractedOmmlFragment, extractDocxDocument } from './ooxmlParser';
+import {
+  ExtractedOmmlFragment,
+  extractDocxDocument,
+  isExamHeaderBannerTable,
+} from './ooxmlParser';
 import {
   buildUniversalLockState,
   captureQuestionOriginalSnapshot,
@@ -546,12 +550,14 @@ export function parseUniversalExamText(
   let activePassageKey: string | undefined;
   let collectingPassageLines: { key: string; meta: ReturnType<typeof detectPassageIntroLine> } | null =
     null;
+  let pendingLeadAssetLines: string[] = [];
 
   const blocks: RawQuestionBlock[] = [];
   let currentBlock: RawQuestionBlock | null = null;
   const unparsedSegments: string[] = [];
 
-  const questionStartRe = /^\s*(?:Câu|Question|Bài)\s+(\d{1,3})\s*[.:)]\s*(.*)$/i;
+  const questionStartRe =
+    /^\s*(?:\*{1,2}|\[)?(?:Câu|Question|Bài)\s+(\d{1,3})(?:\]|\*{1,2})?\s*[.:)\-–]\s*(.*)$/i;
 
   for (const rawLine of lines) {
     const trimmedLine = rawLine.trim();
@@ -567,6 +573,7 @@ export function parseUniversalExamText(
       currentSectionHint = sec.sectionHintType;
       collectingPassageLines = null;
       activePassageKey = undefined;
+      pendingLeadAssetLines = [];
       if (currentBlock) {
         blocks.push(currentBlock);
         currentBlock = null;
@@ -592,6 +599,7 @@ export function parseUniversalExamText(
       });
       collectingPassageLines = { key, meta: passageIntro };
       activePassageKey = key;
+      pendingLeadAssetLines = [];
       continue;
     }
 
@@ -618,12 +626,17 @@ export function parseUniversalExamText(
           activePassageKey = undefined;
         }
       }
+      const initialLines = qMatch[2] ? [qMatch[2]] : [];
+      if (pendingLeadAssetLines.length > 0) {
+        initialLines.push(...pendingLeadAssetLines);
+        pendingLeadAssetLines = [];
+      }
       currentBlock = {
         questionNumber: qNum,
         sectionOrdinal: currentSectionOrdinal,
         sectionTitle: currentSectionTitle,
         sectionHintType: currentSectionHint,
-        lines: qMatch[2] ? [qMatch[2]] : [],
+        lines: initialLines,
         passageGroupKey: linkedKey,
       };
       continue;
@@ -641,17 +654,31 @@ export function parseUniversalExamText(
     if (currentBlock) {
       currentBlock.lines.push(rawLine);
     } else if (trimmedLine) {
-      // Nếu có dòng ngữ liệu chứa bảng/ảnh trước câu hỏi đầu tiên
+      // Tuyệt đối không biến bảng khung tiêu đề hoặc hình ảnh rời trước Câu 1 thành một QuestionGroup gom toàn bộ đề
       if (/\[\[ASSET:/.test(trimmedLine)) {
-        const key = createIdFn('grp');
-        pendingPassages.set(key, {
-          title: 'Ngữ liệu / Hình vẽ đính kèm',
-          rawContent: rawLine,
-          assetIds: [],
-          contextKind: 'figure-data',
-        });
-        activePassageKey = key;
-      } else if (!/^(?:ĐỀ\s+KIỂM\s+TRA|MÔN|THỜI\s+GIAN|TRƯỜNG|LỚP|HỌ\s+VÀ\s+TÊN)/i.test(trimmedLine)) {
+        const assetIdsInLine = Array.from(trimmedLine.matchAll(/\[\[ASSET:([^\]]+)\]\]/g)).map(
+          (m) => m[1]
+        );
+        const isHeaderAsset =
+          isExamHeaderBannerTable(trimmedLine) ||
+          (assetIdsInLine.length > 0 &&
+            assetIdsInLine.every((id) => {
+              const found = assetLookup.get(id);
+              return (
+                found?.kind === 'data-table' &&
+                isExamHeaderBannerTable(found.sourceData)
+              );
+            }));
+        if (!isHeaderAsset && sawSectionOrQuestion) {
+          // Ảnh/bảng đứng ngay đầu một PHẦN (sau khi đã vào thân đề) chỉ gắn với câu kế tiếp thay vì gom nhóm toàn bộ phần
+          pendingLeadAssetLines.push(rawLine);
+        }
+      } else if (
+        !/^(?:ĐỀ\s+KIỂM\s+TRA|ĐỀ\s+THI|SỞ\s+GIÁO\s+DỤC|PHÒNG\s+GIÁO\s+DỤC|BỘ\s+GIÁO\s+DỤC|MÔN|THỜI\s+GIAN|TRƯỜNG|LỚP|HỌ\s+VÀ\s+TÊN|SỐ\s+BÁO\s+DANH|MÃ\s+ĐỀ|NĂM\s+HỌC|HỌC\s+K[ÌỲ])/i.test(
+          trimmedLine
+        ) &&
+        !isExamHeaderBannerTable(trimmedLine)
+      ) {
         unparsedSegments.push(trimmedLine.slice(0, 120));
       }
     }
@@ -1278,6 +1305,16 @@ export function parseUniversalExamText(
       meta.rawContent,
       assetLookup
     );
+    if (
+      meta.startNum === undefined &&
+      meta.endNum === undefined &&
+      linkedIds.length === questions.length &&
+      questions.length > 6
+    ) {
+      warnings.push(
+        `Nhóm ngữ liệu "${meta.title}" không ghi rõ phạm vi câu nên đang gắn với toàn bộ ${linkedIds.length} câu hỏi. Nếu các câu này độc lập, hãy tách nhóm ở Bước 1 để hệ thống có thể đảo thứ tự câu hỏi.`
+      );
+    }
     questionGroups.push({
       id: grpId,
       title: meta.title,

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ChevronRight,
   Crosshair,
   GitBranch,
@@ -7,6 +8,7 @@ import {
   HelpCircle,
   LayoutTemplate,
   Map as MapIcon,
+  Maximize2,
   PanelLeft,
   PanelRight,
   Plus,
@@ -59,6 +61,8 @@ interface CanvasToolbarProps {
   onToggleSnapToGrid: () => void;
   onToggleMiniMap: () => void;
   onSwitchToClassicView: () => void;
+  onBackToHome?: () => void;
+  onFitView?: () => void;
   onStartHelp?: () => void;
 }
 
@@ -94,6 +98,8 @@ export function CanvasToolbar({
   onToggleSnapToGrid,
   onToggleMiniMap,
   onSwitchToClassicView,
+  onBackToHome,
+  onFitView,
   onStartHelp,
 }: CanvasToolbarProps) {
   const [displayMenuOpen, setDisplayMenuOpen] = useState(false);
@@ -129,14 +135,26 @@ export function CanvasToolbar({
     >
       {/* Single Clean Primary Row */}
       <div className="flex flex-wrap lg:flex-nowrap items-center justify-between gap-2 min-w-0">
-        {/* Left: Board switcher + Primary Action */}
+        {/* Left: Optional Back + Board switcher + Primary Action */}
         <div className="flex flex-wrap lg:flex-nowrap items-center gap-1.5 min-w-0 max-w-full">
+          {onBackToHome && (
+            <button
+              type="button"
+              data-testid="canvas-back-home-btn"
+              onClick={onBackToHome}
+              title="Quay lại Quy trình của tôi"
+              className="inline-flex items-center gap-1 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-[#635BFF]/40 hover:text-[#5046E5] dark:hover:text-[#A5B4FC] whitespace-nowrap shrink-0 transition-colors"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">Quy trình</span>
+            </button>
+          )}
           <div className="inline-flex items-center rounded-[10px] border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/80 overflow-hidden min-w-0">
             <select
               aria-label="Chọn bảng Canvas"
               value={activeBoard.id}
               onChange={(e) => onSelectBoard(e.target.value)}
-              className="min-w-0 max-w-[140px] lg:max-w-[155px] 2xl:max-w-[195px] truncate bg-transparent px-2.5 py-1.5 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-none"
+              className="w-[135px] xl:w-[170px] 2xl:w-[205px] truncate bg-transparent px-2.5 py-1.5 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-none"
             >
               {boards.map((b) => (
                 <option key={b.id} value={b.id}>
@@ -161,10 +179,10 @@ export function CanvasToolbar({
                 type="button"
                 data-testid="open-smart-wf-generator-btn"
                 onClick={onOpenNaturalLanguageGenerator}
-                className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-2.5 xl:px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 dark:hover:bg-blue-500 transition-colors whitespace-nowrap shrink-0"
+                className="aurora-btn-primary inline-flex items-center gap-1.5 rounded-[10px] px-2.5 xl:px-3 py-1.5 text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0"
               >
                 <Wand2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Tạo sơ đồ từ mô tả</span>
+                <span>Tạo từ mô tả</span>
               </button>
 
               <button
@@ -174,7 +192,8 @@ export function CanvasToolbar({
                 className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0"
               >
                 <GitBranch className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                <span>Mẫu quy trình</span>
+                <span className="hidden xl:inline">Mẫu quy trình</span>
+                <span className="xl:hidden">Mẫu</span>
               </button>
             </>
           ) : (
@@ -215,6 +234,18 @@ export function CanvasToolbar({
               <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </div>
+
+          {onFitView && (
+            <button
+              type="button"
+              onClick={onFitView}
+              title="Căn vừa toàn bộ sơ đồ (Fit to View)"
+              aria-label="Căn vừa toàn bộ sơ đồ"
+              className="hidden 2xl:inline-flex rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1.5 text-slate-600 dark:text-slate-200 hover:border-[#635BFF]/40 hover:text-[#5046E5] dark:hover:text-[#A5B4FC] shrink-0 transition-colors"
+            >
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          )}
 
           {/* Search Node */}
           <div className="relative w-28 sm:w-32 2xl:w-40">
@@ -385,12 +416,13 @@ export function CanvasToolbar({
             <span className="hidden 2xl:inline">Tổng quan</span>
           </button>
 
-          {/* Classic View Switch */}
+          {/* Classic / Easy View Switch */}
           <button
             type="button"
             data-tour-id={`${mode}-canvas-classic-switch`}
+            data-testid="canvas-switch-easy-btn"
             onClick={onSwitchToClassicView}
-            className="rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0"
+            className="rounded-[10px] border border-[#635BFF]/30 dark:border-[#635BFF]/45 bg-[#F3F0FF] dark:bg-[#635BFF]/20 px-2.5 py-1.5 text-xs font-semibold text-[#5046E5] dark:text-[#A5B4FC] hover:bg-[#635BFF] hover:text-white whitespace-nowrap shrink-0 transition-colors"
           >
             {classicViewLabel}
           </button>

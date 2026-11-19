@@ -309,6 +309,7 @@ export function normalizeMathExamProject(raw: MathExamProject): MathExamProject 
     }),
     mixConfig: {
       ...raw.mixConfig,
+      keepDependentGroups: raw.mixConfig?.keepDependentGroups ?? true,
       lockedQuestionIds: Array.isArray(raw.mixConfig?.lockedQuestionIds)
         ? raw.mixConfig.lockedQuestionIds
         : [],
