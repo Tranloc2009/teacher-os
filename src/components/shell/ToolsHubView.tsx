@@ -5,6 +5,7 @@ import {
   Calculator,
   GitBranch,
   Printer,
+  ScanLine,
   Settings,
 } from 'lucide-react';
 import { AppId } from '../../core/appRegistry';
@@ -55,6 +56,16 @@ export function ToolsHubView({
       ctaLabel: 'Mở Exam Mixer Pro 6.0',
       icon: Calculator,
       tourId: 'desktop-app-math-mixer',
+    },
+    {
+      id: 'grading-studio',
+      title: 'Smart Grading Studio',
+      description:
+        'Tạo phiếu trả lời A4 chuẩn OMR, nhận diện ô tô cục bộ theo đáp án từng mã đề Exam Mixer Pro, duyệt thủ công và xuất Excel + ZIP minh chứng.',
+      metricLabel: 'Chấm OMR 100% cục bộ',
+      ctaLabel: 'Mở Smart Grading Studio',
+      icon: ScanLine,
+      tourId: 'desktop-app-grading-studio',
     },
     {
       id: 'print-studio',

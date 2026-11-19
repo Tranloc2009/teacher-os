@@ -13,6 +13,7 @@ import {
   Lock,
   Printer,
   RefreshCw,
+  ScanLine,
   ShieldAlert,
   ShieldCheck,
   Shuffle,
@@ -99,6 +100,7 @@ interface MathExamMixerAppProps {
   onDeleteMathExam: (id: string) => Promise<void>;
   onDuplicateMathExam: (exam: MathExamProject) => Promise<void>;
   onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
+  onOpenGradingStudio?: (examId: string) => void;
 }
 
 const STEP_TABS: Array<{ step: MathExamStep; label: string; shortTitle: string }> = [
@@ -124,6 +126,7 @@ export function MathExamMixerApp({
   onDeleteMathExam,
   onDuplicateMathExam,
   onShowToast,
+  onOpenGradingStudio,
 }: MathExamMixerAppProps) {
   const [selectedExamId, setSelectedExamId] = useState<string>(
     mathExams[0]?.id ?? ''
@@ -573,6 +576,17 @@ export function MathExamMixerApp({
                 <Copy className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Nhân bản</span>
               </Button>
+
+              {onOpenGradingStudio && activeExam.generatedVersions.length > 0 && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => onOpenGradingStudio(activeExam.id)}
+                >
+                  <ScanLine className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Chấm bài OMR</span>
+                </Button>
+              )}
 
               {tutorial && (
                 <Button

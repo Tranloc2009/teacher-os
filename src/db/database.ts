@@ -8,6 +8,11 @@ import {
   WorkflowRun,
 } from '../types/lesson';
 import { StoredResourceFileRecord } from '../types/resourceBulk';
+import type {
+  EvidenceBlobRecord,
+  GradingSession,
+  StudentRoster,
+} from '../types/grading';
 import { deleteBlobFromOpfs, readBlobFromOpfs } from '../core/resourceStorage';
 import { DEMO_LESSON_PACKS } from '../data/demoPacks';
 import { DEMO_MATH_EXAM } from '../data/demoMathExams';
@@ -93,6 +98,9 @@ class TeacherOSDatabase extends Dexie {
   canvasEdges!: Table<CanvasEdgeRecord, string>;
   canvasViewSettings!: Table<CanvasViewSettings, string>;
   resourceFiles!: Table<StoredResourceFileRecord, string>;
+  gradingSessions!: Table<GradingSession, string>;
+  gradingRosters!: Table<StudentRoster, string>;
+  gradingEvidenceBlobs!: Table<EvidenceBlobRecord, string>;
 
   constructor() {
     super('TeacherOS2DB');
@@ -154,6 +162,24 @@ class TeacherOSDatabase extends Dexie {
       canvasEdges: 'id, boardId, source, target, edgeType',
       canvasViewSettings: 'boardId',
       resourceFiles: 'id, resourceId, sha256, storageKind, updatedAt',
+    });
+    // Phiên bản 7 (Smart Grading Studio 1.0): bổ sung bảng chấm OMR & ảnh minh chứng nhị phân, giữ nguyên 100% dữ liệu v1-v6
+    this.version(7).stores({
+      lessonPacks: 'id, subject, grade, status, isDemo, updatedAt',
+      settings: 'id',
+      meta: 'key',
+      resources: 'id, type, subject, grade, updatedAt',
+      workflows: 'id, linkedPackId, updatedAt',
+      journals: 'id, packId, taughtDate, updatedAt',
+      mathExams: 'id, grade, status, updatedAt',
+      canvasBoards: 'id, mode, updatedAt',
+      canvasNodes: 'id, boardId, type, parentId, updatedAt',
+      canvasEdges: 'id, boardId, source, target, edgeType',
+      canvasViewSettings: 'boardId',
+      resourceFiles: 'id, resourceId, sha256, storageKind, updatedAt',
+      gradingSessions: 'id, examId, className, updatedAt',
+      gradingRosters: 'id, className, updatedAt',
+      gradingEvidenceBlobs: 'id, sessionId, sheetId, kind, updatedAt',
     });
   }
 }
@@ -1298,3 +1324,54 @@ export async function rollbackToSnapshot(): Promise<{
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Smart Grading Studio 1.0 — Local IndexedDB Storage (v7 additive tables)
+// ---------------------------------------------------------------------------
+
+export async function listGradingSessions(): Promise<GradingSession[]> {
+  return executeStorageOperation(async () => {
+    const all = await db.gradingSessions.toArray();
+    return all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  });
+}
+
+export async function saveGradingSession(session: GradingSession): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.gradingSessions.put(session);
+  });
+}
+
+export async function deleteGradingSession(sessionId: string): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.transaction(
+      'rw',
+      [db.gradingSessions, db.gradingEvidenceBlobs],
+      async () => {
+        await db.gradingEvidenceBlobs.where('sessionId').equals(sessionId).delete();
+        await db.gradingSessions.delete(sessionId);
+      }
+    );
+  });
+}
+
+export async function saveEvidenceBlob(record: EvidenceBlobRecord): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.gradingEvidenceBlobs.put(record);
+  });
+}
+
+export async function getEvidenceBlob(
+  blobId: string
+): Promise<EvidenceBlobRecord | undefined> {
+  return executeStorageOperation(async () => {
+    return db.gradingEvidenceBlobs.get(blobId);
+  });
+}
+
+export async function deleteSheetEvidenceBlobs(sheetId: string): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.gradingEvidenceBlobs.where('sheetId').equals(sheetId).delete();
+  });
+}
+

@@ -18,6 +18,7 @@ export type ShellViewId = AppId | 'tools';
 const SUB_TOOL_IDS: ReadonlySet<AppId> = new Set([
   'workflow-center',
   'math-mixer',
+  'grading-studio',
   'print-studio',
   'teaching-journal',
   'settings',

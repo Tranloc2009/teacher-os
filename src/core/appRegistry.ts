@@ -6,6 +6,7 @@ export type AppId =
   | 'workflow-center'
   | 'print-studio'
   | 'math-mixer'
+  | 'grading-studio'
   | 'teaching-journal'
   | 'settings';
 
@@ -109,6 +110,31 @@ export const APP_REGISTRY: AppDefinition[] = [
       'ma tran',
     ],
     sharedDataScopes: ['MathExamProject', 'PrintSettings'],
+  },
+  {
+    id: 'grading-studio',
+    name: 'Smart Grading Studio',
+    shortName: 'Chấm bài OMR',
+    description:
+      'Tạo phiếu trả lời chuẩn A4, nhận diện ô tô OMR cục bộ, tự chấm theo đúng đáp án từng mã đề Exam Mixer Pro, duyệt thủ công và xuất Excel + ZIP minh chứng.',
+    layer: 'core',
+    status: 'ready',
+    statusLabel: 'Đang hoạt động',
+    shortcutHint: 'Alt+9',
+    pinnedInDock: true,
+    keywords: [
+      'cham bai',
+      'omr',
+      'grading',
+      'smart grading',
+      'phieu tra loi',
+      'bang diem',
+      'excel',
+      'xlsx',
+      'minh chung',
+      'scan',
+    ],
+    sharedDataScopes: ['GradingSession', 'MathExamProject'],
   },
   {
     id: 'workspace',

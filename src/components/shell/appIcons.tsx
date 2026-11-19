@@ -6,6 +6,7 @@ import {
   LayoutGrid,
   NotebookPen,
   Printer,
+  ScanLine,
   Settings,
   Sigma,
 } from 'lucide-react';
@@ -33,6 +34,8 @@ export function AppIcon({
       return <Printer className={className} aria-hidden="true" />;
     case 'math-mixer':
       return <Sigma className={className} aria-hidden="true" />;
+    case 'grading-studio':
+      return <ScanLine className={className} aria-hidden="true" />;
     case 'teaching-journal':
       return <NotebookPen className={className} aria-hidden="true" />;
     case 'settings':

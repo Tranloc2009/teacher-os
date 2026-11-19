@@ -58,10 +58,10 @@ function makePack(overrides: Partial<LessonPack> = {}): LessonPack {
   };
 }
 
-test('APP_REGISTRY exposes unique IDs, all 9 ready modules in TeacherOS 4.0, and pinned Dock apps', () => {
+test('APP_REGISTRY exposes unique IDs, all 10 ready modules in TeacherOS, and pinned Dock apps', () => {
   const ids = APP_REGISTRY.map((a) => a.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.equal(APP_REGISTRY.length, 9);
+  assert.equal(APP_REGISTRY.length, 10);
   for (const app of APP_REGISTRY) {
     assert.equal(app.status, 'ready', `Expected ${app.id} to be ready`);
   }
@@ -70,9 +70,11 @@ test('APP_REGISTRY exposes unique IDs, all 9 ready modules in TeacherOS 4.0, and
   assert.equal(getAppById('workflow-center').status, 'ready');
   assert.equal(getAppById('teaching-journal').status, 'ready');
   assert.equal(getAppById('math-mixer').status, 'ready');
+  assert.equal(getAppById('grading-studio').status, 'ready');
   assert.equal(getDockApps().some((a) => a.id === 'desktop'), true);
   assert.equal(getDockApps().some((a) => a.id === 'lesson-studio'), true);
   assert.equal(getDockApps().some((a) => a.id === 'math-mixer'), true);
+  assert.equal(getDockApps().some((a) => a.id === 'grading-studio'), true);
 });
 
 test('normalizeVietnameseSearchText folds accents and đ cleanly', () => {

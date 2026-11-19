@@ -128,6 +128,7 @@ import { ResourceVaultApp } from './components/apps/ResourceVaultApp';
 import { WorkflowCenterApp } from './components/apps/WorkflowCenterApp';
 import { TeachingJournalApp } from './components/apps/TeachingJournalApp';
 import { MathExamMixerApp } from './components/apps/MathExamMixerApp';
+import { SmartGradingStudioApp } from './components/apps/SmartGradingStudioApp';
 import { SettingsView } from './components/SettingsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -147,6 +148,7 @@ const ALT_SHORTCUT_TO_APP: Record<string, AppId> = {
   '6': 'workflow-center',
   '7': 'teaching-journal',
   '8': 'math-mixer',
+  '9': 'grading-studio',
   '0': 'settings',
 };
 
@@ -204,6 +206,7 @@ export default function App() {
   const [lessonStudioMode, setLessonStudioMode] = useState<LessonStudioMode>('editor');
   const [lessonStudioHasDraftChanges, setLessonStudioHasDraftChanges] = useState(false);
   const [printPackId, setPrintPackId] = useState<string>('');
+  const [gradingPreferredExamId, setGradingPreferredExamId] = useState<string | null>(null);
 
   // Layer 3: Shared Core data state (IndexedDB v5)
   const [packs, setPacks] = useState<LessonPack[]>([]);
@@ -1641,6 +1644,23 @@ export default function App() {
                   onDeleteMathExam={handleDeleteMathExam}
                   onDuplicateMathExam={handleDuplicateMathExam}
                   onShowToast={showToast}
+                  onOpenGradingStudio={(examId) => {
+                    setGradingPreferredExamId(examId);
+                    openApp('grading-studio');
+                  }}
+                />
+              </ErrorBoundary>
+            </div>
+          )}
+
+          {openedApps.includes('grading-studio') && (
+            <div className={activeView === 'grading-studio' ? 'block' : 'hidden print:hidden'}>
+              <ErrorBoundary moduleName="Smart Grading Studio" packs={packs} settings={settings}>
+                <SmartGradingStudioApp
+                  mathExams={mathExams}
+                  preferredExamId={gradingPreferredExamId}
+                  onOpenExamMixer={() => openApp('math-mixer')}
+                  onNotify={showToast}
                 />
               </ErrorBoundary>
             </div>

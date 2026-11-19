@@ -10,6 +10,7 @@ import {
   Home,
   LayoutGrid,
   Printer,
+  ScanLine,
   Settings,
 } from 'lucide-react';
 import type { AppId } from '../../core/appRegistry';
@@ -70,7 +71,7 @@ interface UnifiedSidebarItem {
   viewId: ShellViewId;
   navTarget?: ShellNavId;
   appTarget?: AppId;
-  icon: 'home' | 'lesson' | 'exam' | 'vault' | 'workflow' | 'workspace' | 'journal' | 'print' | 'tools' | 'settings';
+  icon: 'home' | 'lesson' | 'exam' | 'grading' | 'vault' | 'workflow' | 'workspace' | 'journal' | 'print' | 'tools' | 'settings';
 }
 
 const SIDEBAR_MAIN_ITEMS: UnifiedSidebarItem[] = [
@@ -100,6 +101,15 @@ const SIDEBAR_MAIN_ITEMS: UnifiedSidebarItem[] = [
     viewId: 'math-mixer',
     appTarget: 'math-mixer',
     icon: 'exam',
+  },
+  {
+    key: 'grading-studio',
+    label: 'Smart Grading Studio',
+    title: 'Smart Grading Studio — Chấm OMR cục bộ & xuất bảng điểm (Alt+9)',
+    tourId: 'sidebar-app-grading-studio',
+    viewId: 'grading-studio',
+    appTarget: 'grading-studio',
+    icon: 'grading',
   },
   {
     key: 'resource-vault',
@@ -183,6 +193,8 @@ function SidebarItemIcon({
       return <BookOpen className={className} aria-hidden="true" />;
     case 'exam':
       return <Calculator className={className} aria-hidden="true" />;
+    case 'grading':
+      return <ScanLine className={className} aria-hidden="true" />;
     case 'vault':
       return <Folder className={className} aria-hidden="true" />;
     case 'workflow':
