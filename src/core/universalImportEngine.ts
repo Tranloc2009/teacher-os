@@ -6,6 +6,7 @@ import {
   MATH_SECTION_TITLES,
   MatchingColumnItem,
   MatchingPairMapping,
+  MathContentPayload,
   MathExamProject,
   MathQuestion,
   MathQuestionType,
@@ -24,6 +25,7 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
+  computeContentHash,
   createMathVisualAsset,
   detectDependentOptions,
   detectDependentStatements,
@@ -484,7 +486,7 @@ function segmentDocumentRegions(rawText: string): {
       continue;
     }
 
-    if (region === 'INTRO' || region === 'MATRIX_SPEC') {
+    if (region === 'INTRO' || region === 'MATRIX_SPEC' || !sawAnyQuestion) {
       if (MATRIX_REGION_HEADER_RE.test(trimmed)) {
         region = 'MATRIX_SPEC';
         skippedMatrixLines += 1;
@@ -549,9 +551,7 @@ function extractTrailingAnswerKeySection(rawText: string): {
 } {
   const segmented = segmentDocumentRegions(rawText);
   const bodyText = segmented.bodyText;
-  const keyText = segmented.keyText
-    .replace(/\[\[ASSET:[^\]]+\]\]/g, '')
-    .trim();
+  const keyText = segmented.keyText.trim();
 
   const keyByNumber = new Map<number, ExtractedAnswerKeyEntry>();
   const keyBySectionAndNumber = new Map<string, ExtractedAnswerKeyEntry>();
@@ -655,15 +655,11 @@ function extractTrailingAnswerKeySection(rawText: string): {
     if (!ln) continue;
 
     if (
-      /^(?:#+\s*)?(?:[A-Z]\.\s*)?(?:LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+GIẢI(?:\s+CHI\s+TIẾT)?)\s*[:.–-]?$/i.test(
+      /^(?:#+\s*)?(?:[A-Z]\.\s*)?(?:LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+GIẢI(?:\s+CHI\s+TIẾT(?:\s+TỪNG\s+CÂU)?)?)\s*[:.–-]?$/i.test(
         ln
       )
     ) {
-      flushActiveSolutionTf();
       inDetailedSolution = true;
-      keySectionOrdinal = 0;
-      keySectionHint = undefined;
-      activeSolutionQNum = null;
       continue;
     }
 
@@ -673,6 +669,7 @@ function extractTrailingAnswerKeySection(rawText: string): {
       keySectionOrdinal = sec.sectionOrdinal ?? keySectionOrdinal + 1;
       keySectionHint = sec.sectionHintType;
       activeSolutionQNum = null;
+      inDetailedSolution = false;
       continue;
     }
 
@@ -692,13 +689,30 @@ function extractTrailingAnswerKeySection(rawText: string): {
       }
     }
 
+    if (!inDetailedSolution) {
+      const bareQuestion = ln.match(/^(?:Câu|Question|Bài)\s+(\d{1,3})\s*[.:)\-–]\s*$/i);
+      if (bareQuestion) {
+        activeSolutionQNum = Number(bareQuestion[1]);
+        continue;
+      }
+    }
+
     if (inDetailedSolution) {
       const solQMatch = ln.match(/^(?:Câu|Question|Bài)\s+(\d{1,3})\s*[.:)\-–]\s*(.*)$/i);
       if (solQMatch) {
         flushActiveSolutionTf();
         activeSolutionQNum = Number(solQMatch[1]);
         const rest = solQMatch[2].trim();
-        const directChoose = rest.match(/(?:Chọn|Đáp\s*án(?:\s+đúng)?)\s*[:.]?\s*([ABCD])\b/i);
+        if (
+          keySectionHint === 'true-false' &&
+          /^(?:[a-d]\)\s*(?:Đ|S)\s*[,.;]?\s*){4}$/i.test(rest)
+        ) {
+          recordPair(
+            activeSolutionQNum, rest, 'solution-line',
+            `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+          );
+        }
+        const directChoose = rest.match(/^(?:Chọn|Đáp\s*án(?:\s+đúng)?(?:\s+là)?)\s*[:.]?\s*([ABCD])\s*[.]?$/i);
         if (directChoose) {
           recordPair(
             activeSolutionQNum,
@@ -711,7 +725,7 @@ function extractTrailingAnswerKeySection(rawText: string): {
         if (directShort && directShort[1].trim() !== '') {
           recordPair(
             activeSolutionQNum,
-            directShort[1].trim(),
+            directShort[1].trim().replace(/\.$/, ''),
             'solution-line',
             `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
           );
@@ -720,7 +734,7 @@ function extractTrailingAnswerKeySection(rawText: string): {
       }
 
       if (activeSolutionQNum !== null) {
-        const chooseMatch = ln.match(/(?:Chọn|Đáp\s*án(?:\s+đúng)?)\s*[:.]?\s*([ABCD])\b/i);
+        const chooseMatch = ln.match(/^(?:Chọn|Đáp\s*án(?:\s+đúng)?(?:\s+là)?)\s*[:.]?\s*([ABCD])\s*[.]?$/i);
         if (chooseMatch) {
           recordPair(
             activeSolutionQNum,
@@ -733,7 +747,7 @@ function extractTrailingAnswerKeySection(rawText: string): {
         if (shortMatch && shortMatch[1].trim() !== '') {
           recordPair(
             activeSolutionQNum,
-            shortMatch[1].trim(),
+            shortMatch[1].trim().replace(/\.$/, ''),
             'solution-line',
             `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
           );
@@ -921,22 +935,68 @@ function detectPassageIntroLine(line: string): {
 function extractAssetMarkersAndClean(
   text: string,
   assetLookup: Map<string, MathVisualAsset>
-): { cleanedText: string; assets: MathVisualAsset[] } {
+): { cleanedText: string; textWithInlineFormulas: string; assets: MathVisualAsset[] } {
   const attached: MathVisualAsset[] = [];
   const seen = new Set<string>();
-  const cleanedText = text
+  const textWithInlineFormulas = text
     .replace(/\[\[ASSET:([^\]]+)\]\]/g, (_m, id: string) => {
       const found = assetLookup.get(id.trim());
       if (found && !seen.has(found.id)) {
         seen.add(found.id);
         attached.push(found);
       }
-      return '';
+      return found?.id.startsWith('docx-ole-svg-') ? _m : '';
     })
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return { cleanedText, assets: attached };
+  return {
+    cleanedText: textWithInlineFormulas.replace(/\[\[ASSET:[^\]]+\]\]/g, '').trim(),
+    textWithInlineFormulas,
+    assets: attached,
+  };
+}
+
+function createImportedFormulaPayload(
+  parsed: ReturnType<typeof extractAssetMarkersAndClean>,
+  id: string,
+  options: Parameters<typeof createImmutableContentPayload>[2],
+  cleanedText = parsed.cleanedText
+): MathContentPayload {
+  const payload = createImmutableContentPayload(cleanedText, id, options);
+  if (!parsed.textWithInlineFormulas.includes('[[ASSET:')) return payload;
+  const removedSuffix = parsed.cleanedText.startsWith(cleanedText)
+    ? parsed.cleanedText.slice(cleanedText.length).trim()
+    : '';
+  let source = parsed.textWithInlineFormulas;
+  if (removedSuffix && source.endsWith(removedSuffix)) {
+    source = source.slice(0, -removedSuffix.length).trimEnd();
+  }
+  const pieces = source.split(/\[\[ASSET:([^\]]+)\]\]/g);
+  payload.blocks = pieces.flatMap((piece, index) => {
+    const blockId = `${id}-inline-${index}`;
+    if (index % 2 === 0) {
+      return createImmutableContentPayload(piece, blockId, {
+        ...options,
+        rawXmlFragments: undefined,
+      }).blocks.map((block) => {
+        const original = payload.blocks.find((candidate) =>
+          candidate.kind === block.kind && candidate.content === block.content && candidate.rawXmlFragment
+        );
+        return original ? { ...block, rawXmlFragment: original.rawXmlFragment } : block;
+      });
+    }
+    const asset = parsed.assets.find((item) => item.id === piece);
+    return asset ? [{
+      id: blockId,
+      kind: 'image' as const,
+      content: asset.sourceData,
+      altText: asset.altText,
+      inlineFormulaAssetId: asset.id,
+      checksum: computeContentHash(`image::${asset.sourceData}`),
+    }] : [];
+  });
+  return payload;
 }
 
 function collectOmmlForText(
@@ -1181,7 +1241,8 @@ export function parseUniversalExamText(
     }
 
     // 3. Question Start
-    const qMatch = rawLine.match(questionStartRe);
+    const leadingAssetMarkers = rawLine.match(/^\s*(?:(?:\[\[ASSET:[^\]]+\]\])\s*)+/)?.[0] ?? '';
+    const qMatch = rawLine.slice(leadingAssetMarkers.length).match(questionStartRe);
     if (qMatch) {
       sawSectionOrQuestion = true;
       collectingPassageLines = null;
@@ -1189,6 +1250,7 @@ export function parseUniversalExamText(
         blocks.push(currentBlock);
       }
       const qNum = Number(qMatch[1]);
+      if (leadingAssetMarkers) pendingLeadAssetLines.push(leadingAssetMarkers.trim());
       const tr = ensureSectionTracker(currentSectionOrdinal, currentSectionTitle);
       tr.actualCount += 1;
 
@@ -1504,10 +1566,11 @@ export function parseUniversalExamText(
     }
 
     // Extract assets for non-MCQ branches safely
-    const { cleanedText: bodyClean, assets: qAssets } = extractAssetMarkersAndClean(
+    const parsedBody = extractAssetMarkersAndClean(
       bodyCleanForNonMcq,
       assetLookup
     );
+    const { cleanedText: bodyClean, assets: qAssets } = parsedBody;
 
     // C. Kiểm tra Matching ("Cột A" & "Cột B" hoặc cặp "1. ... | a. ...")
     const hasMatchingCue =
@@ -1538,10 +1601,11 @@ export function parseUniversalExamText(
     if (hasFourMcq) {
       // Tách tài nguyên ĐỘC LẬP cho thân câu và từng phương án A/B/C/D!
       const rawStemPart = bodyWithMarkers.slice(0, lastFourMcq[0].index).trim();
-      const { cleanedText: stemText, assets: stemAssets } = extractAssetMarkersAndClean(
+      const parsedStem = extractAssetMarkersAndClean(
         rawStemPart,
         assetLookup
       );
+      const { cleanedText: stemText, assets: stemAssets } = parsedStem;
 
       const rawOptionSlices = lastFourMcq.map((m, oIdx) => {
         const endIdx = oIdx < 3 ? lastFourMcq[oIdx + 1].index : bodyWithMarkers.length;
@@ -1644,7 +1708,7 @@ export function parseUniversalExamText(
         return {
           id: `${qId}-opt-${oIdx + 1}`,
           originalLabel: lbl,
-          content: createImmutableContentPayload(po.cleanedText, `${qId}-o${oIdx + 1}`, {
+          content: createImportedFormulaPayload(po, `${qId}-o${oIdx + 1}`, {
             rawXmlFragments: collectOmmlForText(po.cleanedText, ommlFragments),
             preserveExactWhitespace: preserveWhitespace,
           }),
@@ -1696,7 +1760,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 0.25,
-        stem: createImmutableContentPayload(stemText, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedStem, `${qId}-stem`, {
           rawXmlFragments: collectOmmlForText(stemText, ommlFragments),
           preserveExactWhitespace: preserveWhitespace,
         }),
@@ -1735,10 +1799,11 @@ export function parseUniversalExamText(
 
     if (isTrueFalseBlock) {
       const rawStemPart = bodyWithMarkers.slice(0, tfMatches[0].index).trim();
-      const { cleanedText: stemText, assets: stemAssets } = extractAssetMarkersAndClean(
+      const parsedStem = extractAssetMarkersAndClean(
         rawStemPart,
         assetLookup
       );
+      const { cleanedText: stemText, assets: stemAssets } = parsedStem;
       const stmtSlices = tfMatches.slice(0, 4).map((m, sIdx) => {
         const endIdx =
           sIdx + 1 < Math.min(4, tfMatches.length)
@@ -1794,10 +1859,10 @@ export function parseUniversalExamText(
         return {
           id: `${qId}-st-${sIdx + 1}`,
           originalLabel: lbl,
-          content: createImmutableContentPayload(cleanSt, `${qId}-s${sIdx + 1}`, {
+          content: createImportedFormulaPayload(ps, `${qId}-s${sIdx + 1}`, {
             rawXmlFragments: collectOmmlForText(cleanSt, ommlFragments),
             preserveExactWhitespace: preserveWhitespace,
-          }),
+          }, cleanSt),
           isTrue: resolvedBool ?? false,
           answerState,
           underlinedInSource: isUnderlined || undefined,
@@ -1875,7 +1940,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 1,
-        stem: createImmutableContentPayload(stemText, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedStem, `${qId}-stem`, {
           rawXmlFragments: collectOmmlForText(stemText, ommlFragments),
           preserveExactWhitespace: preserveWhitespace,
         }),
@@ -1950,7 +2015,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 1,
-        stem: createImmutableContentPayload(bodyClean, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedBody, `${qId}-stem`, {
           preserveExactWhitespace: preserveWhitespace,
         }),
         matching: {
@@ -2018,7 +2083,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 1,
-        stem: createImmutableContentPayload(bodyClean, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedBody, `${qId}-stem`, {
           preserveExactWhitespace: preserveWhitespace,
         }),
         fillBlank: {
@@ -2081,7 +2146,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 0.5,
-        stem: createImmutableContentPayload(bodyClean, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedBody, `${qId}-stem`, {
           preserveExactWhitespace: preserveWhitespace,
         }),
         ordering: {
@@ -2152,7 +2217,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'van-dung',
         difficultyScore: 3,
         points: 2,
-        stem: createImmutableContentPayload(bodyClean, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedBody, `${qId}-stem`, {
           rawXmlFragments: collectOmmlForText(bodyClean, ommlFragments),
           preserveExactWhitespace: preserveWhitespace,
         }),
@@ -2192,7 +2257,8 @@ export function parseUniversalExamText(
       emptyCounts.essay += 1;
     } else {
       const effectiveRawShort = declaredAnswerRaw || part3ShortAnswerCandidate || '';
-      const hasExplicitShort = declaredAnswerRaw.trim().length > 0 && !hasKeyConflict;
+      const hasUnresolvedAnswerAsset = /\[\[ASSET:|\[CÔNG_THỨC_/.test(declaredAnswerRaw);
+      const hasExplicitShort = declaredAnswerRaw.trim().length > 0 && !hasKeyConflict && !hasUnresolvedAnswerAsset;
       const isPart3CandidateOnly = !hasExplicitShort && Boolean(part3ShortAnswerCandidate);
       const normShort = normalizeShortAnswerValue(effectiveRawShort);
 
@@ -2214,6 +2280,15 @@ export function parseUniversalExamText(
           sourceFileHash: options?.sourceFileHash,
           sourceLocation: keySourceLocation,
           rawEvidence: normShort.rawAnswer,
+        };
+      } else if (hasUnresolvedAnswerAsset) {
+        shortProvenance = {
+          status: 'needs-review',
+          sourceKind: keySourceKind,
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: declaredAnswerRaw,
+          note: 'Đáp số chứa công thức chưa đọc được thành giá trị. Cần đối chiếu với tệp gốc.',
         };
       } else if (isPart3CandidateOnly) {
         shortProvenance = {
@@ -2256,7 +2331,7 @@ export function parseUniversalExamText(
         cognitiveLevel: 'thong-hieu',
         difficultyScore: 2,
         points: 0.5,
-        stem: createImmutableContentPayload(bodyClean, `${qId}-stem`, {
+        stem: createImportedFormulaPayload(parsedBody, `${qId}-stem`, {
           rawXmlFragments: collectOmmlForText(bodyClean, ommlFragments),
           preserveExactWhitespace: preserveWhitespace,
         }),

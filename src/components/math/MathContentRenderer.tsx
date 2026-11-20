@@ -47,6 +47,17 @@ export function MathContentRenderer({
   return (
     <span className={`leading-relaxed break-words ${className}`}>
       {resolved.blocks.map((block) => {
+        if (block.kind === 'image' && block.inlineFormulaAssetId) {
+          return (
+            <img
+              key={block.id}
+              src={block.content}
+              alt={block.altText ?? 'Công thức toán'}
+              className="inline-block h-auto max-h-[4em] max-w-full align-middle"
+            />
+          );
+        }
+
         if (block.kind === 'latex') {
           const rendered = renderLatexSegment(block.content, Boolean(block.displayMode));
           if (block.displayMode) {

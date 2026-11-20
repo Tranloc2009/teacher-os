@@ -501,6 +501,8 @@ const UNICODE_TO_LATEX_MAP: Record<number, string> = {
 };
 
 function mapMtefCharToLatex(mtcode: number, typeface?: number, encChar?: number): string {
+  // fnSPACE: explicit thin space, including the digit grouping used by MathType.
+  if (typeface === 24 && mtcode === 0xef02 && encChar === undefined) return '\\,';
   // Symbol font (usually typeface 6 or 134 in MTEF)
   if (typeface === 6 || typeface === 134) {
     const code = encChar ?? (mtcode & 0xff);
@@ -575,9 +577,57 @@ function applyEmbellishments(base: string, embells: number[]): string {
 function renderTemplateToLatex(
   selector: number,
   variation: number,
-  slots: string[]
+  slots: string[],
+  version: number
 ): { latex: string; supported: boolean } {
   const s = (i: number) => (slots[i] ?? '').trim();
+
+  if (version === 5) {
+    // Use the preview for variants we cannot translate without changing the math.
+    if (selector <= 8) {
+      const pairs = [
+        ['\\langle', '\\rangle'], ['(', ')'], ['\\{', '\\}'], ['[', ']'],
+        ['|', '|'], ['\\|', '\\|'], ['\\lfloor', '\\rfloor'],
+        ['\\lceil', '\\rceil'], ['\\llbracket', '\\rrbracket'],
+      ];
+      const [left, right] = pairs[selector];
+      return {
+        latex: '\\left' + ((variation & 1) ? left : '.') + ' ' + s(0) +
+          ' \\right' + ((variation & 2) ? right : '.'),
+        supported: Boolean(s(0)) && variation <= 3,
+      };
+    }
+    if (selector === 9) {
+      const fences = ['(', ')', '[', ']'];
+      return {
+        latex: '\\left' + fences[variation & 3] + ' ' + s(0) + ' \\right' +
+          fences[(variation >> 4) & 3],
+        supported: Boolean(s(0)) && (variation & ~0x33) === 0,
+      };
+    }
+    if (selector === 10) {
+      return {
+        latex: variation === 1 ? '\\sqrt[' + s(1) + ']{' + s(0) + '}' : '\\sqrt{' + s(0) + '}',
+        supported: Boolean(s(0)) && (variation === 0 || (variation === 1 && Boolean(s(1)))),
+      };
+    }
+    if (selector >= 27 && selector <= 29) {
+      const sub = selector !== 28 ? s(0) : '';
+      const sup = selector !== 27 ? s(1) : '';
+      return {
+        latex: (sub ? '_{' + sub + '}' : '') + (sup ? '^{' + sup + '}' : ''),
+        supported: variation === 0 && Boolean(sub || sup),
+      };
+    }
+    if (selector === 11 && s(0) && s(1) && (variation & ~7) === 0) {
+      const frac = variation & 2 ? '{' + s(0) + '}/{' + s(1) + '}' : '\\frac{' + s(0) + '}{' + s(1) + '}';
+      return { latex: frac, supported: true };
+    }
+    if (selector === 31 && variation === 2 && s(0)) {
+      return { latex: '\\overrightarrow{' + s(0) + '}', supported: true };
+    }
+    return { latex: '', supported: false };
+  }
 
   switch (selector) {
     case 0: // tmANGLE
@@ -772,6 +822,10 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
     }
     return b - 128;
   };
+  const readUnsignedInt = (): number => {
+    const b = readByte();
+    return b === 0xff ? readU16() : b;
+  };
 
   const skipNudge = () => {
     const dx = readByte();
@@ -791,7 +845,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
     while (pos < rawBytes.length && steps < maxSteps) {
       steps += 1;
       const tag = readByte();
-      const recType = tag & 0x0f;
+      const recType = mtefVersion === 5 ? tag : tag & 0x0f;
       if (recType === 0) break; // END
       if (recType === 6) {
         // EMBELL
@@ -807,18 +861,26 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
     return embells;
   };
 
-  const parseObjectList = (): string[] => {
+  const parseObjectList = (depth = 0): string[] => {
+    if (depth > 100) {
+      unknownRecordCount += 1;
+      return [];
+    }
     const items: string[] = [];
+    let reachedEnd = false;
     while (pos < rawBytes.length && steps < maxSteps) {
       steps += 1;
       const tag = readByte();
-      const recType = tag & 0x0f;
+      const recType = mtefVersion === 5 ? tag : tag & 0x0f;
       if (recType === 0) {
         // END
+        reachedEnd = true;
         break;
       }
 
-      const opts = mtefVersion === 5 ? readByte() : (tag >> 4) & 0x0f;
+      // Definition and size records do not all carry a flags byte in v5.
+      const hasOptions = (recType >= 1 && recType <= 6) || recType === 16 || recType === 18;
+      const opts = mtefVersion === 5 ? (hasOptions ? readByte() : 0) : (tag >> 4) & 0x0f;
 
       if (recType === 1) {
         // LINE
@@ -842,7 +904,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
           // xfNULL — empty line
           items.push('');
         } else {
-          const lineItems = parseObjectList();
+          const lineItems = parseObjectList(depth + 1);
           items.push(lineItems.join(''));
         }
       } else if (recType === 2) {
@@ -852,12 +914,12 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         let mtcode = 0;
         let encChar: number | undefined;
         if (mtefVersion === 5) {
-          if (!(opts & 0x04)) {
+          if (!(opts & 0x20)) {
             mtcode = readU16();
           }
-          if (opts & 0x10) {
+          if (opts & 0x04) {
             encChar = readByte();
-          } else if (opts & 0x20) {
+          } else if (opts & 0x10) {
             encChar = readU16();
           }
         } else {
@@ -865,6 +927,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
           mtcode = encChar;
         }
         let ch = mapMtefCharToLatex(mtcode, typeface, encChar);
+        if (!ch) unknownRecordCount += 1;
         if (opts & 0x01) {
           // xfEMBELL
           const embells = parseEmbellList();
@@ -881,8 +944,8 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
           variation = (variation & 0x7f) | (high << 8);
         }
         readByte(); // template-specific options
-        const slots = parseObjectList();
-        const rendered = renderTemplateToLatex(selector, variation, slots);
+        const slots = parseObjectList(depth + 1);
+        const rendered = renderTemplateToLatex(selector, variation, slots, mtefVersion);
         if (!rendered.supported) unsupportedTemplateCount += 1;
         items.push(rendered.latex);
       } else if (recType === 4) {
@@ -901,7 +964,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
             }
           }
         }
-        const lines = parseObjectList();
+        const lines = parseObjectList(depth + 1);
         if (lines.length <= 1) {
           items.push(lines[0] ?? '');
         } else {
@@ -919,7 +982,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         const rowPartBytes = Math.ceil((rows + 1) / 4);
         const colPartBytes = Math.ceil((cols + 1) / 4);
         pos += rowPartBytes + colPartBytes;
-        const cells = parseObjectList();
+        const cells = parseObjectList(depth + 1);
         const rowStrs: string[] = [];
         for (let r = 0; r < rows; r++) {
           const rowCells: string[] = [];
@@ -939,7 +1002,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         }
       } else if (recType === 8) {
         // FONT_STYLE_DEF
-        readByte();
+        readUnsignedInt();
         readByte();
       } else if (recType === 9) {
         // SIZE
@@ -955,7 +1018,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         // FULL / SUB / SUB2 / SYM / SUBSYM — single byte size switch
       } else if (recType === 15) {
         // COLOR
-        readU16();
+        readUnsignedInt();
       } else if (recType === 16) {
         // COLOR_DEF
         const colorOpts = opts;
@@ -964,11 +1027,10 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         if (colorOpts & 0x04) skipNullString();
       } else if (recType === 17) {
         // FONT_DEF
-        readByte(); // enc_def_index
+        readUnsignedInt(); // enc_def_index
         skipNullString();
       } else if (recType === 18) {
         // EQN_PREFS
-        readByte(); // options
         const nSizes = readByte();
         // Skip nibble-packed dimensions carefully (conservative: abort if corrupted)
         let nibbleCount = 0;
@@ -979,17 +1041,18 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
             const hi = (b >> 4) & 0x0f;
             const lo = b & 0x0f;
             if (hi === 0x0f) readDims += 1;
-            if (lo === 0x0f) readDims += 1;
+            if (lo === 0x0f && readDims < count) readDims += 1;
             nibbleCount += 1;
             if (nibbleCount > 256) break;
           }
+          if (readDims !== count) unknownRecordCount += 1;
         };
         skipDimensions(nSizes);
         const nSpaces = readByte();
         skipDimensions(nSpaces);
         const nStyles = readByte();
         for (let i = 0; i < nStyles && pos < rawBytes.length; i++) {
-          const f = readByte();
+          const f = readUnsignedInt();
           if (f !== 0) readByte();
         }
       } else if (recType === 19) {
@@ -1004,6 +1067,7 @@ export function decodeMathTypeMtef(rawBytes: Uint8Array): {
         break;
       }
     }
+    if (!reachedEnd || pos > rawBytes.length) unknownRecordCount += 1;
     return items;
   };
 
@@ -1254,6 +1318,36 @@ export function convertWmfToSvg(wmfBytes: Uint8Array): WmfToSvgResult {
   const fillAttr = () => {
     if (activeBrush.style === 1) return 'fill="none"';
     return `fill="${activeBrush.color}"`;
+  };
+
+  const drawText = (raw: Uint8Array, x: number, y: number, advances?: number[]) => {
+    const txt = decodeWmfTextBytes(raw, activeFont.faceName);
+    if (!txt.trim()) return;
+    const fs = Math.max(8, activeFont.height);
+    const width = advances?.reduce((sum, dx) => sum + dx, 0) ?? txt.length * fs * 0.6;
+    const updateCurrentPosition = (textAlign & 1) !== 0; // TA_UPDATECP
+    const align = textAlign & 6;
+    const left = (updateCurrentPosition ? curX : x) - (align === 6 ? width / 2 : align === 2 ? width : 0);
+    const originY = updateCurrentPosition ? curY : y;
+    const verticalAlign = textAlign & 0x18;
+    const baseline = originY + (verticalAlign === 0x18 ? 0 : verticalAlign === 8 ? -0.2 * fs : 0.85 * fs);
+    let positions = String(left);
+    if (advances && Array.from(txt).length === advances.length) {
+      let position = left;
+      positions = advances.map((dx) => {
+        const glyphX = position;
+        position += dx;
+        return glyphX;
+      }).join(' ');
+    }
+    if (updateCurrentPosition) curX += width;
+    trackPoint(left, baseline - fs);
+    trackPoint(left + width, baseline + fs * 0.2);
+    const italic = activeFont.italic ? ' font-style="italic"' : '';
+    const bold = activeFont.bold ? ' font-weight="bold"' : '';
+    primitives.push(
+      `<text x="${positions}" y="${baseline}" fill="${textColor}" font-family="Cambria Math, Times New Roman, serif" font-size="${fs}"${italic}${bold} xml:space="preserve">${escapeXmlText(txt)}</text>`
+    );
   };
 
   let recordsProcessed = 0;
@@ -1519,18 +1613,7 @@ export function convertWmfToSvg(wmfBytes: Uint8Array): WmfToSvgResult {
           const rawStr = wmfBytes.subarray(p + 2, p + 2 + strLen);
           const y = readI16LE(wmfBytes, p + 2 + paddedLen);
           const x = readI16LE(wmfBytes, p + 2 + paddedLen + 2);
-          const txt = decodeWmfTextBytes(rawStr, activeFont.faceName);
-          if (txt.trim()) {
-            const fs = Math.max(8, activeFont.height);
-            const baselineShift = (textAlign & 0x18) === 0x18 ? 0 : Math.round(fs * 0.85);
-            trackPoint(x, y);
-            trackPoint(x + txt.length * fs * 0.6, y + fs);
-            const italicAttr = activeFont.italic ? ' font-style="italic"' : '';
-            const boldAttr = activeFont.bold ? ' font-weight="bold"' : '';
-            primitives.push(
-              `<text x="${x}" y="${y + baselineShift}" fill="${textColor}" font-family="Cambria Math, Times New Roman, serif" font-size="${fs}"${italicAttr}${boldAttr}>${escapeXmlText(txt)}</text>`
-            );
-          }
+          drawText(rawStr, x, y);
         }
         break;
       }
@@ -1544,18 +1627,11 @@ export function convertWmfToSvg(wmfBytes: Uint8Array): WmfToSvgResult {
         const strStart = p + 8 + (hasClipRect ? 8 : 0);
         if (strLen > 0 && strStart + strLen <= offset + sizeWords * 2) {
           const rawStr = wmfBytes.subarray(strStart, strStart + strLen);
-          const txt = decodeWmfTextBytes(rawStr, activeFont.faceName);
-          if (txt.trim()) {
-            const fs = Math.max(8, activeFont.height);
-            const baselineShift = (textAlign & 0x18) === 0x18 ? 0 : Math.round(fs * 0.85);
-            trackPoint(x, y);
-            trackPoint(x + txt.length * fs * 0.6, y + fs);
-            const italicAttr = activeFont.italic ? ' font-style="italic"' : '';
-            const boldAttr = activeFont.bold ? ' font-weight="bold"' : '';
-            primitives.push(
-              `<text x="${x}" y="${y + baselineShift}" fill="${textColor}" font-family="Cambria Math, Times New Roman, serif" font-size="${fs}"${italicAttr}${boldAttr}>${escapeXmlText(txt)}</text>`
-            );
-          }
+          const dxStart = strStart + strLen + (strLen % 2);
+          const advances = dxStart + strLen * 2 <= offset + sizeWords * 2
+            ? Array.from({ length: strLen }, (_, index) => readI16LE(wmfBytes, dxStart + index * 2))
+            : undefined;
+          drawText(rawStr, x, y, advances);
         }
         break;
       }

@@ -1685,7 +1685,12 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         stIds.add(st.id);
 
         const stRaw = st.content.rawSource.trim();
-        if (!stRaw || !/[A-Za-zÀ-ỹ0-9$\\]/.test(stRaw)) {
+        const hasInlineFormula = st.content.blocks.some((block) =>
+          block.kind === 'image' && block.inlineFormulaAssetId && q.visualAssets?.some((asset) =>
+            asset.id === block.inlineFormulaAssetId && asset.sourceData === block.content
+          )
+        );
+        if ((!stRaw || !/[A-Za-zÀ-ỹ0-9$\\]/.test(stRaw)) && !hasInlineFormula) {
           issues.push({
             id: `tf-empty-${q.id}-${st.id}`,
             severity: 'error',

@@ -72,6 +72,8 @@ export interface MathContentBlock {
   displayMode?: boolean;
   caption?: string;
   altText?: string;
+  /** ID của hình công thức phải nằm ngay trong dòng, thay vì dưới câu hỏi. */
+  inlineFormulaAssetId?: string;
   /** Đoạn XML gốc (ví dụ <m:oMath> hoặc drawing XML từ .docx) để bảo toàn nguyên trạng */
   rawXmlFragment?: string;
   /** Checksum kiểm chứng bất biến cho block gốc */

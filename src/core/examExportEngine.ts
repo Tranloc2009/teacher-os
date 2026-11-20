@@ -270,15 +270,27 @@ function parseDataUrlAsset(
   return entry;
 }
 
-function makeDrawingParagraphXml(media: EmbeddedMediaEntry): string {
-  // 4.5 inches x 2.6 inches in EMU (914400 EMU = 1 inch)
-  const cx = 4114800;
-  const cy = 2377440;
-  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="80"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${media.docPrId}" name="${escapeXml(
+function makeDrawingRunXml(media: EmbeddedMediaEntry, cx: number, cy: number): string {
+  return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${media.docPrId}" name="${escapeXml(
     media.name
   )}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${media.docPrId}" name="${escapeXml(
     media.name
-  )}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${media.relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+  )}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${media.relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+}
+
+function getSvgPreview(source: string): string | undefined {
+  const text = source.trim();
+  if (text.startsWith('<svg')) return sanitizeSvgSource(text);
+  const encoded = /^data:image\/svg\+xml;base64,([A-Za-z0-9+/=]+)$/.exec(text)?.[1];
+  if (!encoded) return undefined;
+  const svg = new TextDecoder().decode(decodeBase64ToBytes(encoded)).trim();
+  return svg.startsWith('<svg') ? sanitizeSvgSource(svg) : undefined;
+}
+
+function getPreviewSize(svg: string): { width: number; height: number } {
+  const width = Number(/<svg\b[^>]*\bwidth="([\d.]+)"/i.exec(svg)?.[1]);
+  const height = Number(/<svg\b[^>]*\bheight="([\d.]+)"/i.exec(svg)?.[1]);
+  return width > 0 && height > 0 ? { width, height } : { width: 60, height: 24 };
 }
 
 function makeWordTableXml(rows: string[][], fontFamily: string, headerRow = false): string {
@@ -329,7 +341,9 @@ function appendVisualAssetToBody(
 
   const media = parseDataUrlAsset(asset, mediaList, 100);
   if (media) {
-    bodyChunks.push(makeDrawingParagraphXml(media));
+    bodyChunks.push(makeParagraphXml(makeDrawingRunXml(media, 4114800, 2377440), {
+      align: 'center', spacingBefore: 40, spacingAfter: 80,
+    }));
     bodyChunks.push(
       makeParagraphXml(
         renderStyledRunsXml(asset.label, { italic: true, sizeHalfPt: 20, fontFamily, color: '475569' }),
@@ -370,7 +384,6 @@ function renderStudentQuestionXml(
   }
 ): void {
   const uType = getUniversalQuestionType(q);
-  const stemText = formatContentPayloadForText(q.stem);
   const prefix = formOptions?.numberPrefix?.trim() || 'Câu';
   const sz = formOptions?.sizeHalfPt ?? 24;
   const optPunct = formOptions?.optionLabelStyle === 'paren' ? ')' : '.';
@@ -379,6 +392,32 @@ function renderStudentQuestionXml(
       ? ` (${q.points} điểm)`
       : '';
 
+  const optionAssets = [...(q.options ?? []), ...(q.multiSelectOptions ?? [])]
+    .flatMap((option) => option.visualAsset ? [option.visualAsset] : []);
+  const assets = new Map([...(q.visualAssets ?? []), ...optionAssets].map((asset) => [asset.id, asset]));
+  const usedInline = new Set<string>();
+  const renderContent = (payload: MathContentPayload): string => {
+    if (!payload.blocks.some((block) => block.inlineFormulaAssetId)) {
+      return renderStyledRunsXml(formatContentPayloadForText(payload), { fontFamily, sizeHalfPt: sz });
+    }
+    return payload.blocks.map((block) => {
+      if (!block.inlineFormulaAssetId) {
+        const text = block.kind === 'latex'
+          ? (block.displayMode ? '$$' : '$') + block.content + (block.displayMode ? '$$' : '$')
+          : block.content;
+        return renderStyledRunsXml(text, { fontFamily, sizeHalfPt: sz });
+      }
+      const asset = assets.get(block.inlineFormulaAssetId);
+      if (!asset) throw new Error(`Câu ${qNumber} thiếu hình công thức ${block.inlineFormulaAssetId}.`);
+      const media = parseDataUrlAsset(asset, mediaList, 100);
+      if (!media) throw new Error(`Câu ${qNumber} thiếu hình công thức ${block.inlineFormulaAssetId}.`);
+      usedInline.add(asset.id);
+      const { width, height } = getPreviewSize(getSvgPreview(block.content) ?? '');
+      const scale = Math.min(1, 450 / width, 62 / height) * 9525;
+      return makeDrawingRunXml(media, Math.round(width * scale), Math.round(height * scale));
+    }).join('');
+  };
+
   // Stem line — TUYỆT ĐỐI không in đáp án hay giải thích vào đề học sinh
   bodyChunks.push(
     makeParagraphXml(
@@ -386,14 +425,19 @@ function renderStudentQuestionXml(
         bold: true,
         fontFamily,
         sizeHalfPt: sz,
-      }) + renderStyledRunsXml(stemText, { fontFamily, sizeHalfPt: sz }),
+      }) + renderContent(q.stem),
       { spacingBefore: formOptions?.questionSpacingBefore ?? 100, spacingAfter: 40 }
     )
   );
 
-  // Embedded Question visual assets (images / tables / SVG graphs)
+  const inlineIds = new Set(
+    [q.stem, ...(q.options ?? []).map((opt) => opt.content),
+      ...(q.multiSelectOptions ?? []).map((opt) => opt.content),
+      ...(q.statements ?? []).map((stmt) => stmt.content)]
+      .flatMap((payload) => payload.blocks.flatMap((block) => block.inlineFormulaAssetId ? [block.inlineFormulaAssetId] : []))
+  );
   for (const asset of q.visualAssets ?? []) {
-    appendVisualAssetToBody(bodyChunks, asset, mediaList, fontFamily);
+    if (!inlineIds.has(asset.id)) appendVisualAssetToBody(bodyChunks, asset, mediaList, fontFamily);
   }
 
   if (uType === 'multi-select') {
@@ -403,13 +447,13 @@ function renderStudentQuestionXml(
       bodyChunks.push(
         makeParagraphXml(
           renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
-            renderStyledRunsXml(formatContentPayloadForText(opt.content), {
-              fontFamily,
-              sizeHalfPt: sz,
-            }),
+            renderContent(opt.content),
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
+      if (opt.visualAsset && !usedInline.has(opt.visualAsset.id)) {
+        appendVisualAssetToBody(bodyChunks, opt.visualAsset, mediaList, fontFamily);
+      }
     });
   } else if (q.type === 'mcq' && q.options) {
     q.options.forEach((opt, oIdx) => {
@@ -417,14 +461,11 @@ function renderStudentQuestionXml(
       bodyChunks.push(
         makeParagraphXml(
           renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
-            renderStyledRunsXml(formatContentPayloadForText(opt.content), {
-              fontFamily,
-              sizeHalfPt: sz,
-            }),
+            renderContent(opt.content),
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
-      if (opt.visualAsset) {
+      if (opt.visualAsset && !usedInline.has(opt.visualAsset.id)) {
         appendVisualAssetToBody(bodyChunks, opt.visualAsset, mediaList, fontFamily);
       }
     });
@@ -434,7 +475,7 @@ function renderStudentQuestionXml(
       bodyChunks.push(
         makeParagraphXml(
           renderStyledRunsXml(`${lbl}) `, { bold: true, fontFamily }) +
-            renderStyledRunsXml(formatContentPayloadForText(st.content), { fontFamily }),
+            renderContent(st.content),
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
@@ -648,23 +689,20 @@ export async function buildStudentExamDocxBuffer(
   // for universal Microsoft Word compatibility (in Node tests, clean SVG fallback is preserved).
   const preparedQuestions: MathQuestion[] = await Promise.all(
     version.questions.map(async (origQ) => {
-      const hasSvgQuestionAsset = (origQ.visualAssets ?? []).some((a) =>
-        a.sourceData.trim().startsWith('<svg')
-      );
-      const hasSvgOptionAsset = (origQ.options ?? []).some((o) =>
-        o.visualAsset?.sourceData.trim().startsWith('<svg')
-      );
-      if (typeof window === 'undefined' || (!hasSvgQuestionAsset && !hasSvgOptionAsset)) {
-        return origQ;
-      }
+      if (typeof window === 'undefined') return origQ;
       const rasterizeAsset = async (asset: MathVisualAsset): Promise<MathVisualAsset> => {
-        if (!asset.sourceData.trim().startsWith('<svg')) return asset;
+        const svg = getSvgPreview(asset.sourceData);
+        if (!svg) return asset;
         const isBbt = asset.kind === 'variation-table';
+        const formulaSize = asset.id.startsWith('docx-ole-svg-') ? getPreviewSize(svg) : undefined;
         const png = await convertSvgToPngDataUrl(
-          asset.sourceData,
-          isBbt ? 520 : 480,
-          isBbt ? 180 : 310
+          svg,
+          formulaSize ? formulaSize.width * 2 : isBbt ? 520 : 480,
+          formulaSize ? formulaSize.height * 2 : isBbt ? 180 : 310
         );
+        if (!png && asset.id.startsWith('docx-ole-svg-')) {
+          throw new Error(`Không thể chuyển hình công thức ${asset.label} khi xuất Word.`);
+        }
         return png ? { ...asset, sourceData: png } : asset;
       };
       const nextVisualAssets = origQ.visualAssets
@@ -679,10 +717,16 @@ export async function buildStudentExamDocxBuffer(
             )
           )
         : origQ.options;
+      const nextMultiSelectOptions = origQ.multiSelectOptions
+        ? await Promise.all(origQ.multiSelectOptions.map(async (opt) => opt.visualAsset
+            ? { ...opt, visualAsset: await rasterizeAsset(opt.visualAsset) }
+            : opt))
+        : origQ.multiSelectOptions;
       return {
         ...origQ,
         visualAssets: nextVisualAssets,
         options: nextOptions,
+        multiSelectOptions: nextMultiSelectOptions,
       };
     })
   );
@@ -1144,7 +1188,7 @@ export async function verifyExportedDocxBuffer(
     extractedParagraphCount = extracted.paragraphs.length;
 
     const fullText = extracted.plainTextWithMarkers;
-    const normalizedFull = fullText.replace(/\s+/g, ' ');
+    const normalizedFull = fullText.replace(/\[\[ASSET:[^\]]+\]\]/g, '').replace(/\s+/g, ' ');
     let orderCursor = 0;
 
     expectedVersion.questions.forEach((q, idx) => {
