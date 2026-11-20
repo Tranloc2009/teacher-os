@@ -74,8 +74,22 @@ test('Real teacher DOCX fixtures restore math and source keys without inventing 
       assert.equal(imported.report.unresolvedOleCount, 0);
       const exam = mergeImportedExamIntoProject(structuredClone(DEMO_MATH_EXAM), imported, { replaceExisting: true });
       exam.isDemo = false;
+      const report = evaluatePreMixIntegrity(exam);
+      assert.ok(report.issues.every((issue) => !issue.message.includes('undefined công thức')));
+      if (fixture.ole === 82) {
+        const secondTf = exam.questions.filter((q) => q.type === 'true-false')[1];
+        assert.deepEqual(secondTf.statements?.map((s) => s.originalLabel), ['a', 'b', 'c', 'd']);
+        assert.match(secondTf.statements![2].content.rawSource, /mặt phẳng trung trực/);
+        assert.match(secondTf.statements![3].content.rawSource, /Phương trình mp \(OMN\)/);
+        assert.doesNotMatch(secondTf.statements![3].content.rawSource, /<g1>/);
+        assert.deepEqual(secondTf.statements?.map((s) => s.answerState), ['candidate', 'missing', 'candidate', 'candidate']);
+        assert.ok(exam.questions.slice(0, 12).every((q) =>
+          q.answerProvenance?.status === 'needs-review' && !q.correctOptionId
+        ));
+        assert.ok(report.issues.every((issue) => !issue.id.startsWith('mcq-answer-')));
+      }
       if (!fixture.mcq) {
-        assert.ok(evaluatePreMixIntegrity(exam).issues.some((issue) => /THIẾU KHÓA|CẦN DUYỆT/i.test(issue.message)));
+        assert.ok(report.issues.some((issue) => /THIẾU KHÓA|CẦN DUYỆT/i.test(issue.message)));
         assert.equal(generateMixedExams(exam).versions.length, 0);
         return;
       }

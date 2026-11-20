@@ -242,18 +242,11 @@ export function MathExamEditor({
   };
 
   const handleConfirmSingleQuestionCandidate = (q: MathQuestion) => {
+    if (!canConfirmEditedKey(q)) return;
     const now = new Date().toISOString();
     const promoted: MathQuestion = {
       ...q,
       legacyAnomalyReasons: undefined,
-      statements:
-        q.type === 'true-false' && q.statements
-          ? q.statements.map((st) => ({
-              ...st,
-              isTrue: st.underlinedInSource ? true : Boolean(st.isTrue),
-              answerState: 'confirmed',
-            }))
-          : q.statements,
       answerConfirmed: true,
       updatedAt: now,
     };
@@ -276,6 +269,20 @@ export function MathExamEditor({
       updatedAt: now,
     });
   };
+
+  function canConfirmEditedKey(q: MathQuestion): boolean {
+    const status = q.answerProvenance?.status;
+    if (status !== 'needs-review' && status !== 'missing' && status !== 'conflict') return false;
+    if (q.type === 'mcq') {
+      return Boolean(q.correctOptionId && q.options?.filter((opt) => opt.isCorrect).length === 1 &&
+        q.options.some((opt) => opt.id === q.correctOptionId && opt.isCorrect));
+    }
+    if (q.type === 'true-false') {
+      return q.statements?.length === 4 && q.statements.every((st) => st.answerState === 'confirmed');
+    }
+    const answer = q.shortAnswer?.answerValue?.trim();
+    return q.type === 'short-answer' && Boolean(answer && !/\[\[ASSET:|\[CÔNG_THỨC_/.test(answer));
+  }
 
   const handleAddQuestion = (type: MathQuestionType) => {
     const created = createEmptyMathQuestion(type, exam.questions.length + 1, createId);
@@ -1128,13 +1135,7 @@ export function MathExamEditor({
                           cls: 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
                         };
 
-                  const canOneClickConfirm =
-                    provStatus === 'needs-review' &&
-                    ((q.type === 'mcq' && Boolean(q.correctOptionId)) ||
-                      (q.type === 'true-false' &&
-                        (q.statements?.length ?? 0) === 4 &&
-                        q.statements!.some((s) => s.answerState === 'candidate' || s.underlinedInSource)) ||
-                      (q.type === 'short-answer' && Boolean(q.shortAnswer?.answerValue?.trim())));
+                  const canOneClickConfirm = canConfirmEditedKey(q);
 
                   return (
                     <tr key={q.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
@@ -1180,7 +1181,7 @@ export function MathExamEditor({
                               onClick={() => handleConfirmSingleQuestionCandidate(q)}
                               className="rounded border border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 whitespace-nowrap"
                             >
-                              Xác nhận ứng viên
+                              Xác nhận khóa này
                             </button>
                           )}
                           {(provStatus === 'missing' ||
@@ -2441,12 +2442,12 @@ export function MathExamEditor({
                                 updateQuestion(activeQuestion.id, (q) => ({
                                   ...q,
                                   statements: (q.statements ?? []).map((item) =>
-                                    item.id === st.id ? { ...item, isTrue: true } : item
+                                    item.id === st.id ? { ...item, isTrue: true, answerState: 'confirmed' } : item
                                   ),
                                 }))
                               }
                               className={`rounded px-2.5 py-0.5 text-[11px] font-medium ${
-                                st.isTrue
+                                st.isTrue && st.answerState !== 'missing' && st.answerState !== 'candidate'
                                   ? 'bg-emerald-700 text-white'
                                   : 'border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300'
                               }`}
@@ -2459,12 +2460,12 @@ export function MathExamEditor({
                                 updateQuestion(activeQuestion.id, (q) => ({
                                   ...q,
                                   statements: (q.statements ?? []).map((item) =>
-                                    item.id === st.id ? { ...item, isTrue: false } : item
+                                    item.id === st.id ? { ...item, isTrue: false, answerState: 'confirmed' } : item
                                   ),
                                 }))
                               }
                               className={`rounded px-2.5 py-0.5 text-[11px] font-medium ${
-                                !st.isTrue
+                                !st.isTrue && st.answerState !== 'missing' && st.answerState !== 'candidate'
                                   ? 'bg-slate-800 dark:bg-slate-600 text-white'
                                   : 'border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300'
                               }`}

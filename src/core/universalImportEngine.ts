@@ -1177,6 +1177,7 @@ export function parseUniversalExamText(
 
   for (const rawLine of lines) {
     const trimmedLine = rawLine.trim();
+    if (options?.sourceFormat === 'docx' && /^<g\d+>$/i.test(trimmedLine)) continue;
 
     // 1. Section Header
     const sec = detectSectionHeader(rawLine);
@@ -1398,6 +1399,7 @@ export function parseUniversalExamText(
         machineReadable: false,
         sourceKind: 'ole-wmf-preview',
         unresolvedCount: 0,
+        wmfPreviewCount: new Set(previewAssets.map((a) => a.id)).size,
         previewAssetIds: previewAssets.map((a) => a.id),
         details: [
           `Có ${previewAssets.length} công thức dựng từ ảnh vector WMF→SVG (hiển thị được, không có LaTeX máy đọc được).`,
@@ -1509,7 +1511,7 @@ export function parseUniversalExamText(
     };
 
     // A. Kiểm tra Đúng / Sai 4 ý: a) ... b) ... c) ... d) ... (hỗ trợ cả đầu dòng, sau tab, hoặc dính liền $/[[ASSET:)
-    const tfRegex = /(?:^|\n|\t)\s*([a-d])\s*[).](?:\s+|(?=\$|\[\[ASSET:|[−\-0-9]))/g;
+    const tfRegex = /(?:^|\n|\t)\s*([a-d])\s*(?:\)\.?|\.)(?:\s+|(?=\$|\[\[ASSET:|[−\-0-9]))/g;
     const tfMatches: Array<{ label: TrueFalseLabel; index: number; contentStart: number }> = [];
     let tfm: RegExpExecArray | null;
     while ((tfm = tfRegex.exec(bodyWithMarkers)) !== null) {

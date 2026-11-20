@@ -1185,6 +1185,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       q.formulaStatus.displayable &&
       !q.formulaStatus.machineReadable
     ) {
+      const count = q.formulaStatus.wmfPreviewCount ?? q.formulaStatus.previewAssetIds?.length;
       issues.push({
         id: `q-wmf-preview-only-${q.id}`,
         severity: 'warning',
@@ -1194,7 +1195,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         questionNumber: qNum,
         code: q.code,
         ...locMeta,
-        message: `Câu ${qNum} (${q.code}): Đang hiển thị ${q.formulaStatus.wmfPreviewCount} công thức OLE qua ảnh vector WMF→SVG (hiển thị được nhưng chưa phải LaTeX chỉnh sửa).`,
+        message: `Câu ${qNum} (${q.code}): Đang hiển thị ${count || 'một số'} công thức OLE qua ảnh vector WMF→SVG (hiển thị được nhưng chưa phải LaTeX chỉnh sửa).`,
         recommendation: 'Kiểm tra hiển thị công thức ở khung xem trước trước khi xuất bản.',
       });
     }
@@ -1622,7 +1623,9 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
       });
 
-      if (correctOptions.length !== 1 || correctOptions[0]?.id !== q.correctOptionId) {
+      const waitingForKey = (q.answerProvenance?.status === 'needs-review' || q.answerProvenance?.status === 'missing')
+        && !q.correctOptionId && correctOptions.length === 0;
+      if (!waitingForKey && (correctOptions.length !== 1 || correctOptions[0]?.id !== q.correctOptionId)) {
         issues.push({
           id: `mcq-answer-${q.id}`,
           severity: 'error',
@@ -1731,7 +1734,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
             ...locMeta,
             optionOrStatementLabel: `${st.originalLabel})`,
             message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) mới là ứng viên từ dấu gạch chân, chưa được giáo viên xác nhận quy ước.`,
-            recommendation: 'Xác nhận ý gạch chân là Đúng (và các ý còn lại là Sai) hoặc sửa lại ở Bước 2.',
+            recommendation: 'Đối chiếu khóa gốc và chọn rõ Đúng hoặc Sai cho từng ý.',
           });
         } else if (typeof st.isTrue !== 'boolean') {
           issues.push({
