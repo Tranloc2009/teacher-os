@@ -15,6 +15,7 @@ import {
   TF_LABELS,
   checkExamExportGate,
   computeContentHash,
+  formatVerifiedSectionHeading,
   getOptionLetterLabel,
   getStatementLetterLabel,
   sanitizeSvgSource,
@@ -747,9 +748,22 @@ export async function buildStudentExamDocxBuffer(
   preparedQuestions.forEach((q, idx) => {
     if (showSectionTitles && q.sectionTitle && q.sectionTitle !== currentSection) {
       currentSection = q.sectionTitle;
+      let endIdx = idx;
+      while (
+        endIdx + 1 < preparedQuestions.length &&
+        preparedQuestions[endIdx + 1].sectionTitle === currentSection
+      ) {
+        endIdx += 1;
+      }
+      const verifiedHeading = formatVerifiedSectionHeading(
+        currentSection,
+        idx + 1,
+        endIdx + 1,
+        endIdx - idx + 1
+      );
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(currentSection, { bold: true, sizeHalfPt, fontFamily }),
+          renderStyledRunsXml(verifiedHeading, { bold: true, sizeHalfPt, fontFamily }),
           { spacingBefore: 140, spacingAfter: 40, keepNext: true }
         )
       );
@@ -1795,6 +1809,445 @@ export async function verifyExportedZipBundle(
           : 'Phát hiện lệch ô đáp án trong CSV.',
       },
     ],
+    issues,
+  };
+}
+
+/**
+ * Kiểm toán độc lập một gói ZIP TeacherOS bất kỳ (không cần `MathExamProject` trong bộ nhớ).
+ * Phát hiện và chặn các lỗi chí mạng như:
+ * - Còn placeholder `[CÔNG_THỨC_OLE_LEGACY]` / `[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]`
+ * - Phương án MCQ rỗng hoặc chỉ có dấu câu (`A. .`, `B. .`)
+ * - Lệch số câu khai báo trong tiêu đề Phần so với số câu thực tế xuất ra (VD: ghi 12 câu nhưng xuất 13 câu)
+ * - Trùng nội dung câu hỏi giữa 2 ID khác nhau trong cùng một mã đề
+ * - Câu Phần I (trắc nghiệm 1 đáp án) bị gán nhầm `short-answer` hoặc `multi-select`
+ * - Câu Phần II Đúng/Sai bị lưu thành `short-answer` hoặc mang chuỗi lỗi `666`/`6666`
+ *   (ngay cả khi CSV, JSON và DOCX đáp án cùng đồng nhất giá trị sai đó!)
+ * - Sai lệch chéo giữa `Bang_dap_an_tong_hop.csv`, `Bang_anh_xa_hoan_vi.json`, `Dap_an_va_Anh_xa.docx` và đề học sinh.
+ */
+export async function auditUnknownExamZipBundle(
+  zipBytes: Uint8Array | ArrayBuffer
+): Promise<{
+  passed: boolean;
+  codesInspected: string[];
+  issues: MathIntegrityIssue[];
+}> {
+  const issues: MathIntegrityIssue[] = [];
+  const codesInspected: string[] = [];
+
+  let loaded: JSZip;
+  try {
+    loaded = await JSZip.loadAsync(zipBytes);
+  } catch (err) {
+    issues.push({
+      id: 'audit-zip-corrupt',
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: `Không thể giải nén gói ZIP: ${err instanceof Error ? err.message : 'Tệp hỏng'}`,
+      recommendation: 'Kiểm tra lại tệp ZIP trước khi sử dụng.',
+    });
+    return { passed: false, codesInspected, issues };
+  }
+
+  const allPaths = Object.keys(loaded.files);
+  const studentDocxPaths = allPaths
+    .filter((p) => /^de-hoc-sinh\/Ma_de_[^/]+\.docx$/i.test(p))
+    .sort();
+  const answerDocxEntry = loaded.file('dap-an/Dap_an_va_Anh_xa.docx');
+  const csvEntry = loaded.file('dap-an/Bang_dap_an_tong_hop.csv');
+  const mappingJsonEntry = loaded.file('dap-an/Bang_anh_xa_hoan_vi.json');
+
+  if (studentDocxPaths.length === 0) {
+    issues.push({
+      id: 'audit-zip-no-student-docx',
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: 'Gói ZIP không có tệp đề học sinh nào trong thư mục de-hoc-sinh/.',
+      recommendation: 'Xuất lại gói đề hoàn chỉnh.',
+    });
+  }
+
+  // 1. Kiểm tra từng file đề học sinh DOCX
+  const studentQuestionCountsByCode = new Map<string, number>();
+  for (const path of studentDocxPaths) {
+    const codeMatch = path.match(/Ma_de_([^/]+)\.docx$/i);
+    const code = codeMatch ? codeMatch[1] : path;
+    codesInspected.push(code);
+
+    const entry = loaded.file(path);
+    if (!entry) continue;
+    try {
+      const bytes = await entry.async('uint8array');
+      const extracted = await extractDocxDocument(bytes);
+      const text = extracted.plainTextWithMarkers;
+
+      if (
+        text.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+        text.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+      ) {
+        const count =
+          (text.match(/\[CÔNG_THỨC_OLE_LEGACY\]/g)?.length ?? 0) +
+          (text.match(/\[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA\]/g)?.length ?? 0);
+        issues.push({
+          id: `audit-student-placeholder-${code}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          message: `Mã đề ${code} (${path}): Chứa ${count} placeholder công thức chưa giải mã ([CÔNG_THỨC_OLE_LEGACY]).`,
+          recommendation: 'Chặn phát hành; giải mã công thức hoặc xuất qua ảnh WMF preview hợp lệ.',
+        });
+      }
+
+      if (/(?:Đáp án đúng\s*:|Bảng đáp án tổng hợp|BẢNG ÁNH XẠ HOÁN VỊ)/i.test(text)) {
+        issues.push({
+          id: `audit-student-leak-${code}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          message: `Mã đề ${code} (${path}): Phát hiện dấu hiệu rò rỉ đáp án trong đề học sinh.`,
+          recommendation: 'Không phát hành file này cho học sinh.',
+        });
+      }
+
+      // Kiểm tra phương án MCQ chỉ có dấu câu (A. ., B. ., C. ., D. .) không kèm hình ảnh
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      const emptyOptPattern = /(?:^|\s)([ABCD])\.\s*[.,;:–-]+\s*(?=(?:[ABCD]\.)|$)/;
+      let totalQuestionsInCode = 0;
+      const seenStems = new Map<string, number>();
+
+      // Theo dõi số câu khai báo theo phần so với số câu thực tế trong DOCX
+      let activeSectionTitle = '';
+      let activeSectionDeclaredCount: number | undefined;
+      let activeSectionActualCount = 0;
+      const flushSectionCountAudit = () => {
+        if (
+          activeSectionTitle &&
+          activeSectionDeclaredCount !== undefined &&
+          activeSectionActualCount !== activeSectionDeclaredCount
+        ) {
+          issues.push({
+            id: `audit-section-count-${code}-${activeSectionTitle.slice(0, 18)}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'export',
+            code,
+            sectionTitle: activeSectionTitle,
+            message: `Mã đề ${code}: Tiêu đề "${activeSectionTitle}" khai báo ${activeSectionDeclaredCount} câu nhưng thực tế có ${activeSectionActualCount} câu.`,
+            recommendation: 'Đếm lại số câu thực tế và loại bỏ câu thừa trước khi xuất.',
+          });
+        }
+      };
+
+      for (const ln of lines) {
+        if (/^PHẦN\s+(?:I|II|III|IV|\d+)\b/i.test(ln)) {
+          flushSectionCountAudit();
+          activeSectionTitle = ln;
+          activeSectionActualCount = 0;
+          const mRange = ln.match(/từ\s+câu\s+(\d+)\s+đến\s+(?:câu\s+)?(\d+)/i);
+          const mGom = ln.match(/(?:gồm|\()\s*(\d+)\s*câu\b/i);
+          if (mRange) {
+            const a = Number(mRange[1]);
+            const b = Number(mRange[2]);
+            activeSectionDeclaredCount = b >= a ? b - a + 1 : undefined;
+          } else if (mGom) {
+            activeSectionDeclaredCount = Number(mGom[1]);
+          } else {
+            activeSectionDeclaredCount = undefined;
+          }
+          continue;
+        }
+
+        const qMatch = ln.match(/^Câu\s+(\d{1,3})\s*[:.]\s*(.+)$/i);
+        if (qMatch) {
+          totalQuestionsInCode += 1;
+          activeSectionActualCount += 1;
+          const qNo = Number(qMatch[1]);
+          const stemNorm = qMatch[2]
+            .replace(/\[\[ASSET:[^\]]+\]\]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          if (stemNorm.length >= 24) {
+            const prevNo = seenStems.get(stemNorm);
+            if (prevNo !== undefined) {
+              issues.push({
+                id: `audit-dup-stem-${code}-${prevNo}-${qNo}`,
+                severity: 'error',
+                tier: 'BLOCKED',
+                scope: 'export',
+                code,
+                questionNumber: qNo,
+                message: `Mã đề ${code}: Câu ${qNo} trùng nội dung với Câu ${prevNo} ("${qMatch[2].slice(0, 60)}...").`,
+                recommendation: 'Loại bỏ câu bị nhân bản trước khi trộn và xuất.',
+              });
+            } else {
+              seenStems.set(stemNorm, qNo);
+            }
+          }
+        }
+
+        if (!ln.includes('[[ASSET:')) {
+          const emptyOpt = ln.match(emptyOptPattern);
+          if (emptyOpt) {
+            issues.push({
+              id: `audit-empty-opt-${code}-${totalQuestionsInCode || 0}-${emptyOpt[1]}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              code,
+              questionNumber: totalQuestionsInCode || undefined,
+              optionOrStatementLabel: emptyOpt[1],
+              message: `Mã đề ${code} (Câu ${totalQuestionsInCode || '?'}): Phương án ${emptyOpt[1]} bị mất nội dung, chỉ còn dấu câu ("${ln.slice(0, 60)}").`,
+              recommendation: 'Khôi phục công thức/hình ảnh của phương án trước khi phát hành.',
+            });
+          }
+        }
+      }
+      flushSectionCountAudit();
+      studentQuestionCountsByCode.set(code, totalQuestionsInCode);
+    } catch (err) {
+      issues.push({
+        id: `audit-student-docx-unreadable-${code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        code,
+        message: `Mã đề ${code}: Không thể đọc file DOCX (${err instanceof Error ? err.message : 'Lỗi không xác định'}).`,
+        recommendation: 'Xuất lại gói đề.',
+      });
+    }
+  }
+
+  // 2. Kiểm tra Bang_anh_xa_hoan_vi.json & phát hiện sai loại câu / chuỗi 666/6666 / trùng ID
+  type RawMappingVersion = {
+    code: string;
+    answerKeyRows?: Array<{
+      number: number;
+      questionId?: string;
+      originalCode?: string;
+      type?: string;
+      universalType?: string;
+      sectionTitle?: string;
+      answer: string;
+    }>;
+    permutationMap?: Array<{
+      newNumber: number;
+      originalQuestionId?: string;
+      originalCode?: string;
+      questionType?: string;
+      universalType?: string;
+    }>;
+  };
+  let mappingVersions: RawMappingVersion[] = [];
+  if (mappingJsonEntry) {
+    try {
+      const parsed = JSON.parse(await mappingJsonEntry.async('string')) as unknown;
+      if (Array.isArray(parsed)) {
+        mappingVersions = parsed as RawMappingVersion[];
+      }
+    } catch {
+      issues.push({
+        id: 'audit-mapping-json-corrupt',
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: 'Tệp dap-an/Bang_anh_xa_hoan_vi.json bị lỗi cú pháp JSON.',
+        recommendation: 'Xuất lại gói ZIP.',
+      });
+    }
+  }
+
+  for (const mv of mappingVersions) {
+    const code = mv.code;
+    const rows = mv.answerKeyRows ?? [];
+    const seenOrigIds = new Set<string>();
+    const studentCount = studentQuestionCountsByCode.get(code);
+    if (studentCount !== undefined && rows.length > 0 && studentCount !== rows.length) {
+      issues.push({
+        id: `audit-code-count-mismatch-${code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        code,
+        message: `Mã đề ${code}: Đề học sinh có ${studentCount} câu nhưng bảng đáp án JSON có ${rows.length} câu.`,
+        recommendation: 'Đồng bộ lại số lượng câu giữa đề học sinh và đáp án.',
+      });
+    }
+
+    rows.forEach((row) => {
+      const ans = String(row.answer ?? '').trim();
+      const sec = String(row.sectionTitle ?? '');
+      const isPartI =
+        /PHẦN\s*(?:I|1)\b|NHIỀU\s*PHƯƠNG\s*ÁN/i.test(sec) &&
+        !/PHẦN\s*(?:II|III|IV)\b|ĐÚNG|TRẢ\s*LỜI\s*NGẮN/i.test(sec);
+      const isPartII = /PHẦN\s*II\b|ĐÚNG\s*[-–/]\s*SAI/i.test(sec);
+
+      if (row.questionId) {
+        if (seenOrigIds.has(row.questionId)) {
+          issues.push({
+            id: `audit-dup-qid-${code}-${row.questionId}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'export',
+            code,
+            questionId: row.questionId,
+            questionNumber: row.number,
+            message: `Mã đề ${code}: Câu ${row.number} lặp lại questionId "${row.questionId}".`,
+            recommendation: 'Loại bỏ câu hỏi bị lặp.',
+          });
+        }
+        seenOrigIds.add(row.questionId);
+      }
+
+      // Chặn chuỗi lỗi 666/6666 ngay cả khi type đã bị lưu sai thành short-answer!
+      if (/^6{3,}$/.test(ans) && (row.type === 'true-false' || isPartII || row.type === 'short-answer')) {
+        issues.push({
+          id: `audit-corrupt-666-${code}-${row.number}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          questionId: row.questionId,
+          questionNumber: row.number,
+          message: `Mã đề ${code} Câu ${row.number} (${row.originalCode ?? row.questionId ?? ''}): Đáp án chứa chuỗi lỗi legacy "${ans}" (kiểu="${row.type ?? '?'}").`,
+          recommendation: 'Sửa lại đúng kiểu Đúng/Sai a/b/c/d và xác minh khóa đáp án trước khi xuất.',
+        });
+      }
+
+      if (isPartI && row.type === 'short-answer') {
+        issues.push({
+          id: `audit-part1-short-answer-${code}-${row.number}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          questionId: row.questionId,
+          questionNumber: row.number,
+          message: `Mã đề ${code} Câu ${row.number} (${row.originalCode ?? ''}): Nằm trong Phần I Trắc nghiệm 1 đáp án nhưng bị lưu kiểu short-answer.`,
+          recommendation: 'Chuyển đúng kiểu câu hỏi hoặc đưa về đúng Phần.',
+        });
+      }
+
+      if (isPartI && row.type === 'mcq' && row.universalType === 'multi-select') {
+        issues.push({
+          id: `audit-part1-multiselect-${code}-${row.number}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          questionId: row.questionId,
+          questionNumber: row.number,
+          message: `Mã đề ${code} Câu ${row.number} (${row.originalCode ?? ''}): Nằm trong Phần I Trắc nghiệm 1 đáp án nhưng lệch type="mcq" / universalType="multi-select".`,
+          recommendation: 'Đồng bộ universalType="mcq".',
+        });
+      }
+
+      if (isPartII && row.type !== 'true-false') {
+        issues.push({
+          id: `audit-part2-wrong-type-${code}-${row.number}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          code,
+          questionId: row.questionId,
+          questionNumber: row.number,
+          message: `Mã đề ${code} Câu ${row.number} (${row.originalCode ?? ''}): Nằm trong Phần II Đúng/Sai nhưng mang kiểu "${row.type ?? '?'}".`,
+          recommendation: 'Khôi phục kiểu true-false với 4 mệnh đề a/b/c/d.',
+        });
+      }
+    });
+  }
+
+  // 3. Đối chiếu chéo CSV với JSON & Answer DOCX (không chấp nhận chỉ cần 3 file trùng nhau là đúng)
+  if (csvEntry) {
+    const csvText = await csvEntry.async('string');
+    const csvRows = parseCsvRows(csvText);
+    if (csvRows.length >= 2) {
+      const headers = csvRows[0];
+      for (let r = 1; r < csvRows.length; r++) {
+        for (let c = 1; c < csvRows[r].length; c++) {
+          const val = (csvRows[r][c] ?? '').trim();
+          if (/^6{3,}$/.test(val)) {
+            issues.push({
+              id: `audit-csv-666-${r}-${c}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              questionNumber: r,
+              message: `CSV đáp án (${headers[c] ?? `cột ${c}`}, Câu ${r}): Chứa giá trị lỗi legacy "${val}".`,
+              recommendation: 'Không phát hành bảng đáp án chứa chuỗi 666/6666.',
+            });
+          }
+        }
+      }
+      if (mappingVersions.length > 0) {
+        mappingVersions.forEach((mv, mIdx) => {
+          const colIdx = headers.findIndex((h) => h.includes(mv.code));
+          const resolvedCol = colIdx >= 1 ? colIdx : mIdx + 1;
+          (mv.answerKeyRows ?? []).forEach((row, rIdx) => {
+            const csvVal = (csvRows[rIdx + 1]?.[resolvedCol] ?? '').trim();
+            if (csvVal !== String(row.answer ?? '').trim()) {
+              issues.push({
+                id: `audit-csv-json-diff-${mv.code}-${row.number}`,
+                severity: 'error',
+                tier: 'BLOCKED',
+                scope: 'export',
+                code: mv.code,
+                questionNumber: row.number,
+                message: `Mã đề ${mv.code} Câu ${row.number}: Lệch đáp án giữa CSV ("${csvVal}") và JSON ("${row.answer}").`,
+                recommendation: 'Xuất lại toàn bộ gói đáp án từ cùng một nguồn.',
+              });
+            }
+          });
+        });
+      }
+    }
+  }
+
+  if (answerDocxEntry) {
+    try {
+      const ansBytes = await answerDocxEntry.async('uint8array');
+      const ansExtracted = await extractDocxDocument(ansBytes);
+      const ansText = ansExtracted.plainTextWithMarkers;
+      if (ansText.includes('[CÔNG_THỨC_OLE_LEGACY]')) {
+        issues.push({
+          id: 'audit-answer-docx-placeholder',
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: 'Tệp dap-an/Dap_an_va_Anh_xa.docx chứa placeholder [CÔNG_THỨC_OLE_LEGACY].',
+          recommendation: 'Xử lý triệt để công thức trước khi xuất.',
+        });
+      }
+      if (/\b6666?\b/.test(ansText)) {
+        issues.push({
+          id: 'audit-answer-docx-666',
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: 'Tệp dap-an/Dap_an_va_Anh_xa.docx chứa chuỗi đáp án lỗi 666/6666.',
+          recommendation: 'Kiểm tra và sửa lại toàn bộ câu Đúng/Sai bị hỏng khóa.',
+        });
+      }
+    } catch {
+      issues.push({
+        id: 'audit-answer-docx-corrupt',
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: 'Không thể đọc tệp dap-an/Dap_an_va_Anh_xa.docx.',
+        recommendation: 'Xuất lại gói đáp án.',
+      });
+    }
+  }
+
+  return {
+    passed: issues.every((i) => i.severity !== 'error'),
+    codesInspected,
     issues,
   };
 }

@@ -237,7 +237,21 @@ export function normalizeShortAnswerValue(raw: string): {
   if (!cleaned) {
     return { rawAnswer: '', canonicalAnswer: '', normalizedAnswer: '', acceptedFormats: [] };
   }
-  const normalizedSign = cleaned.replace(/[−–—]/g, '-').replace(/\s+/g, ' ').trim();
+  const unwrappedMath = cleaned
+    .replace(/^\$\$|\$\$$/g, '')
+    .replace(/^\$|\$$/g, '')
+    .replace(/^\\\(|\\\)$/g, '')
+    .replace(/^\\\[|\\\]$/g, '')
+    .replace(/\{,\}/g, ',')
+    .replace(/\\,/g, '')
+    .replace(/\\;/g, '')
+    .replace(/\\!/g, '')
+    .trim();
+  const normalizedSign = unwrappedMath
+    .replace(/[−–—]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^-\s+(\d)/, '-$1')
+    .trim();
   const numericCandidate = normalizedSign.replace(/^\$+|\$+$/g, '').trim();
   const isDecimalWithComma = /^-?\d+,\d+$/.test(numericCandidate);
   const isDecimalWithDot = /^-?\d+\.\d+$/.test(numericCandidate);
@@ -247,8 +261,8 @@ export function normalizeShortAnswerValue(raw: string): {
     : numericCandidate;
 
   const variants = new Set<string>([cleaned]);
-  if (normalizedSign !== cleaned) variants.add(normalizedSign);
-  if (normalizedAnswer !== cleaned) variants.add(normalizedAnswer);
+  if (normalizedSign && normalizedSign !== cleaned) variants.add(normalizedSign);
+  if (normalizedAnswer && normalizedAnswer !== cleaned) variants.add(normalizedAnswer);
   if (isDecimalWithComma) {
     variants.add(numericCandidate);
     variants.add(numericCandidate.replace(',', '.'));
@@ -278,6 +292,30 @@ function normalizeComparableKey(raw: string): string {
   return cleaned.replace(/\s+/g, '').replace(',', '.').toLowerCase();
 }
 
+function isMatrixOrRubricTable(grid: string[][]): boolean {
+  const headerSlice = grid
+    .slice(0, 2)
+    .flat()
+    .join(' ');
+  const looksLikeMatrixSpec =
+    /(?:mức\s*độ|nhận\s*biết|thông\s*hiểu|vận\s*dụng|nội\s*dung\s*\/\s*đơn\s*vị|đơn\s*vị\s*kiến\s*thức|tỉ\s*lệ|tổng\s*số\s*câu|tổng\s*điểm|thang\s*điểm)/i.test(
+      headerSlice
+    );
+  const looksLikeAnswerHeader =
+    /(?:^|\b)(?:đáp\s*án|chọn|đáp\s*số|answer\s*key)(?:\b|$)/i.test(headerSlice);
+  return looksLikeMatrixSpec && !looksLikeAnswerHeader;
+}
+
+function normalizeTfCellToken(raw: string): 'Đ' | 'S' | null {
+  const cleaned = raw
+    .replace(/^\$+|\$+$/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  if (/^(?:Đ|Đúng|D|True|T)$/i.test(cleaned)) return 'Đ';
+  if (/^(?:S|Sai|False|F)$/i.test(cleaned)) return 'S';
+  return null;
+}
+
 function parseTableKeyLines(
   lines: string[],
   startIdx: number
@@ -292,9 +330,66 @@ function parseTableKeyLines(
   if (tableLines.length === 0) return { pairs, nextIdx: startIdx };
 
   const grid = tableLines.map((ln) => ln.split('|').map((c) => c.trim()));
+  if (isMatrixOrRubricTable(grid)) {
+    return { pairs: [], nextIdx: cursor - 1 };
+  }
+
   for (let r = 0; r < grid.length; r++) {
     const row = grid[r];
-    // Case B FIRST (KNTT 2x6 horizontal table): row r = Câu | 1 | 2 | 3 | 4 | 5 | 6, row r+1 = Đáp án | A | B | C | D | A | B
+
+    // Case T1 (KNTT Part II 4-row True/False matrix table):
+    // Row r:   Câu | 1 | 2 | 3 | 4   (hoặc Câu 1 | Câu 2 | Câu 3 | Câu 4)
+    // Row r+1: a)  | Đ | S | Đ | Đ
+    // Row r+2: b)  | S | Đ | Đ | S
+    // Row r+3: c)  | Đ | Đ | S | Đ
+    // Row r+4: d)  | S | S | Đ | S
+    if (r + 4 < grid.length) {
+      const qCols: Array<{ colIdx: number; qNum: number }> = [];
+      row.forEach((cell, cIdx) => {
+        const mNum = cell.match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
+        if (mNum) qCols.push({ colIdx: cIdx, qNum: Number(mNum[1]) });
+      });
+      const subLabels = ['a', 'b', 'c', 'd'] as const;
+      const matchesFourSubRows =
+        qCols.length >= 1 &&
+        subLabels.every((lbl, offset) => {
+          const firstCell = (grid[r + 1 + offset][0] ?? '').trim();
+          return new RegExp(`^${lbl}\\s*[).:]?$`, 'i').test(firstCell);
+        });
+      if (matchesFourSubRows) {
+        let extractedAnyTf = false;
+        for (const { colIdx, qNum } of qCols) {
+          const parts: string[] = [];
+          subLabels.forEach((lbl, offset) => {
+            const cellVal = (grid[r + 1 + offset][colIdx] ?? '').trim();
+            const tok = normalizeTfCellToken(cellVal);
+            if (tok) parts.push(`${lbl}) ${tok}`);
+          });
+          if (parts.length >= 2) {
+            pairs.push({ qNum, val: parts.join(', ') });
+            extractedAnyTf = true;
+          }
+        }
+        if (extractedAnyTf) {
+          r += 4;
+          continue;
+        }
+      }
+    }
+
+    // Case T2 (Horizontal 5-column True/False row): "Câu 1 | Đ | S | Đ | S" hoặc "1 | Đúng | Sai | Đúng | Sai"
+    if (row.length >= 5) {
+      const mRowQ = row[0].match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
+      const tfTokens = [1, 2, 3, 4].map((idx) => normalizeTfCellToken(row[idx] ?? ''));
+      if (mRowQ && tfTokens.every((t) => t !== null)) {
+        const qNum = Number(mRowQ[1]);
+        const formatted = `a) ${tfTokens[0]}, b) ${tfTokens[1]}, c) ${tfTokens[2]}, d) ${tfTokens[3]}`;
+        pairs.push({ qNum, val: formatted });
+        continue;
+      }
+    }
+
+    // Case B (KNTT 2x6 horizontal table): row r = Câu | 1 | 2 | 3 | 4 | 5 | 6, row r+1 = Đáp án | A | B | C | D | A | B
     if (r + 1 < grid.length) {
       const nextRow = grid[r + 1];
       const numCols: Array<{ colIdx: number; qNum: number }> = [];
@@ -302,10 +397,12 @@ function parseTableKeyLines(
         const mNum = cell.match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
         if (mNum) numCols.push({ colIdx: cIdx, qNum: Number(mNum[1]) });
       });
+      const nextRowHasExplicitAnswerLabel =
+        /^(?:Đáp\s*án|Chọn|Key|Đáp\s*số|Trả\s*lời)\s*[:.]?$/i.test(nextRow[0] ?? '');
       const hasExplicitHeaderPair =
         numCols.length === 1 &&
         /^(?:Câu|Question|Bài)\s*[:.]?$/i.test(row[0] ?? '') &&
-        /^(?:Đáp\s*án|Chọn|Key|Đáp\s*số|Trả\s*lời)\s*[:.]?$/i.test(nextRow[0] ?? '');
+        nextRowHasExplicitAnswerLabel;
       if ((numCols.length >= 2 || hasExplicitHeaderPair) && nextRow.length >= 2) {
         const nextRowIsMostlyAnswers = numCols.some(({ colIdx }) => {
           const v = (nextRow[colIdx] ?? '').trim();
@@ -319,6 +416,7 @@ function parseTableKeyLines(
           .map(({ colIdx }) => (nextRow[colIdx] ?? '').trim())
           .filter((v) => /^\d{1,3}$/.test(v));
         const looksLikeNextNumberRow =
+          !nextRowHasExplicitAnswerLabel &&
           nextRowNums.length === numCols.length &&
           numCols.length >= 3 &&
           Number(nextRowNums[1]) === Number(nextRowNums[0]) + 1 &&
@@ -1023,7 +1121,9 @@ export function parseUniversalExamText(
     // 1. Section Header
     const sec = detectSectionHeader(rawLine);
     if (sec) {
-      if (sawSectionOrQuestion) {
+      if (sec.sectionOrdinal !== undefined) {
+        currentSectionOrdinal = sec.sectionOrdinal;
+      } else if (sawSectionOrQuestion) {
         currentSectionOrdinal += 1;
       }
       sawSectionOrQuestion = true;

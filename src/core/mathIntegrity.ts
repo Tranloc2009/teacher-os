@@ -140,13 +140,47 @@ export function computeNormalizedQuestionSignature(q: MathQuestion): string {
  * - Có ít nhất một ký tự chữ/số/biểu thức toán (`A-Za-zÀ-ỹ0-9$` hoặc lệnh `\`).
  * Ngược lại (trống hoặc chỉ có dấu câu như `.` / `,` / `...`) sẽ bị CHẶN.
  */
-export function hasMeaningfulOptionContent(opt: McqOption): boolean {
+export function hasMeaningfulOptionContent(
+  opt: Pick<McqOption, 'content' | 'visualAsset'>
+): boolean {
   if (opt.visualAsset && opt.visualAsset.sourceData.trim().length > 0) {
     return true;
   }
   const raw = (opt.content?.rawSource ?? '').trim();
   if (!raw) return false;
   return /[A-Za-zÀ-ỹ0-9$\\]/.test(raw);
+}
+
+/**
+ * Dựng lại tiêu đề và phần hướng dẫn số câu của mỗi Phần theo đúng số câu thực tế
+ * có trong phiên bản đề xuất ra (tránh tiêu đề ghi "từ câu 1 đến câu 12" trong khi
+ * phần đó thực tế có số câu khác sau lọc/chỉnh sửa).
+ */
+export function formatVerifiedSectionHeading(
+  rawSectionTitle: string,
+  startOrder: number,
+  endOrder: number,
+  actualCount: number
+): string {
+  const cleaned = (rawSectionTitle || '').trim();
+  if (!cleaned || actualCount <= 0) return cleaned;
+
+  let rewritten = cleaned;
+  // Cập nhật cụm "từ câu X đến câu Y" hoặc "câu X đến câu Y"
+  rewritten = rewritten.replace(
+    /(từ\s+câu\s+)\d+(\s+đến\s+(?:câu\s+)?)\d+/gi,
+    `$1${startOrder}$2${endOrder}`
+  );
+  // Cập nhật cụm "(gồm N câu)" / "(N câu)" / "gồm N câu"
+  rewritten = rewritten.replace(
+    /(\(\s*(?:gồm\s+)?)(\d+)(\s*câu\s*\))/gi,
+    `$1${actualCount}$3`
+  );
+  rewritten = rewritten.replace(
+    /(\bgồm\s+)\d+(\s+câu\b)/gi,
+    `$1${actualCount}$2`
+  );
+  return rewritten;
 }
 
 export function detectDuplicateQuestionGroups(questions: MathQuestion[]): DuplicateContentGroup[] {
@@ -1346,6 +1380,97 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
     }
 
     const uType = q.universalType ?? q.type;
+
+    // Kiểm tra đồng bộ loại câu hỏi với Phần chứa nó (chặn lỗi Phần I chứa short-answer / multi-select lỗi hay Phần II Đúng-Sai thuần chứa short-answer)
+    const secNorm = (q.sectionTitle || '').trim();
+    const isSingleChoicePart =
+      /(?:PHẦN\s*(?:I|1)\b|TRẮC\s*NGHIỆM\s*(?:NHIỀU\s*PHƯƠNG\s*ÁN|KHÁCH\s*QUAN|4\s*PHƯƠNG\s*ÁN|1\s*ĐÁP\s*ÁN))/i.test(
+        secNorm
+      ) &&
+      !/PHẦN\s*(?:II|III|IV|2|3|4)\b|ĐÚNG\s*[-–/]\s*SAI|TRẢ\s*LỜI\s*NGẮN|TỰ\s*LUẬN|NHIỀU\s*ĐÁP\s*ÁN|CHỌN\s*NHIỀU/i.test(
+        secNorm
+      );
+    const isPureTrueFalsePart =
+      /(?:PHẦN\s*(?:II|2)\b.*(?:ĐÚNG|SAI)|ĐÚNG\s*[-–/]\s*SAI)/i.test(secNorm) &&
+      !/PHẦN\s*(?:III|IV|3|4)\b|TRẢ\s*LỜI\s*NGẮN|TỰ\s*LUẬN|NỐI|GHÉP|MATCHING|ĐIỀN\s*KHUYẾT|SẮP\s*XẾP/i.test(
+        secNorm
+      );
+    const isPureShortAnswerPart =
+      /(?:PHẦN\s*(?:III|3)\b|TRẢ\s*LỜI\s*NGẮN)/i.test(secNorm) &&
+      !/PHẦN\s*(?:IV|4)\b|TỰ\s*LUẬN|ĐÚNG\s*[-–/]\s*SAI/i.test(secNorm);
+
+    if (isSingleChoicePart) {
+      if (q.type === 'short-answer' && uType === 'short-answer') {
+        issues.push({
+          id: `q-section-type-mismatch-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'question',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}) nằm trong "${secNorm}" (Trắc nghiệm 1 đáp án) nhưng đang mang kiểu Trả lời ngắn (short-answer).`,
+          recommendation: 'Kiểm tra lại phân tách phương án A/B/C/D hoặc chuyển câu sang đúng phần.',
+        });
+      } else if (
+        q.type === 'mcq' &&
+        uType === 'multi-select' &&
+        !(q.multiSelectOptions && q.multiSelectOptions.filter((o) => o.isCorrect).length >= 2)
+      ) {
+        issues.push({
+          id: `q-section-type-mismatch-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'question',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}) nằm trong "${secNorm}" (Trắc nghiệm 1 đáp án) nhưng bị lệch kiểu type="mcq" / universalType="multi-select".`,
+          recommendation: 'Đồng bộ universalType về "mcq" cho câu trắc nghiệm 1 đáp án.',
+        });
+      } else if (q.type === 'true-false') {
+        issues.push({
+          id: `q-section-type-mismatch-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'question',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}) dạng Đúng/Sai đang nằm sai trong "${secNorm}".`,
+          recommendation: 'Chuyển câu sang Phần Đúng/Sai hoặc chỉnh lại tiêu đề phần.',
+        });
+      }
+    } else if (isPureTrueFalsePart && q.type !== 'true-false') {
+      issues.push({
+        id: `q-section-type-mismatch-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'question',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}) nằm trong "${secNorm}" (Đúng/Sai) nhưng đang mang kiểu "${q.type}".`,
+        recommendation: 'Chuyển câu về dạng Đúng/Sai 4 mệnh đề a/b/c/d hoặc đặt đúng phần.',
+      });
+    } else if (isPureShortAnswerPart && q.type === 'true-false') {
+      issues.push({
+        id: `q-section-type-mismatch-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'question',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}) dạng Đúng/Sai đang nằm sai trong "${secNorm}" (Trả lời ngắn).`,
+        recommendation: 'Kiểm tra và đặt lại đúng phần chứa câu hỏi.',
+      });
+    }
 
     if (uType === 'multi-select') {
       const options = q.multiSelectOptions ?? q.options ?? [];

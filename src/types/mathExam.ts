@@ -126,6 +126,8 @@ export interface MultiSelectOption {
   content: MathContentPayload;
   isCorrect: boolean;
   lockPosition?: boolean;
+  /** Tài nguyên hình vẽ/đồ thị gắn với phương án (di chuyển theo phương án khi trộn) */
+  visualAsset?: MathVisualAsset;
 }
 
 export type AnswerProvenanceStatus =
@@ -169,8 +171,11 @@ export interface FormulaRenderStatus {
   machineReadable: boolean;
   sourceKind: 'none' | 'omml' | 'ole-mtef' | 'ole-wmf-preview' | 'latex' | 'unresolved-ole';
   unresolvedCount: number;
+  /** Số công thức OLE hiển thị qua ảnh WMF preview chuyển SVG (chưa có nguồn LaTeX/OMML máy đọc được) */
+  wmfPreviewCount?: number;
   previewAssetIds?: string[];
   details?: string[];
+  unresolvedDetails?: string[];
 }
 
 export interface QuestionSourceTrace {
@@ -719,10 +724,10 @@ export interface MathIntegrityIssue {
 }
 
 export interface IntegrityPillarReport {
-  id: 'displayContent' | 'keyProvenance' | 'permutationMapping' | 'postExportVerification';
+  pillar: 'displayContent' | 'keyProvenance' | 'permutationMapping' | 'postExportVerification';
   label: string;
   status: MathIntegrityStatus;
-  summary: string;
+  detail: string;
   blockingCount: number;
   warningCount: number;
 }
@@ -731,7 +736,7 @@ export interface DuplicateContentGroup {
   signature: string;
   questionIds: string[];
   questionCodes: string[];
-  preview: string;
+  stemPreview: string;
 }
 
 export interface SectionCountAudit {
@@ -762,7 +767,13 @@ export interface MathIntegrityReport {
     visualAssetsCount: number;
     unconfirmedAnswerCount?: number;
     unresolvedFormulaCount?: number;
+    wmfPreviewCount?: number;
+    missingKeyCount?: number;
+    needsReviewKeyCount?: number;
+    conflictKeyCount?: number;
+    duplicateGroupCount?: number;
     duplicateContentCount?: number;
+    legacyAnomalyCount?: number;
   };
 }
 

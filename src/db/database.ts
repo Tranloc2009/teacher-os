@@ -382,8 +382,23 @@ function detectLegacyQuestionAnomalies(q: MathExamProject['questions'][number]):
 
   if (q.type === 'short-answer') {
     const saVal = q.shortAnswer?.answerValue?.trim() ?? '';
-    const isPartII = /PHẦN\s*II\b|ĐÚNG\s*[-–/]\s*SAI/i.test(q.sectionTitle || '');
-    if (isPartII || /^6{3,}$/.test(saVal)) {
+    const uType = q.universalType ?? q.type;
+    const isPartI = /PHẦN\s*(?:I|1)\b|NHIỀU\s*PHƯƠNG\s*ÁN|4\s*PHƯƠNG\s*ÁN|MỘT\s*PHƯƠNG\s*ÁN/i.test(
+      q.sectionTitle || ''
+    );
+    const isPurePartII =
+      /PHẦN\s*II\b|ĐÚNG\s*[-–/]\s*SAI/i.test(q.sectionTitle || '') &&
+      !/NỐI|GHÉP|MATCHING|ĐIỀN\s*KHUYẾT|SẮP\s*XẾP/i.test(q.sectionTitle || '');
+    if (
+      uType === 'short-answer' &&
+      isPartI &&
+      !/TRẢ\s*LỜI\s*NGẮN|TỰ\s*LUẬN|PHẦN\s*(?:II|III|IV)\b/i.test(q.sectionTitle || '')
+    ) {
+      pushUnique(
+        `Câu Trả lời ngắn nằm lạc trong Phần I Trắc nghiệm nhiều phương án ("${q.sectionTitle}") — cần chuyển đúng loại câu hoặc chuyển phần.`
+      );
+    }
+    if ((isPurePartII && uType === 'short-answer') || /^6{3,}$/.test(saVal)) {
       pushUnique(
         `Câu Trả lời ngắn mang dấu hiệu sai kiểu/đáp án legacy (${saVal || 'thuộc Phần II Đúng–Sai'}) — cần kiểm tra lại.`
       );
@@ -393,6 +408,17 @@ function detectLegacyQuestionAnomalies(q: MathExamProject['questions'][number]):
   if (q.type === 'mcq') {
     const opts = q.options ?? [];
     const correctOpts = opts.filter((o) => o.isCorrect);
+    const isPartISingleChoice =
+      /PHẦN\s*(?:I|1)\b|NHIỀU\s*PHƯƠNG\s*ÁN|MỘT\s*PHƯƠNG\s*ÁN/i.test(q.sectionTitle || '') &&
+      !/NHIỀU\s*ĐÁP\s*ÁN|CHỌN\s*NHIỀU|MULTI/i.test(q.sectionTitle || '');
+    const hasValidMultiSelect = Boolean(
+      q.multiSelectOptions && q.multiSelectOptions.filter((o) => o.isCorrect).length >= 2
+    );
+    if (isPartISingleChoice && q.universalType === 'multi-select' && !hasValidMultiSelect) {
+      pushUnique(
+        'Câu thuộc Phần I Trắc nghiệm 1 đáp án nhưng đang mang kiểu universalType="multi-select" (lỗi phân loại legacy) — cần đồng bộ lại kiểu câu.'
+      );
+    }
     if (q.correctOptionId && !opts.some((o) => o.id === q.correctOptionId)) {
       pushUnique('Mã correctOptionId của câu MCQ cũ không khớp phương án nào.');
     }

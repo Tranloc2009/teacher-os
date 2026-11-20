@@ -9,6 +9,7 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
+  formatVerifiedSectionHeading,
   getOptionLetterLabel,
   getStatementLetterLabel,
 } from '../../core/mathIntegrity';
@@ -94,7 +95,23 @@ function StudentExamA4Sheet({
       <div className="space-y-3">
         {version.questions.map((q, idx) => {
           const showSection = q.sectionTitle && q.sectionTitle !== currentSection;
-          if (showSection) currentSection = q.sectionTitle;
+          let verifiedSectionTitle = q.sectionTitle || '';
+          if (showSection) {
+            currentSection = q.sectionTitle;
+            let endIdx = idx;
+            while (
+              endIdx + 1 < version.questions.length &&
+              version.questions[endIdx + 1].sectionTitle === currentSection
+            ) {
+              endIdx += 1;
+            }
+            verifiedSectionTitle = formatVerifiedSectionHeading(
+              currentSection,
+              idx + 1,
+              endIdx + 1,
+              endIdx - idx + 1
+            );
+          }
 
           let groupToRender: QuestionGroup | null = null;
           if (q.groupId && !renderedGroups.has(q.groupId) && groupMap.has(q.groupId)) {
@@ -108,7 +125,7 @@ function StudentExamA4Sheet({
             <div key={`${version.code}-${q.id}`} className="space-y-2">
               {showSection && (
                 <h3 className="pt-2 text-xs font-bold uppercase tracking-wide text-slate-900 border-b border-slate-200 pb-1">
-                  {q.sectionTitle}
+                  {verifiedSectionTitle}
                 </h3>
               )}
 

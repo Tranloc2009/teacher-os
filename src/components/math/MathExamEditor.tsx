@@ -223,7 +223,7 @@ export function MathExamEditor({
           answerConfirmed: false,
           answerProvenance: {
             ...updated.answerProvenance,
-            status: 'needs-review',
+            status: 'needs-review' as const,
             confirmedContentHash: undefined,
             confirmedAt: undefined,
             note: 'Nội dung hoặc đáp án vừa được chỉnh sửa sau lần xác nhận trước — cần giáo viên xác nhận lại.',
