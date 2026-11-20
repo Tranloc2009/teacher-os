@@ -73,8 +73,11 @@ import {
 import {
   buildAnswerKeyDocxBuffer,
   buildConsolidatedAnswerCsv,
+  buildMixedExamJsonExportPayload,
   buildStudentExamDocxBuffer,
   exportMixedExamZipBundle,
+  verifyExportedAnswerKeyDocxBuffer,
+  verifyExportedCsv,
   verifyExportedDocxBuffer,
 } from '../../core/examExportEngine';
 import {
@@ -97,11 +100,14 @@ import {
 interface MathExamMixerAppProps {
   mathExams: MathExamProject[];
   preferredExamId?: string | null;
+  preferredStep?: MathExamStep | null;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onDeleteMathExam: (id: string) => Promise<void>;
   onDuplicateMathExam: (exam: MathExamProject) => Promise<void>;
   onShowToast: (tone: 'success' | 'info' | 'error', text: string) => void;
+  onOpenPrintStudio?: (examId: string) => void;
   onOpenGradingStudio?: (examId: string) => void;
+  onWorkflowExamSynced?: (exam: MathExamProject) => void;
 }
 
 const STEP_TABS: Array<{ step: MathExamStep; label: string; shortTitle: string }> = [
@@ -124,11 +130,14 @@ function triggerBlobDownload(blob: Blob, fileName: string) {
 export function MathExamMixerApp({
   mathExams,
   preferredExamId,
+  preferredStep,
   onSaveMathExam,
   onDeleteMathExam,
   onDuplicateMathExam,
   onShowToast,
+  onOpenPrintStudio,
   onOpenGradingStudio,
+  onWorkflowExamSynced,
 }: MathExamMixerAppProps) {
   const [selectedExamId, setSelectedExamId] = useState<string>(
     preferredExamId || mathExams[0]?.id || ''
@@ -137,9 +146,11 @@ export function MathExamMixerApp({
   useEffect(() => {
     if (preferredExamId && mathExams.some((e) => e.id === preferredExamId)) {
       setSelectedExamId(preferredExamId);
-      setStep(2);
+      setStep(preferredStep ?? 2);
+    } else if (preferredStep) {
+      setStep(preferredStep);
     }
-  }, [preferredExamId, mathExams]);
+  }, [preferredExamId, preferredStep, mathExams]);
   const [step, setStep] = useState<MathExamStep>(1);
   const [selectedCodeTab, setSelectedCodeTab] = useState<string>('');
   const [compareCodeTab, setCompareCodeTab] = useState<string>('');
@@ -384,27 +395,21 @@ export function MathExamMixerApp({
       );
       return;
     }
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      title: activeExam.title,
-      subject: activeSubjectProfile.name,
-      subjectId: activeSubjectProfile.id,
-      grade: activeExam.grade,
-      durationMinutes: activeExam.durationMinutes,
-      versions: activeExam.generatedVersions.map((v) => ({
-        code: v.code,
-        integrityStatus: v.integrityStatus ?? 'PASS',
-        answerKeyRows: v.answerKeyRows,
-        questions: v.questions,
-      })),
-    };
-    triggerBlobDownload(
-      new Blob([JSON.stringify(payload, null, 2)], {
-        type: 'application/json;charset=utf-8',
-      }),
-      `exam-codes-${activeExam.id}.json`
-    );
-    onShowToast('success', 'Đã xuất tệp JSON bộ mã đề đã kiểm chứng.');
+    try {
+      const payload = buildMixedExamJsonExportPayload(activeExam);
+      triggerBlobDownload(
+        new Blob([JSON.stringify(payload, null, 2)], {
+          type: 'application/json;charset=utf-8',
+        }),
+        `exam-codes-${activeExam.id}.json`
+      );
+      onShowToast('success', 'Đã xuất tệp JSON bộ mã đề đã kiểm chứng.');
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Xuất JSON bị chặn bởi cổng kiểm chứng.'
+      );
+    }
   };
 
   const handleExportZipBundle = async () => {
@@ -488,6 +493,14 @@ export function MathExamMixerApp({
     setExportBusy('answer-docx');
     try {
       const bytes = await buildAnswerKeyDocxBuffer(activeExam);
+      const ansCheck = await verifyExportedAnswerKeyDocxBuffer(bytes, activeExam);
+      if (!ansCheck.passed) {
+        onShowToast(
+          'error',
+          ansCheck.issues[0]?.message ?? 'Kiểm chứng ngược Đáp án DOCX không đạt.'
+        );
+        return;
+      }
       const bufferCopy = new Uint8Array(bytes).buffer;
       triggerBlobDownload(
         new Blob([bufferCopy], {
@@ -495,7 +508,7 @@ export function MathExamMixerApp({
         }),
         `Dap_an_va_Anh_xa_${activeExam.id}.docx`
       );
-      onShowToast('success', 'Đã xuất file Word Đáp án tổng hợp & Bảng ánh xạ.');
+      onShowToast('success', 'Đã xuất & kiểm chứng sạch file Word Đáp án tổng hợp & Bảng ánh xạ.');
     } catch (err) {
       onShowToast(
         'error',
@@ -514,12 +527,27 @@ export function MathExamMixerApp({
       );
       return;
     }
-    const csv = buildConsolidatedAnswerCsv(activeExam);
-    triggerBlobDownload(
-      new Blob([csv], { type: 'text/csv;charset=utf-8' }),
-      `Bang_dap_an_${activeExam.id}.csv`
-    );
-    onShowToast('success', 'Đã xuất bảng đáp án CSV (hỗ trợ chấm trắc nghiệm/Excel).');
+    try {
+      const csv = buildConsolidatedAnswerCsv(activeExam);
+      const csvCheck = verifyExportedCsv(csv, activeExam);
+      if (!csvCheck.passed) {
+        onShowToast(
+          'error',
+          csvCheck.issues[0]?.message ?? 'Kiểm chứng ngược CSV đáp án không đạt.'
+        );
+        return;
+      }
+      triggerBlobDownload(
+        new Blob([csv], { type: 'text/csv;charset=utf-8' }),
+        `Bang_dap_an_${activeExam.id}.csv`
+      );
+      onShowToast('success', 'Đã xuất & kiểm chứng sạch bảng đáp án CSV.');
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Xuất CSV bị chặn bởi cổng kiểm chứng.'
+      );
+    }
   };
 
   if (!activeExam) {
@@ -586,11 +614,28 @@ export function MathExamMixerApp({
                 <span>Nhân bản</span>
               </Button>
 
+              {onOpenPrintStudio && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    onWorkflowExamSynced?.(activeExam);
+                    onOpenPrintStudio(activeExam.id);
+                  }}
+                >
+                  <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Mở Print Studio</span>
+                </Button>
+              )}
+
               {onOpenGradingStudio && activeExam.generatedVersions.length > 0 && (
                 <Button
                   variant="primary"
                   size="sm"
-                  onClick={() => onOpenGradingStudio(activeExam.id)}
+                  onClick={() => {
+                    onWorkflowExamSynced?.(activeExam);
+                    onOpenGradingStudio(activeExam.id);
+                  }}
                 >
                   <ScanLine className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Chấm bài OMR</span>
@@ -711,21 +756,34 @@ export function MathExamMixerApp({
             exam={activeExam}
             onChangeExam={handleExamChange}
             onRunQuickMix={async () => {
-              const readyExam: MathExamProject = activeExam.confirmedOriginalAnswers
-                ? activeExam
-                : { ...activeExam, confirmedOriginalAnswers: true };
-              if (!activeExam.confirmedOriginalAnswers) {
-                await onSaveMathExam(readyExam, true);
+              // TUYỆT ĐỐI KHÔNG tự động gán confirmedOriginalAnswers = true khi còn câu chưa xác nhận hoặc lỗi BLOCKED
+              const currentPreMix = evaluatePreMixIntegrity(activeExam);
+              const blockingIssues = currentPreMix.issues.filter((i) => i.severity === 'error');
+              if (blockingIssues.length > 0) {
+                onShowToast(
+                  'error',
+                  `Chặn trộn nhanh (${blockingIssues.length} lỗi BLOCKED): ${blockingIssues[0].message}`
+                );
+                setStep(2);
+                return;
               }
-              const res = await generateMixedExamsAsync(readyExam, { chunkSize: 5 });
+              if (!activeExam.confirmedOriginalAnswers) {
+                onShowToast(
+                  'error',
+                  'Chưa xác nhận đáp án gốc ở Bước 2 — vui lòng rà soát khóa chấm và bấm "Xác nhận toàn bộ đáp án gốc" trước khi trộn.'
+                );
+                setStep(2);
+                return;
+              }
+              const res = await generateMixedExamsAsync(activeExam, { chunkSize: 5 });
               if (res.errors.length > 0) {
                 onShowToast('error', res.errors[0]);
                 return;
               }
               const updated: MathExamProject = {
-                ...readyExam,
+                ...activeExam,
                 generatedVersions: res.versions,
-                lastIntegrityReport: preMixReport ?? undefined,
+                lastIntegrityReport: currentPreMix,
                 status: 'ready',
                 updatedAt: new Date().toISOString(),
               };
@@ -751,11 +809,13 @@ export function MathExamMixerApp({
               }
             }}
             onQuickPrint={async () => {
-              if (activeExam.generatedVersions.length === 0) {
+              if (!exportGate?.canExport) {
                 onShowToast(
-                  'info',
-                  'Chưa có mã đề được trộn. Vui lòng nhấn "Tạo mã đề" trước khi xuất PDF.'
+                  'error',
+                  exportGate?.blockingReasons[0] ??
+                    'Không thể in/xuất PDF vì đề chưa xác nhận đáp án gốc hoặc đang có lỗi BLOCKED.'
                 );
+                setStep(activeExam.generatedVersions.length === 0 ? 2 : 5);
                 return;
               }
               setStep(5);
@@ -2565,6 +2625,20 @@ export function MathExamMixerApp({
                       <FileSpreadsheet className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Bảng đáp án (.CSV)</span>
                     </button>
+
+                    {onOpenPrintStudio && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onWorkflowExamSynced?.(activeExam);
+                          onOpenPrintStudio(activeExam.id);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-[10px] border border-indigo-300 dark:border-indigo-700 bg-indigo-50/80 dark:bg-indigo-950/50 px-3 py-2 text-xs font-semibold text-indigo-800 dark:text-indigo-200 hover:bg-indigo-100 whitespace-nowrap"
+                      >
+                        <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>In theo mẫu A4 (Print Studio)</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"

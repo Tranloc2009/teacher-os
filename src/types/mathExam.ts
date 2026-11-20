@@ -128,16 +128,84 @@ export interface MultiSelectOption {
   lockPosition?: boolean;
 }
 
+export type AnswerProvenanceStatus =
+  | 'missing'
+  | 'needs-review'
+  | 'conflict'
+  | 'source-matched'
+  | 'teacher-confirmed';
+
+export type AnswerProvenanceSourceKind =
+  | 'answer-table'
+  | 'solution-line'
+  | 'inline-key'
+  | 'underline-candidate'
+  | 'short-answer-candidate'
+  | 'teacher-manual'
+  | 'legacy-unverified'
+  | 'seed-demo';
+
+export interface AnswerProvenance {
+  status: AnswerProvenanceStatus;
+  sourceKind?: AnswerProvenanceSourceKind;
+  sourceFileHash?: string;
+  sourceLocation?: string;
+  /** Bằng chứng thô trích xuất từ tài liệu (ví dụ "Bảng đáp án Phần I Câu 3: B" hoặc "Gạch chân phương án C") */
+  rawEvidence?: string;
+  /** Nếu có từ 2 nguồn trở lên mâu thuẫn nhau, lưu toàn bộ để giáo viên quyết định */
+  conflictingEvidence?: string[];
+  /** Quy ước ứng viên (ví dụ "underlined-option" hoặc "underlined-statements-only") */
+  candidateConvention?: string;
+  note?: string;
+  confirmedAt?: string;
+  /** Hash nội dung tại thời điểm giáo viên xác nhận — tự mất hiệu lực nếu sửa đề/phương án/ý */
+  confirmedContentHash?: string;
+}
+
+export interface FormulaRenderStatus {
+  /** Có hiển thị được chính xác cho học sinh/giáo viên không */
+  displayable: boolean;
+  /** Có công thức máy đọc được (OMML/LaTeX/MTEF đã qua KaTeX) không */
+  machineReadable: boolean;
+  sourceKind: 'none' | 'omml' | 'ole-mtef' | 'ole-wmf-preview' | 'latex' | 'unresolved-ole';
+  unresolvedCount: number;
+  previewAssetIds?: string[];
+  details?: string[];
+}
+
+export interface QuestionSourceTrace {
+  sourceFileHash?: string;
+  sourceFileName?: string;
+  sourcePart?: string;
+  paragraphLocation?: string;
+  sectionOrdinal?: number;
+  originalQuestionNumberInSection?: number;
+  sectionDeclaredCount?: number;
+  sectionActualCount?: number;
+  /** Số lần xuất hiện bảng/câu hỏi trong phần đáp án đối chiếu */
+  matchedKeyLocation?: string;
+}
+
 export interface TrueFalseStatement {
   id: string;
   originalLabel: TrueFalseLabel;
   content: MathContentPayload;
   isTrue: boolean;
+  /** Trạng thái xác định Đúng/Sai cho từng ý — tránh ngầm gán Sai khi chưa có khóa */
+  answerState?: 'confirmed' | 'missing' | 'candidate';
+  /** Đánh dấu nếu nhãn a)/b)/c)/d) có gạch chân trong tài liệu gốc */
+  underlinedInSource?: boolean;
 }
 
 export interface ShortAnswerSpec {
   answerValue: string;
   acceptedFormats: string[];
+  /** Giá trị gốc giữ nguyên dấu âm chuẩn/dấu phẩy thập phân/công thức (ví dụ "−4,3", "0", "\\pi - 8/3") */
+  rawAnswer?: string;
+  /** Giá trị chuẩn hóa phục vụ đối chiếu tự động */
+  normalizedAnswer?: string;
+  /** Quy tắc làm tròn nếu có trong đề gốc */
+  roundingRule?: string;
   unit?: string;
   domainCondition?: string;
 }
@@ -294,6 +362,16 @@ export interface MathQuestion {
   dependencyFlags: string[];
   hasVisualAsset: boolean;
   answerConfirmed: boolean;
+  /** Bằng chứng và trạng thái xác minh khóa chấm của câu hỏi (P0) */
+  answerProvenance?: AnswerProvenance;
+  /** Trạng thái hiển thị và khả năng máy đọc của các công thức trong câu hỏi (P0) */
+  formulaStatus?: FormulaRenderStatus;
+  /** Truy vết vị trí nguồn DOCX (file hash, phần, đoạn, số thứ tự trong phần) */
+  sourceTrace?: QuestionSourceTrace;
+  /** Cảnh báo bất thường từ bản ghi lưu cũ (ví dụ: 666/6666 trong phần Đúng/Sai hoặc sai kiểu) */
+  legacyAnomalyReasons?: string[];
+  /** Chữ ký nội dung chuẩn hóa để phát hiện câu trùng nội dung khác ID */
+  contentSignature?: string;
   /** Truy vết & cổng bảo toàn toán học khi nhập từ PDF hoặc các định dạng đa nguồn */
   sourceVerification?: QuestionSourceVerification;
   /** Siêu dữ liệu biến thể đã kiểm chứng từ Smart Exam Generator 2.0/3.0 (tùy chọn, tương thích ngược) */
@@ -532,16 +610,22 @@ export interface MixedQuestionMapping {
   exactAnswerSummary: string;
   lockedPositionApplied: boolean;
   lockedOptionShuffleApplied: boolean;
+  /** Số thứ tự câu hỏi trong từng phần để tránh nhập nhằng khi mỗi phần đánh lại từ Câu 1 */
+  sectionQuestionNumber?: number;
+  answerProvenanceStatus?: AnswerProvenanceStatus;
 }
 
 export interface MixedExamAnswerRow {
   number: number;
+  sectionTitle?: string;
+  sectionQuestionNumber?: number;
   questionId: string;
   originalCode: string;
   type: MathQuestionType;
   universalType?: UniversalQuestionType;
   cognitiveLevel: CognitiveLevel;
   answer: string;
+  answerProvenanceStatus?: AnswerProvenanceStatus;
 }
 
 export type MathIntegrityStatus = 'PASS' | 'WARNING' | 'BLOCKED';
@@ -626,9 +710,37 @@ export interface MathIntegrityIssue {
     | 'export';
   questionId?: string;
   questionNumber?: number;
+  sectionTitle?: string;
+  optionOrStatementLabel?: string;
+  sourceFileName?: string;
   code?: string;
   message: string;
   recommendation: string;
+}
+
+export interface IntegrityPillarReport {
+  id: 'displayContent' | 'keyProvenance' | 'permutationMapping' | 'postExportVerification';
+  label: string;
+  status: MathIntegrityStatus;
+  summary: string;
+  blockingCount: number;
+  warningCount: number;
+}
+
+export interface DuplicateContentGroup {
+  signature: string;
+  questionIds: string[];
+  questionCodes: string[];
+  preview: string;
+}
+
+export interface SectionCountAudit {
+  sectionTitle: string;
+  sectionOrdinal: number;
+  declaredCount?: number;
+  actualCount: number;
+  mismatch: boolean;
+  evidence?: string;
 }
 
 export interface MathIntegrityReport {
@@ -637,6 +749,10 @@ export interface MathIntegrityReport {
   canExport: boolean;
   limitationNotice: string;
   categories: IntegrityCategorySummary[];
+  /** 4 nhóm báo cáo độc lập: nội dung hiển thị, khóa & nguồn gốc, ánh xạ hoán vị, đọc lại bản xuất */
+  pillars?: IntegrityPillarReport[];
+  duplicateGroups?: DuplicateContentGroup[];
+  sectionCountAudits?: SectionCountAudit[];
   issues: MathIntegrityIssue[];
   stats: {
     totalQuestions: number;
@@ -644,6 +760,9 @@ export interface MathIntegrityReport {
     lockedOptions: number;
     lockedGroups: number;
     visualAssetsCount: number;
+    unconfirmedAnswerCount?: number;
+    unresolvedFormulaCount?: number;
+    duplicateContentCount?: number;
   };
 }
 
@@ -729,6 +848,10 @@ export interface MathExamProject {
     contentHash: string;
     importedAt: string;
   };
+  /** Đối chiếu số câu khai báo trong đề gốc so với số câu thực tế đọc được theo từng phần */
+  sectionCountAudits?: SectionCountAudit[];
+  /** Yêu cầu bắt buộc lời giải/đáp số cho câu tự luận khi xuất theo mẫu có đáp án tự luận */
+  requireEssayAnswerOnExport?: boolean;
   createdAt: string;
   updatedAt: string;
 }

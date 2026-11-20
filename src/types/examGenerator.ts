@@ -289,10 +289,12 @@ export interface BankQuestionRecord {
   cognitiveLevel: CognitiveLevel;
   type: MathQuestionType;
   points: number;
-  /** Source origin: dedicated generator bank or read-only mirror from an existing MathExamProject */
-  sourceKind: 'generator-bank' | 'exam-project';
+  /** Source origin: dedicated generator bank, read-only mirror from MathExamProject, or indexed from Resource Vault */
+  sourceKind: 'generator-bank' | 'exam-project' | 'resource-vault';
   sourceExamId?: string;
   sourceExamTitle?: string;
+  /** Resource Vault provenance (additive, optional, Dexie v8 compatible) */
+  sourceProvenance?: import('./resourceIntelligence').QuestionSourceProvenance;
   templateId?: string;
   /** Explicit integrity flags */
   hasBinaryFormulaOrOmml?: boolean;
@@ -354,6 +356,10 @@ export interface GeneratedDraftItem {
   graphFingerprint?: string;
   functionAnalysis?: DynamicFunctionAnalysis;
   variationTable?: VariationTableModel;
+  /** Optional provenance & retrieval transparency when built via Resource Vault / NL Builder */
+  sourceProvenance?: import('./resourceIntelligence').QuestionSourceProvenance;
+  selectionReasons?: string[];
+  contentRelevancePercent?: number;
   verificationSummary: string;
   locked: boolean;
   teacherConfirmed: boolean;

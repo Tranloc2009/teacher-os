@@ -75,6 +75,139 @@ export const DEFAULT_RESOURCES: ResourceItem[] = [
   },
 ];
 
+export const PHASE_A_VAULT_EXAM_RESOURCES: ResourceItem[] = [
+  {
+    id: 'res-math12-gk1-hamso',
+    title: 'Đề ôn tập Giữa HK1 Toán 12 — Hàm số & Đạo hàm (Nguồn Resource Vault)',
+    type: 'question-template',
+    subject: 'Toán học',
+    grade: 'Lớp 12',
+    tier: 'applied',
+    documentCategory: 'de-thi',
+    chapterTopic: 'Hàm số và Đồ thị',
+    tags: ['Toán 12', 'Hàm số', 'Đạo hàm', 'Giữa HK1', 'Cực trị', 'Tiệm cận'],
+    content: `PHẦN I. Câu trắc nghiệm nhiều phương án lựa chọn.
+
+Câu 1: Cho hàm số $y = x^3 - 3x + 2$. Hàm số đã cho nghịch biến trên khoảng nào dưới đây?
+A. $(-\\infty; -1)$
+*B. $(-1; 1)$
+C. $(1; +\\infty)$
+D. $(-\\infty; +\\infty)$
+
+Câu 2: Đường tiệm cận đứng của đồ thị hàm số $y = \\frac{2x - 1}{x + 3}$ là đường thẳng nào sau đây?
+A. $x = 2$
+B. $y = 2$
+*C. $x = -3$
+D. $y = -3$
+
+Câu 3: Giá trị cực đại của hàm số $y = -x^3 + 3x^2 - 1$ bằng bao nhiêu?
+A. $-1$
+B. $1$
+*C. $3$
+D. $2$
+
+Câu 4: Đạo hàm của hàm số $f(x) = x^4 - 2x^2 + 5$ là:
+*A. $f'(x) = 4x^3 - 4x$
+B. $f'(x) = 4x^3 - 2x$
+C. $f'(x) = x^3 - 4x$
+D. $f'(x) = 4x^3 + 4x$
+
+PHẦN II. Câu trắc nghiệm đúng sai.
+
+Câu 5: Cho hàm số $f(x) = x^3 - 3x^2 + 4$. Xét tính đúng sai của các mệnh đề sau:
+a) Đạo hàm của hàm số là $f'(x) = 3x^2 - 6x$. [Đúng]
+b) Phương trình $f'(x) = 0$ có đúng hai nghiệm là $x = 0$ và $x = 2$. [Đúng]
+c) Hàm số đồng biến trên khoảng $(0; 2)$. [Sai]
+d) Giá trị cực tiểu của hàm số bằng $0$. [Đúng]
+
+Câu 6: Cho hàm số phân thức $y = \\frac{x + 2}{x - 1}$ có đồ thị $(C)$. Xét các khẳng định sau:
+a) Tập xác định của hàm số là $D = \\mathbb{R} \\setminus \\{1\\}$. [Đúng]
+b) Đồ thị $(C)$ có tiệm cận ngang $y = 1$. [Đúng]
+c) Hàm số đồng biến trên từng khoảng xác định. [Sai]
+d) Giao điểm của $(C)$ với trục tung là $A(0; -2)$. [Đúng]
+
+PHẦN III. Câu trắc nghiệm trả lời ngắn.
+
+Câu 7: Tìm giá trị lớn nhất của hàm số $y = x^3 - 3x + 5$ trên đoạn $[0; 2]$.
+Đáp án: 7
+
+Câu 8: Tính hệ số góc tiếp tuyến của đồ thị hàm số $y = x^3 - 2x + 1$ tại điểm có hoành độ $x_0 = 2$.
+Đáp án: 10`,
+    answerOrNote:
+      'Bộ câu hỏi Toán 12 Chương 1 (Hàm số & Đạo hàm) gồm 4 câu Trắc nghiệm, 2 câu Đúng/Sai và 2 câu Trả lời ngắn kèm đáp án gốc.',
+    points: 10,
+    updatedAt: '2026-11-18T08:00:00.000Z',
+    sourceFile: {
+      fileName: 'De_OnTap_GKI_Toan12_HamSo_DaoHam.txt',
+      relativePath: 'Toán 12/Giữa HK1/De_OnTap_GKI_Toan12_HamSo_DaoHam.txt',
+      extension: 'txt',
+      mimeType: 'text/plain',
+      sizeBytes: 1840,
+      sha256: 'vault-seed-toan12-gki-hamso-v1',
+      storageKind: 'metadata-only',
+      fileRecordId: 'seed-file-math12-gk1',
+      hasOmml: false,
+      formulaCount: 16,
+    },
+  },
+  {
+    id: 'res-math12-daoham-chuyende',
+    title: 'Chuyên đề Đạo hàm & Ứng dụng khảo sát hàm số Toán 12',
+    type: 'question-template',
+    subject: 'Toán học',
+    grade: 'Lớp 12',
+    tier: 'extended',
+    documentCategory: 'bai-tap',
+    chapterTopic: 'Đạo hàm',
+    tags: ['Toán 12', 'Đạo hàm', 'Hàm số', 'Vận dụng'],
+    content: `PHẦN I. Câu trắc nghiệm nhiều phương án lựa chọn.
+
+Câu 1: Cho hàm số $y = \\frac{3x + 2}{x - 2}$. Đường tiệm cận ngang của đồ thị hàm số là:
+A. $y = 2$
+*B. $y = 3$
+C. $x = 2$
+D. $y = -1$
+
+Câu 2: Số điểm cực trị của hàm số $y = x^4 - 4x^2 + 1$ là:
+A. $1$
+B. $2$
+*C. $3$
+D. $0$
+
+PHẦN II. Câu trắc nghiệm đúng sai.
+
+Câu 3: Cho hàm số $g(x) = -x^3 + 3x + 2$. Xét tính đúng sai của các khẳng định sau:
+a) $g'(x) = -3x^2 + 3$. [Đúng]
+b) Hàm số đồng biến trên khoảng $(-1; 1)$. [Đúng]
+c) Đồ thị hàm số đi qua điểm $M(1; 4)$. [Đúng]
+d) Hàm số không có điểm cực tiểu. [Sai]
+
+PHẦN III. Câu trắc nghiệm trả lời ngắn.
+
+Câu 4: Tính giá trị $f'(1)$ với $f(x) = 2x^3 - 5x^2 + 4x - 1$.
+Đáp án: 0
+
+Câu 5: Tổng hoành độ các điểm cực trị của hàm số $y = x^3 - 6x^2 + 9x - 2$ bằng bao nhiêu?
+Đáp án: 4`,
+    answerOrNote:
+      'Chuyên đề luyện tập Toán 12 (Đạo hàm & Khảo sát hàm số) phục vụ trích xuất tự động từ Resource Vault.',
+    points: 10,
+    updatedAt: '2026-11-18T09:00:00.000Z',
+    sourceFile: {
+      fileName: 'ChuyenDe_DaoHam_KhaoSat_Toan12.txt',
+      relativePath: 'Toán 12/Đạo hàm/ChuyenDe_DaoHam_KhaoSat_Toan12.txt',
+      extension: 'txt',
+      mimeType: 'text/plain',
+      sizeBytes: 1280,
+      sha256: 'vault-seed-toan12-daoham-v1',
+      storageKind: 'metadata-only',
+      fileRecordId: 'seed-file-math12-daoham',
+      hasOmml: false,
+      formulaCount: 10,
+    },
+  },
+];
+
 export const DEFAULT_WORKFLOWS: WorkflowRun[] = [
   {
     id: 'wf-standard-a4',

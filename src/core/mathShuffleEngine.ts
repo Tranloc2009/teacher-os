@@ -744,6 +744,7 @@ function mixSingleQuestion(
   orig: MathQuestion,
   origOrderNumber: number,
   newOrderNumber: number,
+  sectionQuestionNumber: number,
   rules: EffectiveMixRules,
   rng: () => number
 ): {
@@ -755,6 +756,7 @@ function mixSingleQuestion(
   const cloned: MathQuestion = structuredClone(orig);
   const warnings: string[] = [];
   const uType = getUniversalQuestionType(orig);
+  const provenanceStatus = orig.answerProvenance?.status;
   const lockedPositionApplied = isQuestionPositionLocked(
     orig,
     rules.lockedIds,
@@ -783,6 +785,7 @@ function mixSingleQuestion(
       content: o.content,
       isCorrect: o.isCorrect,
       lockPosition: o.lockPosition,
+      visualAsset: o.visualAsset,
     }));
     if (cloned.options) {
       cloned.options = finalOpts.map((o, idx) => ({
@@ -791,6 +794,7 @@ function mixSingleQuestion(
         content: o.content,
         isCorrect: o.isCorrect,
         lockPosition: o.lockPosition,
+        visualAsset: o.visualAsset,
       }));
     }
 
@@ -818,6 +822,7 @@ function mixSingleQuestion(
         questionId: orig.id,
         originalCode: orig.code,
         sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
@@ -827,18 +832,22 @@ function mixSingleQuestion(
         newCorrectLabels,
         exactAnswerSummary:
           newCorrectLabels.length > 0 ? `Đáp án ${answerText}` : 'Chưa xác định',
+        answerProvenanceStatus: provenanceStatus,
         lockedPositionApplied,
         lockedOptionShuffleApplied:
           !canShuffleOpts || origOpts.some((o) => Boolean(o.lockPosition)),
       },
       answerRow: {
         number: newOrderNumber,
+        sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         questionId: orig.id,
         originalCode: orig.code,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
         answer: answerText,
+        answerProvenanceStatus: provenanceStatus,
       },
       warnings,
     };
@@ -887,6 +896,7 @@ function mixSingleQuestion(
         questionId: orig.id,
         originalCode: orig.code,
         sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
@@ -896,18 +906,22 @@ function mixSingleQuestion(
         newCorrectLabel,
         originalCorrectLabel,
         exactAnswerSummary,
+        answerProvenanceStatus: provenanceStatus,
         lockedPositionApplied,
         lockedOptionShuffleApplied:
           !canShuffleAllOpts || origOpts.some((o) => Boolean(o.lockPosition)),
       },
       answerRow: {
         number: newOrderNumber,
+        sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         questionId: orig.id,
         originalCode: orig.code,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
         answer: newCorrectLabel ?? '?',
+        answerProvenanceStatus: provenanceStatus,
       },
       warnings,
     };
@@ -955,6 +969,7 @@ function mixSingleQuestion(
         questionId: orig.id,
         originalCode: orig.code,
         sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
@@ -962,17 +977,21 @@ function mixSingleQuestion(
         groupId: orig.groupId,
         statementPermutation,
         exactAnswerSummary: answerSummary,
+        answerProvenanceStatus: provenanceStatus,
         lockedPositionApplied,
         lockedOptionShuffleApplied: !canShuffleSts,
       },
       answerRow: {
         number: newOrderNumber,
+        sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         questionId: orig.id,
         originalCode: orig.code,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
         answer: answerSummary,
+        answerProvenanceStatus: provenanceStatus,
       },
       warnings,
     };
@@ -1171,23 +1190,28 @@ function mixSingleQuestion(
         questionId: orig.id,
         originalCode: orig.code,
         sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
         topic: orig.topic,
         groupId: orig.groupId,
         exactAnswerSummary: summary,
+        answerProvenanceStatus: provenanceStatus,
         lockedPositionApplied,
         lockedOptionShuffleApplied: true,
       },
       answerRow: {
         number: newOrderNumber,
+        sectionTitle: orig.sectionTitle,
+        sectionQuestionNumber,
         questionId: orig.id,
         originalCode: orig.code,
         type: orig.type,
         universalType: uType,
         cognitiveLevel: orig.cognitiveLevel,
         answer: summary,
+        answerProvenanceStatus: provenanceStatus,
       },
       warnings,
     };
@@ -1207,23 +1231,28 @@ function mixSingleQuestion(
       questionId: orig.id,
       originalCode: orig.code,
       sectionTitle: orig.sectionTitle,
+      sectionQuestionNumber,
       type: orig.type,
       universalType: uType,
       cognitiveLevel: orig.cognitiveLevel,
       topic: orig.topic,
       groupId: orig.groupId,
       exactAnswerSummary: summary,
+      answerProvenanceStatus: provenanceStatus,
       lockedPositionApplied,
       lockedOptionShuffleApplied: true,
     },
     answerRow: {
       number: newOrderNumber,
+      sectionTitle: orig.sectionTitle,
+      sectionQuestionNumber,
       questionId: orig.id,
       originalCode: orig.code,
       type: orig.type,
       universalType: uType,
       cognitiveLevel: orig.cognitiveLevel,
       answer: summary,
+      answerProvenanceStatus: provenanceStatus,
     },
     warnings,
   };
@@ -1275,10 +1304,15 @@ function buildUnverifiedSingleVersion(
   const answerKeyRows: MixedExamAnswerRow[] = [];
   const collectedWarnings = new Set<string>();
 
+  const sectionCounters = new Map<string, number>();
+
   ordered.forEach((origQ, idx) => {
     const newNumber = idx + 1;
     const origNum = originalIndexById.get(origQ.id) ?? newNumber;
-    const result = mixSingleQuestion(origQ, origNum, newNumber, rules, rng);
+    const secKey = origQ.sectionTitle || origQ.type;
+    const secNum = (sectionCounters.get(secKey) ?? 0) + 1;
+    sectionCounters.set(secKey, secNum);
+    const result = mixSingleQuestion(origQ, origNum, newNumber, secNum, rules, rng);
     mixedQuestions.push(result.mixedQuestion);
     permutationMap.push(result.mapping);
     answerKeyRows.push(result.answerRow);

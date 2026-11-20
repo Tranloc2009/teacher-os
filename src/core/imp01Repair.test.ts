@@ -345,10 +345,10 @@ test('IMP-01 Repair & Separation of Concerns: Imports 22-question 3-section DOCX
   assert.equal(checksumErrors.length, 0, 'Không còn lỗi giả mạo IMP-01 checksum mismatch');
   assert.equal(
     preReport.status,
-    'WARNING',
-    'Chỉ ở mức WARNING do tồn tại công thức MathType OLE cũ, KHÔNG bị BLOCKED bởi lỗi IMP-01'
+    'BLOCKED',
+    'P0: Công thức MathType OLE chưa giải mã được ([CÔNG_THỨC_OLE_LEGACY]) bắt buộc bị BLOCKED để không xuất đề mất công thức'
   );
-  assert.ok(preReport.issues.some((i) => i.id.startsWith('q-legacy-eq-')));
+  assert.ok(preReport.issues.some((i) => i.id.startsWith('q-legacy-eq-') && i.severity === 'error'));
 });
 
 test('True Integrity Tampering MUST STILL BLOCK: Mutated data-table, asset label, or sharedAssets checksum is blocked', () => {

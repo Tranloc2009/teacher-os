@@ -579,6 +579,31 @@ export function convertDraftToMathExamProject(
 }
 
 /**
+ * Kiểm tra toàn bộ liên kết fingerprint đồ thị & BBT của một đề nháp (Phase 3).
+ * Trả về BLOCK EXPORT — STALE GRAPH DATA nếu phát hiện bất kỳ đồ thị/BBT nào lệch tham số.
+ */
+export function verifyDraftDynamicGraphBindings(draft: GeneratedExamDraft): {
+  valid: boolean;
+  reason?: string;
+} {
+  for (const item of draft.items) {
+    const binding = verifyDynamicGraphBinding({
+      question: item.question,
+      functionAnalysis: item.functionAnalysis,
+      variationTable: item.variationTable,
+      graphFingerprint: item.graphFingerprint,
+    });
+    if (!binding.valid) {
+      return {
+        valid: false,
+        reason: binding.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA',
+      };
+    }
+  }
+  return { valid: true };
+}
+
+/**
  * Kiểm tra cổng an toàn trước khi xuất Đáp án chính thức / chuyển Smart Grading Studio:
  * KHÔNG được xuất đáp án chính thức nếu giáo viên chưa xác nhận hết đáp án.
  */
@@ -595,20 +620,13 @@ export function canExportOfficialAnswerKey(draft: GeneratedExamDraft): {
     };
   }
   // Phase 3 Dynamic Graph Binding Gate: BLOCK EXPORT — STALE GRAPH DATA
-  for (const item of draft.items) {
-    const binding = verifyDynamicGraphBinding({
-      question: item.question,
-      functionAnalysis: item.functionAnalysis,
-      variationTable: item.variationTable,
-      graphFingerprint: item.graphFingerprint,
-    });
-    if (!binding.valid) {
-      return {
-        allowed: false,
-        unconfirmedCount: draft.items.filter((i) => !i.teacherConfirmed).length,
-        reason: binding.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA',
-      };
-    }
+  const graphCheck = verifyDraftDynamicGraphBindings(draft);
+  if (!graphCheck.valid) {
+    return {
+      allowed: false,
+      unconfirmedCount: draft.items.filter((i) => !i.teacherConfirmed).length,
+      reason: graphCheck.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA',
+    };
   }
   const unconfirmed = draft.items.filter((i) => !i.teacherConfirmed).length;
   if (unconfirmed > 0) {

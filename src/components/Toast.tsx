@@ -42,12 +42,12 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 shadow-md ${styles[toast.tone]}`}
       >
         <Icon className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
-        <p className="text-sm font-medium leading-snug">{toast.text}</p>
+        <p className="min-w-0 flex-1 text-sm font-medium leading-snug break-words [overflow-wrap:anywhere]">{toast.text}</p>
         <button
           type="button"
           onClick={onDismiss}
           aria-label="Đóng thông báo"
-          className="ml-2 rounded p-0.5 opacity-70 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-blue-700"
+          className="ml-2 shrink-0 rounded p-0.5 opacity-70 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-blue-700"
         >
           <X className="h-4 w-4" />
         </button>

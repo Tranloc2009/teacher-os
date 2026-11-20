@@ -49,7 +49,7 @@ export default defineConfig(() => {
           // Chỉ cache App Shell tĩnh; tuyệt đối không cache ảnh học sinh hay đụng vào IndexedDB
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           globIgnores: ['**/assets/aistudio/**'],
-          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
         },
         devOptions: {
           enabled: true,

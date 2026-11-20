@@ -125,8 +125,8 @@ export function MathVisualAssetRenderer({ asset, compact = false }: MathVisualAs
         </div>
       ) : isSvg ? (
         <div
-          className={`rounded border border-slate-200 bg-white p-2 flex justify-center overflow-x-auto ${
-            compact ? 'max-h-36' : ''
+          className={`rounded border border-slate-200 bg-white p-2 flex justify-center items-center overflow-hidden [&>svg]:max-w-full [&>svg]:w-auto [&>svg]:h-auto ${
+            compact ? '[&>svg]:max-h-56' : '[&>svg]:max-h-[340px]'
           }`}
           dangerouslySetInnerHTML={{ __html: sanitizeSvgSource(asset.sourceData) }}
         />

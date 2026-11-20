@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Eye,
+  FileSpreadsheet,
   Layers,
   Plus,
   QrCode,
@@ -80,29 +81,37 @@ import { GradebookReconciliationPanel } from '../grading/GradebookReconciliation
 import { GradingExportPanel } from '../grading/GradingExportPanel';
 import { MobileCameraScannerModal } from '../grading/MobileCameraScannerModal';
 import { DuplicateResolutionModal } from '../grading/DuplicateResolutionModal';
+import { AzotaIntegrationPanel } from '../grading/AzotaIntegrationPanel';
 
-type GradingTabId =
+export type GradingTabId =
   | 'dashboard'
   | 'roster'
   | 'sheet-gen'
   | 'upload'
   | 'review'
   | 'gradebook'
-  | 'export';
+  | 'export'
+  | 'azota';
 
 interface SmartGradingStudioAppProps {
   mathExams: MathExamProject[];
   preferredExamId?: string | null;
+  preferredClassName?: string | null;
+  preferredTab?: GradingTabId | null;
   onOpenExamMixer: () => void;
   onSaveMathExam?: (exam: MathExamProject) => Promise<unknown> | void;
+  onSessionsChanged?: (sessions: GradingSession[]) => void;
   onNotify: (tone: 'success' | 'info' | 'error', message: string) => void;
 }
 
 export function SmartGradingStudioApp({
   mathExams,
   preferredExamId,
+  preferredClassName,
+  preferredTab,
   onOpenExamMixer,
   onSaveMathExam,
+  onSessionsChanged,
   onNotify,
 }: SmartGradingStudioAppProps) {
   const [sessions, setSessions] = useState<GradingSession[]>([]);
@@ -145,7 +154,7 @@ export function SmartGradingStudioApp({
         setSessions(stored);
         if (stored.length > 0) {
           setActiveSessionId(stored[0].id);
-        } else {
+        } else if (preferredTab !== 'azota') {
           setCreatingNew(true);
         }
       } catch (err) {
@@ -167,7 +176,26 @@ export function SmartGradingStudioApp({
     };
   }, [onNotify]);
 
-  // Đồng bộ đề gợi ý khi mở từ Exam Mixer Pro
+  // Đồng bộ đề gợi ý, tên lớp & tab mục tiêu khi mở từ Exam Mixer Pro / Print Studio / Command Bar
+  useEffect(() => {
+    if (preferredClassName && preferredClassName.trim()) {
+      setDraftClassName(preferredClassName.trim());
+    }
+  }, [preferredClassName]);
+
+  useEffect(() => {
+    if (preferredTab) {
+      setActiveTab(preferredTab);
+      if (preferredTab === 'azota') {
+        setCreatingNew(false);
+      }
+    }
+  }, [preferredTab]);
+
+  useEffect(() => {
+    onSessionsChanged?.(sessions);
+  }, [sessions, onSessionsChanged]);
+
   useEffect(() => {
     if (preferredExamId && gradableExams.some((e) => e.id === preferredExamId)) {
       setDraftExamId(preferredExamId);
@@ -175,13 +203,13 @@ export function SmartGradingStudioApp({
       if (existing) {
         setActiveSessionId(existing.id);
         setCreatingNew(false);
-      } else {
+      } else if (preferredTab !== 'azota') {
         setCreatingNew(true);
       }
     } else if (!draftExamId && gradableExams.length > 0) {
       setDraftExamId(gradableExams[0].id);
     }
-  }, [draftExamId, gradableExams, preferredExamId, sessions]);
+  }, [draftExamId, gradableExams, preferredExamId, preferredTab, sessions]);
 
   const draftExam = useMemo(
     () => gradableExams.find((e) => e.id === draftExamId) ?? gradableExams[0],
@@ -861,6 +889,7 @@ export function SmartGradingStudioApp({
       count: activeSession?.gradebookEntries?.length,
     },
     { id: 'export', label: 'Xuất Excel & ZIP', icon: Archive },
+    { id: 'azota', label: 'Azota (Tệp tin)', icon: FileSpreadsheet },
   ];
 
   const draftKeysMap = useMemo(
@@ -912,6 +941,22 @@ export function SmartGradingStudioApp({
 
           <button
             type="button"
+            onClick={() => {
+              setCreatingNew(false);
+              setActiveTab('azota');
+            }}
+            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
+              activeTab === 'azota' && !creatingNew
+                ? 'border-[#635BFF] bg-[#EEF0FF] dark:bg-indigo-950/60 text-[#5046E5] dark:text-indigo-300'
+                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:border-indigo-400'
+            }`}
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Azota (Tệp tin)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setCreatingNew((v) => !v)}
             className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-semibold text-white transition-colors"
           >
@@ -921,11 +966,19 @@ export function SmartGradingStudioApp({
         </div>
       </header>
 
-      {/* Create New Grading Session View */}
+      {/* Create New Grading Session View OR Direct Azota File Bridge View */}
       {loadingSessions ? (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-10 text-center text-xs text-slate-500">
           Đang nạp dữ liệu Smart Grading Studio cục bộ...
         </div>
+      ) : activeTab === 'azota' && !creatingNew && !activeSession ? (
+        <AzotaIntegrationPanel
+          mathExams={mathExams}
+          activeSession={null}
+          preferredExamId={preferredExamId}
+          onOpenCreateSession={() => setCreatingNew(true)}
+          onNotify={onNotify}
+        />
       ) : creatingNew || !activeSession ? (
         <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5">
           <div>
@@ -1288,6 +1341,20 @@ export function SmartGradingStudioApp({
             <GradingExportPanel
               session={activeSession}
               answerKeysByCode={answerKeysByCode}
+              onNotify={onNotify}
+            />
+          )}
+
+          {activeTab === 'azota' && (
+            <AzotaIntegrationPanel
+              mathExams={mathExams}
+              activeSession={activeSession}
+              preferredExamId={preferredExamId ?? activeSession.examId}
+              onCommitToSession={async (updated) => {
+                await persistSession(updated);
+              }}
+              onOpenGradebookTab={() => setActiveTab('gradebook')}
+              onOpenCreateSession={() => setCreatingNew(true)}
               onNotify={onNotify}
             />
           )}

@@ -4,8 +4,10 @@ import {
   LayoutDashboard,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Wand2,
 } from 'lucide-react';
+import type { ResourceItem } from '../../types/lesson';
 import type { MathExamProject } from '../../types/mathExam';
 import type {
   BankQuestionRecord,
@@ -13,11 +15,14 @@ import type {
   GeneratorBackupBundle,
   QuestionTemplateDefinition,
 } from '../../types/examGenerator';
+import type { ResourceQuestionIndexSummary } from '../../types/resourceIntelligence';
 import {
+  bulkSaveGeneratorBankItems,
   deleteGeneratorBankItem,
   deleteGeneratorDraft,
   deleteGeneratorTemplate,
   initializeExamGeneratorStore,
+  readResourceAttachmentBlob,
   restoreGeneratorBackupBundle,
   saveGeneratorBankItem,
   saveGeneratorDraft,
@@ -27,18 +32,31 @@ import {
   canExportOfficialAnswerKey,
   collectUnifiedQuestionBank,
   convertDraftToMathExamProject,
+  verifyDraftDynamicGraphBindings,
 } from '../../core/examGenerator/examBuilderEngine';
+import {
+  extractQuestionsFromResourceItem,
+  reconcileResourceBankIndex,
+} from '../../core/examGenerator/resourceQuestionIndexer';
 import { generateMixedExams } from '../../core/mathShuffleEngine';
 import { PageBanner } from '../ui/DesignSystem';
 import { GeneratorDashboardPanel } from '../examGenerator/GeneratorDashboardPanel';
 import { ExamGeneratorWizardPanel } from '../examGenerator/ExamGeneratorWizardPanel';
+import { NaturalLanguageExamPanel } from '../examGenerator/NaturalLanguageExamPanel';
 import { QuestionBankManagerPanel } from '../examGenerator/QuestionBankManagerPanel';
 import { TemplateBuilderPanel } from '../examGenerator/TemplateBuilderPanel';
 
-type GeneratorTabId = 'dashboard' | 'wizard' | 'bank' | 'templates';
+export type GeneratorTabId = 'dashboard' | 'natural-language' | 'wizard' | 'bank' | 'templates';
 
 interface SmartExamGeneratorAppProps {
   mathExams: MathExamProject[];
+  resources?: ResourceItem[];
+  preferredResourceId?: string | null;
+  preferredTab?: GeneratorTabId | null;
+  preferredPrompt?: string | null;
+  preferredTopicFilter?: string | null;
+  onClearPreferredResource?: () => void;
+  onSyncWorkflowDraft?: (draft: GeneratedExamDraft) => void;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onOpenExamMixerWithExam: (examId: string) => void;
   onOpenGradingStudioWithExam: (examId: string) => void;
@@ -47,6 +65,7 @@ interface SmartExamGeneratorAppProps {
 
 const TABS: Array<{ id: GeneratorTabId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Tổng quan', icon: LayoutDashboard },
+  { id: 'natural-language', label: 'Tạo đề tiếng Việt (NL)', icon: Sparkles },
   { id: 'wizard', label: 'Tạo đề (5 bước)', icon: Wand2 },
   { id: 'bank', label: 'Ngân hàng câu hỏi', icon: Database },
   { id: 'templates', label: 'Mẫu đổi số (L1–L3)', icon: SlidersHorizontal },
@@ -54,12 +73,21 @@ const TABS: Array<{ id: GeneratorTabId; label: string; icon: typeof LayoutDashbo
 
 export function SmartExamGeneratorApp({
   mathExams,
+  resources = [],
+  preferredResourceId,
+  preferredTab,
+  preferredPrompt,
+  preferredTopicFilter,
+  onClearPreferredResource,
+  onSyncWorkflowDraft,
   onSaveMathExam,
   onOpenExamMixerWithExam,
   onOpenGradingStudioWithExam,
   onNotify,
 }: SmartExamGeneratorAppProps) {
-  const [activeTab, setActiveTab] = useState<GeneratorTabId>('dashboard');
+  const [activeTab, setActiveTab] = useState<GeneratorTabId>(
+    preferredTab ?? (preferredResourceId || preferredPrompt ? 'natural-language' : 'dashboard')
+  );
   const [loading, setLoading] = useState(true);
   const [storedBank, setStoredBank] = useState<BankQuestionRecord[]>([]);
   const [templates, setTemplates] = useState<QuestionTemplateDefinition[]>([]);
@@ -91,9 +119,79 @@ export function SmartExamGeneratorApp({
     void loadStore();
   }, [loadStore]);
 
+  useEffect(() => {
+    if (preferredTab) {
+      setActiveTab(preferredTab);
+    } else if (preferredResourceId || preferredPrompt) {
+      setActiveTab('natural-language');
+    } else if (preferredTopicFilter) {
+      setActiveTab('bank');
+    }
+  }, [preferredTab, preferredResourceId, preferredPrompt, preferredTopicFilter]);
+
   const unifiedBank = useMemo(
     () => collectUnifiedQuestionBank(storedBank, mathExams),
     [storedBank, mathExams]
+  );
+
+  const handleIndexResources = useCallback(
+    async (
+      resourceIds: string[]
+    ): Promise<{
+      summaries: ResourceQuestionIndexSummary[];
+      updatedUnifiedBank: BankQuestionRecord[];
+    }> => {
+      const summaries: ResourceQuestionIndexSummary[] = [];
+      let workingBank = [...storedBank];
+      const allToPersist: BankQuestionRecord[] = [];
+
+      for (const resId of resourceIds) {
+        const res = resources.find((r) => r.id === resId);
+        if (!res) continue;
+        let blob: Blob | null = null;
+        if (res.sourceFile && res.sourceFile.storageKind !== 'metadata-only') {
+          try {
+            blob = await readResourceAttachmentBlob(res);
+          } catch {
+            blob = null;
+          }
+        }
+        const outcome = await extractQuestionsFromResourceItem(res, { blob });
+        const reconciled = reconcileResourceBankIndex(workingBank, outcome.items, res.id);
+        workingBank = reconciled.mergedBank;
+        allToPersist.push(...reconciled.toPersist);
+        summaries.push({
+          ...outcome.summary,
+          addedCount: reconciled.addedCount,
+          updatedCount: reconciled.updatedCount,
+          skippedDuplicateCount:
+            outcome.summary.skippedDuplicateCount + reconciled.skippedDuplicateCount,
+          preservedTeacherEditedCount: reconciled.preservedTeacherEditedCount,
+        });
+      }
+
+      if (allToPersist.length > 0) {
+        await bulkSaveGeneratorBankItems(allToPersist);
+      }
+      setStoredBank(workingBank);
+      const updatedUnifiedBank = collectUnifiedQuestionBank(workingBank, mathExams);
+
+      const totalExtracted = summaries.reduce((acc, s) => acc + s.extractedCount, 0);
+      const totalAdded = summaries.reduce((acc, s) => acc + s.addedCount, 0);
+      if (totalExtracted > 0) {
+        onNotify(
+          'success',
+          `Đã lập chỉ mục ${totalExtracted} câu hỏi từ ${summaries.length} tài liệu Resource Vault (${totalAdded} câu mới được lưu vào Ngân hàng hợp nhất).`
+        );
+      } else {
+        onNotify(
+          'info',
+          `Đã quét ${summaries.length} tài liệu nhưng chưa tìm thấy câu hỏi có cấu trúc chuẩn để lập chỉ mục.`
+        );
+      }
+      return { summaries, updatedUnifiedBank };
+    },
+    [resources, storedBank, mathExams, onNotify]
   );
 
   const handleAddBankQuestion = async (item: BankQuestionRecord) => {
@@ -189,6 +287,11 @@ export function SmartExamGeneratorApp({
   };
 
   const handleSendToExamMixer = async (draft: GeneratedExamDraft) => {
+    const graphBindingCheck = verifyDraftDynamicGraphBindings(draft);
+    if (!graphBindingCheck.valid) {
+      onNotify('error', graphBindingCheck.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA');
+      return;
+    }
     try {
       const project = convertDraftToMathExamProject(draft, {
         examId: draft.exportedExamProjectId,
@@ -367,15 +470,53 @@ export function SmartExamGeneratorApp({
             />
           )}
 
+          {activeTab === 'natural-language' && (
+            <NaturalLanguageExamPanel
+              resources={resources}
+              unifiedBank={unifiedBank}
+              templates={templates}
+              initialResourceId={preferredResourceId}
+              initialPrompt={preferredPrompt}
+              onIndexResources={handleIndexResources}
+              onSaveDraft={async (draft) => {
+                await handleUpdateDraft(draft);
+                onSyncWorkflowDraft?.(draft);
+              }}
+              onOpenDraftInWizardStep5={(draft) => {
+                setReviewDraft(draft);
+                onSyncWorkflowDraft?.(draft);
+                onClearPreferredResource?.();
+                setActiveTab('wizard');
+              }}
+              onSendDraftToExamMixer={async (draft) => {
+                onSyncWorkflowDraft?.(draft);
+                await handleSendToExamMixer(draft);
+              }}
+              onNotify={onNotify}
+            />
+          )}
+
           {activeTab === 'wizard' && (
             <ExamGeneratorWizardPanel
               unifiedBank={unifiedBank}
               templates={templates}
               initialDraftToReview={reviewDraft}
-              onSaveDrafts={(list) => void handleSaveDrafts(list)}
-              onUpdateDraft={(d) => void handleUpdateDraft(d)}
-              onSendToExamMixer={(d) => void handleSendToExamMixer(d)}
-              onMixAndSendToGrading={(d) => void handleMixAndSendToGrading(d)}
+              onSaveDrafts={(list) => {
+                if (list[0]) onSyncWorkflowDraft?.(list[0]);
+                void handleSaveDrafts(list);
+              }}
+              onUpdateDraft={(d) => {
+                onSyncWorkflowDraft?.(d);
+                void handleUpdateDraft(d);
+              }}
+              onSendToExamMixer={(d) => {
+                onSyncWorkflowDraft?.(d);
+                void handleSendToExamMixer(d);
+              }}
+              onMixAndSendToGrading={(d) => {
+                onSyncWorkflowDraft?.(d);
+                void handleMixAndSendToGrading(d);
+              }}
               onNotify={onNotify}
             />
           )}
@@ -384,6 +525,8 @@ export function SmartExamGeneratorApp({
             <QuestionBankManagerPanel
               unifiedBank={unifiedBank}
               templates={templates}
+              resources={resources}
+              initialSearchQuery={preferredTopicFilter}
               onAddBankQuestion={(item) => void handleAddBankQuestion(item)}
               onDeleteBankQuestion={(id) => void handleDeleteBankQuestion(id)}
               onCreateTemplateFromQuestion={(item) => {
@@ -391,6 +534,7 @@ export function SmartExamGeneratorApp({
                 setTemplateBuilderSourceQ(item);
                 setActiveTab('templates');
               }}
+              onNotify={onNotify}
             />
           )}
 

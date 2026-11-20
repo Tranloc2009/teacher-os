@@ -1,6 +1,8 @@
 import katex from 'katex';
 import {
+  DuplicateContentGroup,
   IntegrityCategorySummary,
+  IntegrityPillarReport,
   MathContentBlock,
   MathContentPayload,
   MathExamProject,
@@ -59,6 +61,116 @@ export function sanitizeSvgSource(svg: string): string {
     .replace(/<script[\s\S]*?\/>/gi, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/(href|xlink:href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '$1="#"');
+}
+
+/**
+ * Hash toàn bộ nội dung + khóa đáp án của một câu hỏi để phát hiện khi giáo viên
+ * chỉnh sửa câu sau khi đã bấm xác nhận (tự động hủy trạng thái teacher-confirmed).
+ */
+export function computeQuestionVerificationContentHash(q: MathQuestion): string {
+  const parts: string[] = [
+    q.type,
+    q.universalType ?? q.type,
+    q.stem?.rawSource ?? '',
+    q.correctOptionId ?? '',
+    (q.correctOptionIds ?? []).join(','),
+    (q.options ?? [])
+      .map(
+        (o) =>
+          `${o.id}|${o.content?.rawSource ?? ''}|${o.isCorrect ? '1' : '0'}|${o.visualAsset?.checksum ?? ''}`
+      )
+      .join(';;'),
+    (q.multiSelectOptions ?? [])
+      .map(
+        (o) =>
+          `${o.id}|${o.content?.rawSource ?? ''}|${o.isCorrect ? '1' : '0'}|${o.visualAsset?.checksum ?? ''}`
+      )
+      .join(';;'),
+    (q.statements ?? [])
+      .map(
+        (s) =>
+          `${s.id}|${s.content?.rawSource ?? ''}|${s.isTrue ? '1' : '0'}|${s.answerState ?? ''}`
+      )
+      .join(';;'),
+    q.shortAnswer
+      ? `${q.shortAnswer.answerValue ?? ''}|${q.shortAnswer.rawAnswer ?? ''}|${q.shortAnswer.normalizedAnswer ?? ''}|${q.shortAnswer.unit ?? ''}`
+      : '',
+    (q.essayParts ?? [])
+      .map((p) => `${p.id}|${p.label}|${p.points}|${p.content?.rawSource ?? ''}`)
+      .join(';;'),
+    q.solutionGuide?.rawSource ?? '',
+    (q.visualAssets ?? []).map((a) => `${a.id}:${a.checksum}`).join(','),
+  ];
+  return computeContentHash(parts.join('###'));
+}
+
+/**
+ * Chuẩn hóa nội dung câu hỏi để phát hiện câu bị nhân bản/trùng nội dung giữa các ID khác nhau
+ * (VD: đề nguồn lặp lại câu từ phần lời giải hoặc nhập chồng 2 lần).
+ */
+export function computeNormalizedQuestionSignature(q: MathQuestion): string {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/\[\[asset:[^\]]+\]\]/gi, '')
+      .replace(/\s+/g, ' ')
+      .replace(/^câu\s+\d+\s*[.:]\s*/i, '')
+      .trim();
+
+  const stemNorm = norm(q.stem?.rawSource ?? '');
+  if (!stemNorm) return '';
+
+  const bodyPieces: string[] = [q.type, stemNorm];
+  if (q.type === 'mcq' && q.options) {
+    bodyPieces.push(
+      ...q.options.map((o) => norm(o.content?.rawSource ?? '') || (o.visualAsset?.checksum ?? ''))
+    );
+  } else if (q.type === 'true-false' && q.statements) {
+    bodyPieces.push(...q.statements.map((s) => norm(s.content?.rawSource ?? '')));
+  } else if (q.type === 'short-answer') {
+    bodyPieces.push(norm(q.shortAnswer?.answerValue ?? ''));
+  }
+
+  return computeContentHash(bodyPieces.join('||'));
+}
+
+/**
+ * Phương án được xem là có nội dung hợp lệ nếu:
+ * - Có tài nguyên hình ảnh/đồ thị hợp lệ (`visualAsset.sourceData`), HOẶC
+ * - Có ít nhất một ký tự chữ/số/biểu thức toán (`A-Za-zÀ-ỹ0-9$` hoặc lệnh `\`).
+ * Ngược lại (trống hoặc chỉ có dấu câu như `.` / `,` / `...`) sẽ bị CHẶN.
+ */
+export function hasMeaningfulOptionContent(opt: McqOption): boolean {
+  if (opt.visualAsset && opt.visualAsset.sourceData.trim().length > 0) {
+    return true;
+  }
+  const raw = (opt.content?.rawSource ?? '').trim();
+  if (!raw) return false;
+  return /[A-Za-zÀ-ỹ0-9$\\]/.test(raw);
+}
+
+export function detectDuplicateQuestionGroups(questions: MathQuestion[]): DuplicateContentGroup[] {
+  const bySig = new Map<string, MathQuestion[]>();
+  for (const q of questions) {
+    const sig = q.contentSignature || computeNormalizedQuestionSignature(q);
+    if (!sig) continue;
+    const list = bySig.get(sig) ?? [];
+    list.push(q);
+    bySig.set(sig, list);
+  }
+  const groups: DuplicateContentGroup[] = [];
+  for (const [signature, list] of bySig.entries()) {
+    const distinctIds = Array.from(new Set(list.map((q) => q.id)));
+    if (distinctIds.length >= 2) {
+      groups.push({
+        signature,
+        questionIds: list.map((q) => q.id),
+        questionCodes: list.map((q) => q.code),
+        stemPreview: (list[0].stem?.rawSource ?? '').replace(/\s+/g, ' ').trim().slice(0, 90),
+      });
+    }
+  }
+  return groups;
 }
 
 export function computeVisualAssetChecksum(
@@ -972,6 +1084,27 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       });
     }
 
+    const locMeta = {
+      sectionTitle: q.sectionTitle,
+      sourceFileName: q.sourceTrace?.sourceFileName,
+    };
+
+    // Kiểm tra bản ghi lỗi legacy (VD: câu Đúng/Sai bị lưu khóa 666/6666 từ phiên bản trước)
+    if (q.legacyAnomalyReasons && q.legacyAnomalyReasons.length > 0) {
+      issues.push({
+        id: `q-legacy-anomaly-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'question',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}) chứa dữ liệu bất thường từ bản lưu cũ: ${q.legacyAnomalyReasons.join(' ')}`,
+        recommendation: 'Rà soát và sửa lại nội dung/khóa đáp án rồi xác nhận lại trước khi trộn hoặc xuất đề.',
+      });
+    }
+
     const hasLegacyEqMarker =
       q.stem.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
       q.stem.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]') ||
@@ -993,18 +1126,106 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       q.solutionGuide.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
       q.solutionGuide.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]');
 
-    if (hasLegacyEqMarker) {
+    if (
+      hasLegacyEqMarker ||
+      q.formulaStatus?.displayable === false ||
+      (q.formulaStatus?.unresolvedCount ?? 0) > 0
+    ) {
+      const unresolvedDetail =
+        q.formulaStatus?.unresolvedDetails?.[0] ??
+        'Phát hiện placeholder công thức OLE/OMML chưa giải mã được.';
       issues.push({
         id: `q-legacy-eq-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'latex',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}) [${q.sectionTitle || 'Đề thi'}]: Bị CHẶN xuất vì còn công thức MathType/OLE hoặc OMML chưa giải mã được (${unresolvedDetail}).`,
+        recommendation: 'Nhập lại công thức bằng LaTeX ($...$) hoặc xóa placeholder trước khi trộn và xuất đề.',
+      });
+    } else if (
+      q.formulaStatus &&
+      q.formulaStatus.displayable &&
+      !q.formulaStatus.machineReadable
+    ) {
+      issues.push({
+        id: `q-wmf-preview-only-${q.id}`,
         severity: 'warning',
         tier: 'WARNING',
         scope: 'latex',
         questionId: q.id,
         questionNumber: qNum,
         code: q.code,
-        message: `Câu ${qNum} (${q.code}) chứa đối tượng công thức Word cũ/MathType OLE hoặc OMML chưa nhận dạng đầy đủ.`,
-        recommendation: 'Chuyển đổi công thức MathType OLE/Equation 3.0 sang Word Equation (OMML) hoặc LaTeX ($...$) để bảo toàn hiển thị.',
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): Đang hiển thị ${q.formulaStatus.wmfPreviewCount} công thức OLE qua ảnh vector WMF→SVG (hiển thị được nhưng chưa phải LaTeX chỉnh sửa).`,
+        recommendation: 'Kiểm tra hiển thị công thức ở khung xem trước trước khi xuất bản.',
       });
+    }
+
+    // Kiểm tra nguồn gốc khóa đáp án (Answer Provenance) & phát hiện sửa nội dung sau khi xác nhận
+    if (q.answerProvenance) {
+      const prov = q.answerProvenance;
+      if (prov.status === 'conflict') {
+        const conflictDetail = prov.conflictingEvidence?.join(' vs ') || prov.note || 'Bảng đáp án và lời giải không trùng khớp';
+        issues.push({
+          id: `q-prov-conflict-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'option',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): MÂU THUẪN đáp án giữa nhiều nguồn trong tài liệu (${conflictDetail}).`,
+          recommendation: 'Đối chiếu tài liệu gốc, chọn đáp án chính xác và xác nhận lại trước khi trộn/xuất.',
+        });
+      } else if (prov.status === 'needs-review') {
+        issues.push({
+          id: `q-prov-review-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'option',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): Khóa đáp án đang ở trạng thái CẦN DUYỆT QUY ƯỚC (${prov.note || 'ứng viên từ gạch chân hoặc dòng gợi ý chưa được xác nhận'}).`,
+          recommendation: 'Mở Bước 2 để xác nhận rõ quy ước đáp án hoặc sửa lại khóa chấm cho câu này.',
+        });
+      } else if (prov.status === 'missing' && q.type !== 'essay') {
+        issues.push({
+          id: `q-prov-missing-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'option',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): THIẾU KHÓA ĐÁP ÁN (${prov.note || 'không tìm thấy đáp án xác minh trong tài liệu'}).`,
+          recommendation: 'Chọn hoặc nhập đáp án đúng ở Bước 1/2 (hệ thống không tự mặc định A hay Sai).',
+        });
+      } else if (
+        prov.status === 'teacher-confirmed' &&
+        prov.confirmedContentHash &&
+        prov.confirmedContentHash !== computeQuestionVerificationContentHash(q)
+      ) {
+        issues.push({
+          id: `q-prov-stale-confirm-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'option',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): Nội dung hoặc đáp án đã bị chỉnh sửa sau lần xác nhận trước — trạng thái xác nhận không còn hiệu lực.`,
+          recommendation: 'Kiểm tra lại câu hỏi và bấm xác nhận lại đáp án trước khi trộn/xuất.',
+        });
+      }
     }
 
     // Cổng bảo vệ công thức & bố cục khi nhập từ PDF hoặc định dạng đa nguồn (Exam Mixer Pro 7.0)
@@ -1160,7 +1381,8 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
         optionIds.add(opt.id);
 
-        if (!opt.content.rawSource.trim()) {
+        if (!hasMeaningfulOptionContent(opt)) {
+          const rawTrim = opt.content.rawSource.trim();
           issues.push({
             id: `ms-opt-empty-${q.id}-${opt.id}`,
             severity: 'error',
@@ -1169,8 +1391,12 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
             questionId: q.id,
             questionNumber: qNum,
             code: q.code,
-            message: `Câu ${qNum} (${q.code}) có phương án ${opt.originalLabel} đang để trống.`,
-            recommendation: 'Điền nội dung phương án trước khi trộn.',
+            ...locMeta,
+            optionOrStatementLabel: opt.originalLabel,
+            message: rawTrim
+              ? `Câu ${qNum} (${q.code}) có phương án ${opt.originalLabel} chỉ chứa ký tự dấu câu rỗng ("${rawTrim}") và không có hình vẽ.`
+              : `Câu ${qNum} (${q.code}) có phương án ${opt.originalLabel} đang để trống (không có chữ và không có hình vẽ).`,
+            recommendation: 'Điền nội dung phương án hoặc đính kèm hình vẽ đồ thị trước khi trộn.',
           });
         }
       });
@@ -1237,7 +1463,8 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
         optionIds.add(opt.id);
 
-        if (!opt.content.rawSource.trim()) {
+        if (!hasMeaningfulOptionContent(opt)) {
+          const rawTrim = opt.content.rawSource.trim();
           issues.push({
             id: `mcq-opt-empty-${q.id}-${opt.id}`,
             severity: 'error',
@@ -1246,8 +1473,12 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
             questionId: q.id,
             questionNumber: qNum,
             code: q.code,
-            message: `Câu ${qNum} (${q.code}) có phương án ${opt.originalLabel} đang để trống.`,
-            recommendation: 'Điền nội dung phương án trước khi trộn.',
+            ...locMeta,
+            optionOrStatementLabel: opt.originalLabel,
+            message: rawTrim
+              ? `Câu ${qNum} (${q.code}) phương án ${opt.originalLabel} chỉ chứa dấu câu rỗng ("${rawTrim}") và không có hình ảnh.`
+              : `Câu ${qNum} (${q.code}) phương án ${opt.originalLabel} đang để trống (không có văn bản và không có hình ảnh).`,
+            recommendation: 'Điền nội dung phương án hoặc kiểm tra lại ảnh đồ thị bị tách khỏi phương án trước khi trộn.',
           });
         }
 
@@ -1328,7 +1559,8 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
         stIds.add(st.id);
 
-        if (!st.content.rawSource.trim()) {
+        const stRaw = st.content.rawSource.trim();
+        if (!stRaw || !/[A-Za-zÀ-ỹ0-9$\\]/.test(stRaw)) {
           issues.push({
             id: `tf-empty-${q.id}-${st.id}`,
             severity: 'error',
@@ -1337,11 +1569,41 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
             questionId: q.id,
             questionNumber: qNum,
             code: q.code,
-            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) đang để trống.`,
+            ...locMeta,
+            optionOrStatementLabel: `${st.originalLabel})`,
+            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) đang để trống hoặc chỉ chứa dấu câu.`,
             recommendation: 'Điền đầy đủ nội dung mệnh đề.',
           });
         }
-        if (typeof st.isTrue !== 'boolean') {
+        if (st.answerState === 'missing') {
+          issues.push({
+            id: `tf-missing-state-${q.id}-${st.id}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'statement',
+            questionId: q.id,
+            questionNumber: qNum,
+            code: q.code,
+            ...locMeta,
+            optionOrStatementLabel: `${st.originalLabel})`,
+            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) đang THIẾU đáp án Đúng/Sai (hệ thống không tự suy đoán Sai).`,
+            recommendation: 'Chọn Đúng hoặc Sai và xác nhận cho từng ý ở Bước 2.',
+          });
+        } else if (st.answerState === 'candidate') {
+          issues.push({
+            id: `tf-candidate-state-${q.id}-${st.id}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'statement',
+            questionId: q.id,
+            questionNumber: qNum,
+            code: q.code,
+            ...locMeta,
+            optionOrStatementLabel: `${st.originalLabel})`,
+            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) mới là ứng viên từ dấu gạch chân, chưa được giáo viên xác nhận quy ước.`,
+            recommendation: 'Xác nhận ý gạch chân là Đúng (và các ý còn lại là Sai) hoặc sửa lại ở Bước 2.',
+          });
+        } else if (typeof st.isTrue !== 'boolean') {
           issues.push({
             id: `tf-bool-${q.id}-${st.id}`,
             severity: 'error',
@@ -1350,6 +1612,8 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
             questionId: q.id,
             questionNumber: qNum,
             code: q.code,
+            ...locMeta,
+            optionOrStatementLabel: `${st.originalLabel})`,
             message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) chưa gán giá trị Đúng hoặc Sai.`,
             recommendation: 'Chọn Đúng hoặc Sai cho từng ý.',
           });
@@ -1450,7 +1714,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       }
     } else if (q.type === 'short-answer') {
       const val = q.shortAnswer?.answerValue?.trim() ?? '';
-      if (!val) {
+      if (val.length === 0) {
         issues.push({
           id: `sa-empty-${q.id}`,
           severity: 'error',
@@ -1459,8 +1723,9 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           questionId: q.id,
           questionNumber: qNum,
           code: q.code,
+          ...locMeta,
           message: `Câu ${qNum} (${q.code}) dạng Trả lời ngắn chưa có đáp án số chính xác.`,
-          recommendation: 'Nhập đáp án gốc cố định (VD: 12,5 hoặc -3/2).',
+          recommendation: 'Nhập đáp án gốc cố định (VD: 0, -4,3 hoặc π - 8/3).',
         });
       }
     }
@@ -1468,15 +1733,17 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
     if (q.type === 'essay') {
       const parts = q.essayParts ?? [];
       if (parts.length === 0 && !q.solutionGuide.rawSource.trim()) {
+        const blockEssay = exam.requireEssayAnswerOnExport === true;
         issues.push({
           id: `essay-guide-${q.id}`,
-          severity: 'warning',
-          tier: 'WARNING',
+          severity: blockEssay ? 'error' : 'warning',
+          tier: blockEssay ? 'BLOCKED' : 'WARNING',
           scope: 'question',
           questionId: q.id,
           questionNumber: qNum,
           code: q.code,
-          message: `Câu ${qNum} (${q.code}) Tự luận chưa có hướng dẫn chấm hoặc ý con.`,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}) Tự luận chưa có hướng dẫn chấm hoặc ĐS.`,
           recommendation: 'Bổ sung hướng dẫn chấm để tạo bảng đáp án đầy đủ.',
         });
       }
@@ -1522,6 +1789,47 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         });
       }
     });
+  });
+
+  // Phát hiện trùng lặp nội dung giữa các câu hỏi khác ID (tránh nhân bản câu từ phần lời giải/nhập trùng)
+  const dupGroups = detectDuplicateQuestionGroups(exam.questions);
+  dupGroups.forEach((grp, gIdx) => {
+    issues.push({
+      id: `exam-dup-content-${gIdx}-${grp.signature.slice(0, 8)}`,
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'question',
+      questionId: grp.questionIds[1],
+      code: grp.questionCodes.join(', '),
+      message: `Phát hiện ${grp.questionIds.length} câu hỏi có nội dung trùng lặp (${grp.questionCodes.join(', ')}): "${grp.stemPreview}..."`,
+      recommendation: 'Xóa câu hỏi bị lặp (thường do nhập nhầm vùng lời giải hoặc nhập trùng 2 lần) trước khi trộn đề.',
+    });
+  });
+
+  // Kiểm tra số câu khai báo theo từng phần so với số câu thực tế đọc được
+  (exam.sectionCountAudits ?? []).forEach((audit, aIdx) => {
+    if (audit.declaredCount === undefined) return;
+    if (audit.actualCount > audit.declaredCount) {
+      issues.push({
+        id: `sec-count-overflow-${aIdx}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'exam',
+        sectionTitle: audit.sectionTitle,
+        message: `${audit.sectionTitle}: Khai báo ${audit.declaredCount} câu nhưng đọc được ${audit.actualCount} câu (nghi ngờ lọt câu từ vùng lời giải/phụ lục).`,
+        recommendation: 'Kiểm tra và xóa câu thừa trước khi trộn/xuất đề.',
+      });
+    } else if (audit.actualCount < audit.declaredCount) {
+      issues.push({
+        id: `sec-count-underflow-${aIdx}`,
+        severity: 'warning',
+        tier: 'WARNING',
+        scope: 'exam',
+        sectionTitle: audit.sectionTitle,
+        message: `${audit.sectionTitle}: Khai báo ${audit.declaredCount} câu nhưng mới đọc được ${audit.actualCount} câu.`,
+        recommendation: 'Đối chiếu với tệp đề gốc để chắc chắn không bị sót câu.',
+      });
+    }
   });
 
   // Kiểm tra các quy tắc khóa & mâu thuẫn khóa
@@ -1607,11 +1915,133 @@ function buildIntegrityCategories(
   ];
 }
 
+export function buildIntegrityPillars(
+  issues: MathIntegrityIssue[],
+  exam: MathExamProject,
+  postExportStatus?: { status: MathIntegrityStatus; detail: string; blockingCount: number; warningCount: number }
+): IntegrityPillarReport[] {
+  const summarize = (
+    pillar: IntegrityPillarReport['pillar'],
+    label: string,
+    predicate: (i: MathIntegrityIssue) => boolean,
+    passDetail: string
+  ): IntegrityPillarReport => {
+    const matched = issues.filter(predicate);
+    const blockingCount = matched.filter((i) => i.severity === 'error').length;
+    const warningCount = matched.filter((i) => i.severity === 'warning').length;
+    const status: MathIntegrityStatus =
+      blockingCount > 0 ? 'BLOCKED' : warningCount > 0 ? 'WARNING' : 'PASS';
+    return {
+      pillar,
+      label,
+      status,
+      blockingCount,
+      warningCount,
+      detail:
+        blockingCount > 0
+          ? `${blockingCount} lỗi chặn cần xử lý (${matched.find((i) => i.severity === 'error')?.message ?? ''}).`
+          : warningCount > 0
+          ? `${warningCount} cảnh báo cần rà soát.`
+          : passDetail,
+    };
+  };
+
+  const isEmptyContentIssue = (i: MathIntegrityIssue) =>
+    i.id.startsWith('empty-opt-') ||
+    i.id.startsWith('empty-stmt-') ||
+    i.id.startsWith('empty-stem-') ||
+    i.id.startsWith('q-empty-');
+
+  const displayPillar = summarize(
+    'displayContent',
+    '1. Hiển thị đề & công thức/hình',
+    (i) =>
+      i.scope === 'latex' ||
+      i.scope === 'asset' ||
+      i.scope === 'layout' ||
+      isEmptyContentIssue(i),
+    `Tất cả công thức, phương án, hình ảnh & tài nguyên (${exam.questions.length} câu) hiển thị hợp lệ, không có mục trống hay placeholder lỗi.`
+  );
+
+  const keyPillar = summarize(
+    'keyProvenance',
+    '2. Nguồn gốc khóa & xác nhận đáp án',
+    (i) =>
+      !isEmptyContentIssue(i) &&
+      (i.scope === 'option' ||
+        i.scope === 'statement' ||
+        i.id === 'exam-unconfirmed-answers' ||
+        i.id.startsWith('sa-empty-') ||
+        i.id.startsWith('q-prov-') ||
+        i.id.startsWith('q-legacy-anomaly-')),
+    'Toàn bộ khóa đáp án có bằng chứng từ nguồn hoặc đã được giáo viên xác nhận.'
+  );
+
+  const permutationPillar = summarize(
+    'permutationMapping',
+    '3. Cấu trúc, khóa trộn & ánh xạ hoán vị',
+    (i) =>
+      !isEmptyContentIssue(i) &&
+      (i.scope === 'lock' ||
+        i.scope === 'group' ||
+        i.scope === 'matrix' ||
+        (i.scope === 'exam' && i.id !== 'exam-unconfirmed-answers') ||
+        (i.scope === 'question' && !i.id.startsWith('sa-empty-') && !i.id.startsWith('q-legacy-anomaly-'))),
+    'Cấu trúc đề, ID duy nhất, không trùng nội dung và mọi quy tắc khóa/hoán vị hợp lệ.'
+  );
+
+  const upstreamBlockedCount =
+    displayPillar.blockingCount + keyPillar.blockingCount + permutationPillar.blockingCount;
+
+  const exportIssues = issues.filter((i) => i.scope === 'export');
+  const exportPillar: IntegrityPillarReport = postExportStatus
+    ? {
+        pillar: 'postExportVerification',
+        label: '4. Kiểm chứng đọc lại bản xuất',
+        status: postExportStatus.status,
+        blockingCount: postExportStatus.blockingCount,
+        warningCount: postExportStatus.warningCount,
+        detail: postExportStatus.detail,
+      }
+    : exportIssues.length > 0
+    ? summarize(
+        'postExportVerification',
+        '4. Kiểm chứng đọc lại bản xuất',
+        (i) => i.scope === 'export',
+        'Bản xuất DOCX/CSV/ZIP đã qua kiểm chứng đọc ngược.'
+      )
+    : upstreamBlockedCount > 0
+    ? {
+        pillar: 'postExportVerification',
+        label: '4. Kiểm chứng đọc lại bản xuất',
+        status: 'BLOCKED',
+        blockingCount: upstreamBlockedCount,
+        warningCount: 0,
+        detail: `Đang khóa cổng xuất do còn ${upstreamBlockedCount} lỗi chặn ở các trụ cột trên.`,
+      }
+    : {
+        pillar: 'postExportVerification',
+        label: '4. Kiểm chứng đọc lại bản xuất',
+        status: 'PASS',
+        blockingCount: 0,
+        warningCount: 0,
+        detail: 'Sẵn sàng tự động đọc lại DOCX/CSV/ZIP và xác minh không rò rỉ đáp án ngay khi xuất.',
+      };
+
+  return [displayPillar, keyPillar, permutationPillar, exportPillar];
+}
+
 export function computeLockStats(exam: MathExamProject): MathIntegrityReport['stats'] {
   const lockedIds = new Set(exam.mixConfig.lockedQuestionIds);
   let lockedQuestions = 0;
   let lockedOptions = 0;
   let visualAssetsCount = 0;
+  let unresolvedFormulaCount = 0;
+  let wmfPreviewCount = 0;
+  let missingKeyCount = 0;
+  let needsReviewKeyCount = 0;
+  let conflictKeyCount = 0;
+  let legacyAnomalyCount = 0;
 
   exam.questions.forEach((q) => {
     const isQLocked =
@@ -1625,6 +2055,23 @@ export function computeLockStats(exam: MathExamProject): MathIntegrityReport['st
       lockedOptions += q.options.filter((o) => Boolean(o.lockPosition)).length;
     }
     visualAssetsCount += q.visualAssets?.length ?? 0;
+    visualAssetsCount += (q.options ?? []).filter((o) => Boolean(o.visualAsset)).length;
+
+    if (
+      q.formulaStatus?.displayable === false ||
+      (q.formulaStatus?.unresolvedCount ?? 0) > 0 ||
+      q.stem.rawSource.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+      q.stem.rawSource.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+    ) {
+      unresolvedFormulaCount += Math.max(1, q.formulaStatus?.unresolvedCount ?? 0);
+    }
+    if (q.formulaStatus?.wmfPreviewCount) {
+      wmfPreviewCount += q.formulaStatus.wmfPreviewCount;
+    }
+    if (q.answerProvenance?.status === 'missing') missingKeyCount += 1;
+    if (q.answerProvenance?.status === 'needs-review') needsReviewKeyCount += 1;
+    if (q.answerProvenance?.status === 'conflict') conflictKeyCount += 1;
+    if (q.legacyAnomalyReasons && q.legacyAnomalyReasons.length > 0) legacyAnomalyCount += 1;
   });
 
   const groups = exam.questionGroups ?? [];
@@ -1633,12 +2080,21 @@ export function computeLockStats(exam: MathExamProject): MathIntegrityReport['st
     visualAssetsCount += g.sharedAssets.length;
   });
 
+  const duplicateGroupCount = detectDuplicateQuestionGroups(exam.questions).length;
+
   return {
     totalQuestions: exam.questions.length,
     lockedQuestions,
     lockedOptions,
     lockedGroups,
     visualAssetsCount,
+    unresolvedFormulaCount,
+    wmfPreviewCount,
+    missingKeyCount,
+    needsReviewKeyCount,
+    conflictKeyCount,
+    duplicateGroupCount,
+    legacyAnomalyCount,
   };
 }
 
@@ -1648,6 +2104,7 @@ export function computeLockStats(exam: MathExamProject): MathIntegrityReport['st
 export function evaluatePreMixIntegrity(exam: MathExamProject): MathIntegrityReport {
   const issues = auditOriginalExamIntegrity(exam);
   const stats = computeLockStats(exam);
+  const duplicateGroups = detectDuplicateQuestionGroups(exam.questions);
   const hasError = issues.some((i) => i.severity === 'error');
   const hasWarning = issues.some((i) => i.severity === 'warning');
   const status: MathIntegrityStatus = hasError
@@ -1662,6 +2119,9 @@ export function evaluatePreMixIntegrity(exam: MathExamProject): MathIntegrityRep
     canExport: !hasError,
     limitationNotice: MATH_SAFETY_LIMITATION_NOTICE,
     categories: buildIntegrityCategories(issues, exam.questions.length, stats.visualAssetsCount),
+    pillars: buildIntegrityPillars(issues, exam),
+    duplicateGroups: duplicateGroups.length > 0 ? duplicateGroups : undefined,
+    sectionCountAudits: exam.sectionCountAudits,
     issues,
     stats,
   };
@@ -2404,6 +2864,7 @@ export function verifyMixedExamIntegrity(
     canExport: !hasError,
     limitationNotice: MATH_SAFETY_LIMITATION_NOTICE,
     categories: buildIntegrityCategories(issues, mixed.questions.length, stats.visualAssetsCount),
+    pillars: buildIntegrityPillars(issues, originalExam),
     issues,
     stats,
   };
@@ -2417,13 +2878,18 @@ export function verifyMixedExamIntegrity(
 }
 
 /**
- * Cổng kiểm chứng an toàn trước khi xuất bản (Export Gate):
- * Từ chối xuất nếu đề gốc hoặc bất kỳ mã đề nào đang ở trạng thái BLOCKED.
+ * Cổng kiểm chứng an toàn duy nhất trước khi xuất bản (Unified Export Gate):
+ * Từ chối xuất trên MỌI đường xuất (DOCX, CSV, ZIP, JSON, In) nếu:
+ * - Đề gốc còn lỗi BLOCKED (placeholder OLE/OMML, phương án rỗng, thiếu/mâu thuẫn/cần duyệt khóa, trùng câu, legacy corruption)
+ * - Chưa bấm xác nhận đáp án gốc (`confirmedOriginalAnswers !== true`)
+ * - Còn câu hỏi bắt buộc có khóa nhưng chưa xác nhận (`answerConfirmed === false`)
+ * - Chưa có mã đề hoặc bất kỳ mã đề nào đang ở trạng thái BLOCKED.
  */
 export function checkExamExportGate(exam: MathExamProject): {
   canExport: boolean;
   status: MathIntegrityStatus;
   blockingReasons: string[];
+  report: MathIntegrityReport;
 } {
   const pre = evaluatePreMixIntegrity(exam);
   const reasons: string[] = [];
@@ -2432,6 +2898,26 @@ export function checkExamExportGate(exam: MathExamProject): {
     pre.issues
       .filter((i) => i.severity === 'error')
       .forEach((i) => reasons.push(i.message));
+  }
+
+  if (!exam.confirmedOriginalAnswers) {
+    reasons.push('Giáo viên chưa xác nhận đáp án gốc ở Bước 2 (confirmedOriginalAnswers = false).');
+  }
+
+  const unconfirmedNonEssay = exam.questions.filter(
+    (q) =>
+      q.type !== 'essay' &&
+      !q.answerConfirmed &&
+      q.answerProvenance?.status !== 'source-matched' &&
+      q.answerProvenance?.status !== 'teacher-confirmed'
+  );
+  if (unconfirmedNonEssay.length > 0) {
+    reasons.push(
+      `Còn ${unconfirmedNonEssay.length} câu hỏi chưa được xác nhận đáp án gốc (${unconfirmedNonEssay
+        .slice(0, 5)
+        .map((q) => q.code)
+        .join(', ')}).`
+    );
   }
 
   if (exam.generatedVersions.length === 0) {
@@ -2448,5 +2934,6 @@ export function checkExamExportGate(exam: MathExamProject): {
     canExport: reasons.length === 0,
     status: reasons.length > 0 ? 'BLOCKED' : pre.status,
     blockingReasons: Array.from(new Set(reasons)),
+    report: pre,
   };
 }

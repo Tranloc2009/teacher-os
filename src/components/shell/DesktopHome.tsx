@@ -23,6 +23,7 @@ import { AppId } from '../../core/appRegistry';
 import type { CanvasBoard, CanvasNodeRecord } from '../../types/canvas';
 import { LessonPack, ResourceItem, WorkflowRun } from '../../types/lesson';
 import type { MathExamProject } from '../../types/mathExam';
+import type { DashboardNextStepSuggestion } from '../../types/connectedWorkflow';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
 
 interface DesktopHomeProps {
@@ -33,8 +34,13 @@ interface DesktopHomeProps {
   canvasBoards: CanvasBoard[];
   canvasNodes: CanvasNodeRecord[];
   hasActiveUnsavedDraft: boolean;
+  nextStepSuggestions?: DashboardNextStepSuggestion[];
   onCreateNewPack: () => void;
   onOpenApp: (appId: AppId) => void;
+  onExecuteNextStep?: (
+    suggestion: DashboardNextStepSuggestion,
+    useSecondary?: boolean
+  ) => void;
   onOpenToolsHub: () => void;
   onOpenLibrary: () => void;
   onOpenPackInStudio: (pack: LessonPack) => void;
@@ -202,8 +208,10 @@ export function DesktopHome({
   canvasBoards,
   canvasNodes,
   hasActiveUnsavedDraft,
+  nextStepSuggestions = [],
   onCreateNewPack,
   onOpenApp,
+  onExecuteNextStep,
   onOpenToolsHub,
   onOpenLibrary,
   onOpenPackInStudio,
@@ -426,19 +434,19 @@ export function DesktopHome({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <button
             type="button"
-            onClick={onCreateNewPack}
+            onClick={() => onOpenApp('exam-generator')}
             className="aurora-quick-card group flex items-center justify-between gap-3 rounded-2xl p-3.5 text-left focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
             <div className="flex items-center gap-3 min-w-0">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F3F0FF] dark:bg-indigo-950/80 text-[#635BFF] dark:text-indigo-400 border border-[#635BFF]/15">
-                <FileText className="h-[18px] w-[18px]" aria-hidden="true" />
+                <Sparkles className="h-[18px] w-[18px]" aria-hidden="true" />
               </span>
               <div className="min-w-0">
                 <div className="text-[13.5px] font-semibold text-[#172033] dark:text-slate-100 truncate">
-                  Soạn giáo án
+                  Tạo đề kiểm tra
                 </div>
                 <div className="text-xs text-[#64748B] dark:text-slate-400 truncate">
-                  Tạo bài giảng mới
+                  Nhập yêu cầu tiếng Việt
                 </div>
               </div>
             </div>
@@ -498,19 +506,19 @@ export function DesktopHome({
 
           <button
             type="button"
-            onClick={() => onOpenApp('workflow-center')}
+            onClick={() => onOpenApp('grading-studio')}
             className="aurora-quick-card group flex items-center justify-between gap-3 rounded-2xl p-3.5 text-left focus-visible:outline-2 focus-visible:outline-[#635BFF]"
           >
             <div className="flex items-center gap-3 min-w-0">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#ECFEFF] dark:bg-cyan-950/80 text-[#0891B2] dark:text-cyan-400 border border-cyan-500/20">
-                <GitBranch className="h-[18px] w-[18px]" aria-hidden="true" />
+                <Target className="h-[18px] w-[18px]" aria-hidden="true" />
               </span>
               <div className="min-w-0">
                 <div className="text-[13.5px] font-semibold text-[#172033] dark:text-slate-100 truncate">
-                  Tạo workflow
+                  Chấm bài & Bảng điểm
                 </div>
                 <div className="text-xs text-[#64748B] dark:text-slate-400 truncate">
-                  Thiết lập quy trình
+                  Phiếu OMR & tổng hợp
                 </div>
               </div>
             </div>
@@ -521,6 +529,88 @@ export function DesktopHome({
           </button>
         </div>
       </section>
+
+      {/* Row 2.5 — Gợi ý bước tiếp theo từ trạng thái dữ liệu thực (Section 10 — 100% cục bộ) */}
+      {nextStepSuggestions.length > 0 && (
+        <section
+          aria-labelledby="aurora-next-steps-heading"
+          className="space-y-3"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <h2
+              id="aurora-next-steps-heading"
+              className="inline-flex items-center gap-2 text-[15px] font-bold text-[#172033] dark:text-slate-50"
+            >
+              <Target className="h-4 w-4 text-[#635BFF] dark:text-indigo-400" aria-hidden="true" />
+              <span>Gợi ý bước tiếp theo (dựa trên dữ liệu hiện có)</span>
+            </h2>
+            <button
+              type="button"
+              onClick={onCreateNewPack}
+              className="inline-flex items-center gap-1 text-xs font-semibold text-[#5046E5] dark:text-indigo-400 hover:underline whitespace-nowrap"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Soạn giáo án mới</span>
+            </button>
+          </div>
+
+          <div
+            className={`grid grid-cols-1 gap-3 ${
+              nextStepSuggestions.length === 1
+                ? 'md:grid-cols-1'
+                : nextStepSuggestions.length === 2
+                ? 'md:grid-cols-2'
+                : 'lg:grid-cols-3'
+            }`}
+          >
+            {nextStepSuggestions.map((item) => (
+              <div
+                key={item.id}
+                className="aurora-surface-glass rounded-2xl p-4 flex flex-col justify-between gap-3 border border-indigo-200/60 dark:border-indigo-900/50"
+              >
+                <div className="space-y-1.5">
+                  <span className="inline-flex items-center rounded-md bg-[#EEF0FF] dark:bg-indigo-950/70 px-2 py-0.5 text-[11px] font-semibold text-[#4338CA] dark:text-indigo-300">
+                    {item.badgeText}
+                  </span>
+                  <h3 className="text-sm font-bold text-[#172033] dark:text-slate-100 leading-snug">
+                    {item.title}
+                  </h3>
+                  <p className="text-xs text-[#64748B] dark:text-slate-400 leading-relaxed">
+                    {item.description}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onExecuteNextStep
+                        ? onExecuteNextStep(item, false)
+                        : onOpenApp(item.targetApp)
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#635BFF] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#5248f0] transition-colors"
+                  >
+                    <span>{item.primaryActionLabel}</span>
+                    <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                  {item.secondaryActionLabel && item.secondaryTargetApp && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onExecuteNextStep
+                          ? onExecuteNextStep(item, true)
+                          : onOpenApp(item.secondaryTargetApp!)
+                      }
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-300"
+                    >
+                      <span>{item.secondaryActionLabel}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Row 3 — Các ứng dụng của TeacherOS (2x2 Premium Aurora Bento Grid) */}
       <section aria-labelledby="aurora-apps-heading" className="space-y-3">

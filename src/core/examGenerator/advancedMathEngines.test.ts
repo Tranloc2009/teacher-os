@@ -353,9 +353,9 @@ test('22. Polynomial Normalization: parseSimplePolynomial recognizes equivalent 
 // INTEGRATION, SEED REPRODUCIBILITY, MIXER, GRADING & DOCX (23 - 34)
 // ---------------------------------------------------------------------------
 
-test('23 & 24. All 7 Level 1 + 3 Level 2 families pass and are 100% seed-reproducible', () => {
+test('23 & 24. All Level 1 + Level 2 + Level 3 families (16 total) pass and are 100% seed-reproducible', () => {
   const allFamilyIds = Object.keys(VERIFIED_TEMPLATE_FAMILIES);
-  assert.equal(allFamilyIds.length, 10);
+  assert.equal(allFamilyIds.length, 16);
 
   for (const tpl of DEMO_GENERATOR_TEMPLATES) {
     const r1 = generateVerifiedVariant({ template: tpl, seed: 'REPRO-SEED-2026', variantIndex: 3 });

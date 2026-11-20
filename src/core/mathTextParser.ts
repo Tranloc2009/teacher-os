@@ -101,20 +101,20 @@ export function parseLatexExamText(
         return bodyWithoutAns.slice(m.contentStart, endIdx).trim();
       });
 
-      const correctIndex = declaredCorrect ? MCQ_LABELS.indexOf(declaredCorrect) : 0;
-      const resolvedCorrectIdx = correctIndex >= 0 ? correctIndex : 0;
+      const correctIndex = declaredCorrect ? MCQ_LABELS.indexOf(declaredCorrect) : -1;
+      const hasValidDeclared = correctIndex >= 0;
 
       const options: McqOption[] = optionTexts.map((txt, oIdx) => ({
         id: `${qId}-opt-${oIdx + 1}`,
         originalLabel: MCQ_LABELS[oIdx],
         content: parseMathContent(txt, `${qId}-o${oIdx + 1}`),
-        isCorrect: oIdx === resolvedCorrectIdx,
+        isCorrect: hasValidDeclared ? oIdx === correctIndex : false,
       }));
 
       const depFlags = detectDependentOptions(options);
-      if (!declaredCorrect) {
+      if (!hasValidDeclared) {
         warnings.push(
-          `Câu nhập #${idx + 1} (${code}) chưa ghi "Đáp án: A/B/C/D" — tạm gán A và yêu cầu giáo viên xác nhận ở Bước 2.`
+          `Câu nhập #${idx + 1} (${code}) chưa có dòng "Đáp án: A/B/C/D" — hệ thống giữ trạng thái THIẾU ĐÁP ÁN (không tự gán A). Giáo viên cần chọn và xác nhận đáp án ở Bước 2.`
         );
       }
 
@@ -129,14 +129,25 @@ export function parseLatexExamText(
         points: 0.25,
         stem: parseMathContent(stemText, `${qId}-stem`),
         options,
-        correctOptionId: options[resolvedCorrectIdx].id,
+        correctOptionId: hasValidDeclared ? options[correctIndex].id : undefined,
         solutionGuide: parseMathContent('', `${qId}-sol`),
         lockQuestionPosition: false,
         lockOptionShuffle: depFlags.length > 0,
         allowStatementShuffle: false,
         dependencyFlags: depFlags,
         hasVisualAsset: false,
-        answerConfirmed: Boolean(declaredCorrect),
+        answerConfirmed: hasValidDeclared,
+        answerProvenance: hasValidDeclared
+          ? {
+              status: 'source-matched',
+              sourceKind: 'inline-key',
+              rawEvidence: `Đáp án: ${declaredCorrect}`,
+              note: `Khóa lấy từ dòng "Đáp án: ${declaredCorrect}" trong văn bản dán.`,
+            }
+          : {
+              status: 'missing',
+              note: 'Không có dòng Đáp án trong văn bản dán; cần giáo viên chọn đáp án đúng.',
+            },
         createdAt: now,
         updatedAt: now,
       });
@@ -167,6 +178,10 @@ export function parseLatexExamText(
         dependencyFlags: [],
         hasVisualAsset: false,
         answerConfirmed: false,
+        answerProvenance: {
+          status: 'missing',
+          note: 'Chưa có đáp án Trả lời ngắn; cần giáo viên nhập và xác nhận.',
+        },
         createdAt: now,
         updatedAt: now,
       });

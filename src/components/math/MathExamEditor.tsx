@@ -34,6 +34,7 @@ import {
   MCQ_LABELS,
   TF_LABELS,
   computeLockStats,
+  computeQuestionVerificationContentHash,
   createMathVisualAsset,
   detectDependentOptions,
   detectDependentStatements,
@@ -208,13 +209,71 @@ export function MathExamEditor({
   const errorIssues = integrityIssues.filter((i) => i.severity === 'error');
 
   const updateQuestion = (qId: string, updater: (q: MathQuestion) => MathQuestion) => {
-    const nextQuestions = exam.questions.map((q) => (q.id === qId ? updater(q) : q));
+    const nextQuestions = exam.questions.map((q) => {
+      if (q.id !== qId) return q;
+      const beforeHash = computeQuestionVerificationContentHash(q);
+      const updated = updater(q);
+      const afterHash = computeQuestionVerificationContentHash(updated);
+      if (
+        beforeHash !== afterHash &&
+        updated.answerProvenance?.status === 'teacher-confirmed'
+      ) {
+        return {
+          ...updated,
+          answerConfirmed: false,
+          answerProvenance: {
+            ...updated.answerProvenance,
+            status: 'needs-review',
+            confirmedContentHash: undefined,
+            confirmedAt: undefined,
+            note: 'Nội dung hoặc đáp án vừa được chỉnh sửa sau lần xác nhận trước — cần giáo viên xác nhận lại.',
+          },
+        };
+      }
+      return updated;
+    });
     onChangeExam({
       ...exam,
       questions: nextQuestions,
       confirmedOriginalAnswers: false,
       generatedVersions: [],
       updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const handleConfirmSingleQuestionCandidate = (q: MathQuestion) => {
+    const now = new Date().toISOString();
+    const promoted: MathQuestion = {
+      ...q,
+      legacyAnomalyReasons: undefined,
+      statements:
+        q.type === 'true-false' && q.statements
+          ? q.statements.map((st) => ({
+              ...st,
+              isTrue: st.underlinedInSource ? true : Boolean(st.isTrue),
+              answerState: 'confirmed',
+            }))
+          : q.statements,
+      answerConfirmed: true,
+      updatedAt: now,
+    };
+    const contentHash = computeQuestionVerificationContentHash(promoted);
+    promoted.answerProvenance = {
+      status: 'teacher-confirmed',
+      sourceKind: 'teacher-manual',
+      rawEvidence: q.answerProvenance?.rawEvidence,
+      confirmedAt: now,
+      confirmedContentHash: contentHash,
+      note: 'Giáo viên đã rà soát và xác nhận khóa đáp án.',
+    };
+
+    const nextQuestions = exam.questions.map((item) => (item.id === q.id ? promoted : item));
+    onChangeExam({
+      ...exam,
+      questions: nextQuestions,
+      confirmedOriginalAnswers: false,
+      generatedVersions: [],
+      updatedAt: now,
     });
   };
 
@@ -889,12 +948,40 @@ export function MathExamEditor({
                 type="button"
                 data-tour-id="math-confirm-answers"
                 disabled={errorIssues.length > 0}
-                onClick={() =>
+                onClick={() => {
+                  const nextConfirmed = !exam.confirmedOriginalAnswers;
+                  const now = new Date().toISOString();
+                  const nextQuestions = nextConfirmed
+                    ? exam.questions.map((q) => {
+                        const contentHash = computeQuestionVerificationContentHash(q);
+                        return {
+                          ...q,
+                          answerConfirmed: true,
+                          answerProvenance:
+                            q.answerProvenance?.status === 'source-matched'
+                              ? {
+                                  ...q.answerProvenance,
+                                  confirmedAt: now,
+                                  confirmedContentHash: contentHash,
+                                }
+                              : {
+                                  status: 'teacher-confirmed' as const,
+                                  sourceKind: q.answerProvenance?.sourceKind ?? 'teacher-manual',
+                                  rawEvidence: q.answerProvenance?.rawEvidence,
+                                  confirmedAt: now,
+                                  confirmedContentHash: contentHash,
+                                  note: 'Giáo viên đã xác nhận toàn bộ đáp án gốc ở Bước 2.',
+                                },
+                        };
+                      })
+                    : exam.questions;
                   onChangeExam({
                     ...exam,
-                    confirmedOriginalAnswers: !exam.confirmedOriginalAnswers,
-                  })
-                }
+                    questions: nextQuestions,
+                    confirmedOriginalAnswers: nextConfirmed,
+                    updatedAt: now,
+                  });
+                }}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
                   errorIssues.length > 0
                     ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
@@ -961,6 +1048,7 @@ export function MathExamEditor({
                   <th className="px-4 py-2.5 font-semibold w-36">Dạng câu</th>
                   <th className="px-4 py-2.5 font-semibold">Nội dung tóm tắt (KaTeX)</th>
                   <th className="px-4 py-2.5 font-semibold w-44">Đáp án gốc</th>
+                  <th className="px-4 py-2.5 font-semibold w-48">Nguồn khóa &amp; Công thức</th>
                   <th className="px-4 py-2.5 font-semibold w-44">Ràng buộc trộn</th>
                 </tr>
               </thead>
@@ -974,10 +1062,16 @@ export function MathExamEditor({
                           .filter(Boolean)
                           .join(', ') || '?'
                       : q.type === 'mcq'
-                      ? q.options?.find((o) => o.id === q.correctOptionId)?.originalLabel ?? '?'
+                      ? q.options?.find((o) => o.id === q.correctOptionId)?.originalLabel ?? 'Thiếu khóa'
                       : q.type === 'true-false'
                       ? (q.statements ?? [])
-                          .map((s) => `${s.originalLabel}:${s.isTrue ? 'Đ' : 'S'}`)
+                          .map((s) =>
+                            s.answerState === 'missing'
+                              ? `${s.originalLabel}:?`
+                              : `${s.originalLabel}:${s.isTrue ? 'Đ' : 'S'}${
+                                  s.answerState === 'candidate' ? '*' : ''
+                                }`
+                          )
                           .join(' · ')
                       : uType === 'fill-blank'
                       ? (q.fillBlank?.slots ?? [])
@@ -997,10 +1091,50 @@ export function MathExamEditor({
                           .map((it) => it.originalLabel)
                           .join(' → ') || '?'
                       : q.type === 'short-answer'
-                      ? `${q.shortAnswer?.answerValue || 'Chưa nhập'}${
+                      ? `${q.shortAnswer?.answerValue?.trim() ? q.shortAnswer.answerValue : 'Chưa nhập'}${
                           q.shortAnswer?.unit ? ` ${q.shortAnswer.unit}` : ''
                         }`
                       : `Tự luận (${q.points}đ)`;
+
+                  const provStatus = q.answerProvenance?.status;
+                  const provBadge =
+                    provStatus === 'conflict'
+                      ? {
+                          label: 'Mâu thuẫn',
+                          cls: 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/60 text-red-800 dark:text-red-200',
+                        }
+                      : provStatus === 'missing'
+                      ? {
+                          label: 'Thiếu khóa',
+                          cls: 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/60 text-red-800 dark:text-red-200',
+                        }
+                      : provStatus === 'needs-review'
+                      ? {
+                          label: 'Cần duyệt quy ước',
+                          cls: 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200',
+                        }
+                      : provStatus === 'source-matched'
+                      ? {
+                          label: 'Đối chiếu nguồn',
+                          cls: 'border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/60 text-blue-800 dark:text-blue-200',
+                        }
+                      : provStatus === 'teacher-confirmed' || q.answerConfirmed
+                      ? {
+                          label: 'Giáo viên xác nhận',
+                          cls: 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200',
+                        }
+                      : {
+                          label: 'Chưa xác nhận',
+                          cls: 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
+                        };
+
+                  const canOneClickConfirm =
+                    provStatus === 'needs-review' &&
+                    ((q.type === 'mcq' && Boolean(q.correctOptionId)) ||
+                      (q.type === 'true-false' &&
+                        (q.statements?.length ?? 0) === 4 &&
+                        q.statements!.some((s) => s.answerState === 'candidate' || s.underlinedInSource)) ||
+                      (q.type === 'short-answer' && Boolean(q.shortAnswer?.answerValue?.trim())));
 
                   return (
                     <tr key={q.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
@@ -1018,6 +1152,52 @@ export function MathExamEditor({
                       </td>
                       <td className="px-4 py-2.5 font-mono-num font-semibold text-blue-900 dark:text-blue-300">
                         {ansText}
+                      </td>
+                      <td className="px-4 py-2.5 space-y-1">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span
+                            className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap ${provBadge.cls}`}
+                          >
+                            {provBadge.label}
+                          </span>
+                          {q.formulaStatus && !q.formulaStatus.displayable && (
+                            <span className="inline-flex items-center rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/60 px-1.5 py-0.5 text-[10px] font-mono-num font-semibold text-red-800 dark:text-red-200">
+                              OLE chưa giải mã
+                            </span>
+                          )}
+                          {q.formulaStatus &&
+                            q.formulaStatus.displayable &&
+                            !q.formulaStatus.machineReadable && (
+                              <span className="inline-flex items-center rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 px-1.5 py-0.5 text-[10px] font-mono-num font-semibold text-amber-900 dark:text-amber-200">
+                                WMF→SVG
+                              </span>
+                            )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {canOneClickConfirm && (
+                            <button
+                              type="button"
+                              onClick={() => handleConfirmSingleQuestionCandidate(q)}
+                              className="rounded border border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 whitespace-nowrap"
+                            >
+                              Xác nhận ứng viên
+                            </button>
+                          )}
+                          {(provStatus === 'missing' ||
+                            provStatus === 'conflict' ||
+                            provStatus === 'needs-review') && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedQuestionId(q.id);
+                                onGoToStep(1);
+                              }}
+                              className="rounded border border-slate-300 dark:border-slate-700 px-2 py-0.5 text-[10px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+                            >
+                              Sửa khóa
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-2.5 text-[11px] text-slate-600 dark:text-slate-400 space-y-0.5">
                         {q.lockQuestionPosition && <div>Khóa vị trí câu</div>}

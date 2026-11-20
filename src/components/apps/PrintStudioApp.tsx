@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -10,7 +10,9 @@ import {
   FileSpreadsheet,
   FileText,
   HelpCircle,
+  Layers,
   Printer,
+  ScanLine,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -19,6 +21,13 @@ import {
   MarginPreset,
   PrintSettings,
 } from '../../types/lesson';
+import type { ExamExportSettings, MathExamProject } from '../../types/mathExam';
+import type { ExamFormTemplate } from '../../types/examForm';
+import { BUILT_IN_EXAM_FORM_PRESETS } from '../../core/examFormEngine';
+import {
+  buildStudentExamDocxBuffer,
+} from '../../core/examExportEngine';
+import { checkExamExportGate } from '../../core/mathIntegrity';
 import {
   allocateThreeWorksheets,
   calculateActivityMinutes,
@@ -27,31 +36,80 @@ import {
 import { ContextualAcademyBar } from '../tutorial/ContextualAcademyBar';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
 import { Step5PrintPreview } from '../wizard/Step5PrintPreview';
+import { MathExamPrintPreview } from '../math/MathExamPrintPreview';
+import { ExamFormDesigner } from '../examForm/ExamFormDesigner';
 import { Button, PageBanner } from '../ui/DesignSystem';
 
 interface PrintStudioAppProps {
   packs: LessonPack[];
   selectedPack: LessonPack;
   settings: PrintSettings;
+  mathExams?: MathExamProject[];
+  examFormTemplates?: ExamFormTemplate[];
+  preferredExamId?: string | null;
+  preferredFormId?: string | null;
+  preferredFormLabel?: string | null;
   onSelectPackId: (id: string) => void;
   onMarkCompleted: (pack: LessonPack) => void;
   onOpenSettings: () => void;
   onOpenInLessonStudio: (pack: LessonPack) => void;
   onQuickUpdateSettings?: (next: PrintSettings) => Promise<void>;
+  onSaveMathExam?: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
+  onSaveExamFormTemplates?: (templates: ExamFormTemplate[]) => void;
+  onExamFormApplied?: (examId: string, template: ExamFormTemplate) => void;
+  onOpenExamMixer?: (examId: string) => void;
+  onOpenGradingStudio?: (examId: string) => void;
+  onOpenAzotaBridge?: (examId: string) => void;
+  onExamPrinted?: (examId: string, formLabel?: string, formId?: string) => void;
+  onNotify?: (type: 'success' | 'info' | 'warning' | 'error', message: string) => void;
 }
 
 type ExportFormatId = 'pdf' | 'docx' | 'png';
+type PrintStudioSourceMode = 'lesson-pack' | 'math-exam';
+type ExamPrintSubMode = 'form-designer' | 'matrix-preview';
 
 export function PrintStudioApp({
   packs,
   selectedPack,
   settings,
+  mathExams = [],
+  examFormTemplates,
+  preferredExamId,
+  preferredFormId,
+  preferredFormLabel,
   onSelectPackId,
   onMarkCompleted,
   onOpenSettings,
   onOpenInLessonStudio,
   onQuickUpdateSettings,
+  onSaveMathExam,
+  onSaveExamFormTemplates,
+  onExamFormApplied,
+  onOpenExamMixer,
+  onOpenGradingStudio,
+  onOpenAzotaBridge,
+  onExamPrinted,
+  onNotify,
 }: PrintStudioAppProps) {
+  const [sourceMode, setSourceMode] = useState<PrintStudioSourceMode>(
+    preferredExamId ? 'math-exam' : 'lesson-pack'
+  );
+  const [examSubMode, setExamSubMode] = useState<ExamPrintSubMode>('form-designer');
+  const [localTemplates, setLocalTemplates] = useState<ExamFormTemplate[]>(
+    () => examFormTemplates ?? structuredClone(BUILT_IN_EXAM_FORM_PRESETS)
+  );
+  const [selectedExamId, setSelectedExamId] = useState<string>(
+    preferredExamId || mathExams[0]?.id || ''
+  );
+  const [selectedExamCode, setSelectedExamCode] = useState<string>('');
+  const [downloadingExamDocx, setDownloadingExamDocx] = useState(false);
+
+  const effectiveTemplates = examFormTemplates ?? localTemplates;
+  const handleTemplatesChange = (next: ExamFormTemplate[]) => {
+    setLocalTemplates(next);
+    onSaveExamFormTemplates?.(next);
+  };
+
   const [showInspector, setShowInspector] = useState(true);
   const [previewPage, setPreviewPage] = useState(1);
   const [zoomPercent, setZoomPercent] = useState<85 | 100 | 115>(100);
@@ -59,6 +117,61 @@ export function PrintStudioApp({
   const [showPageNumbers, setShowPageNumbers] = useState(true);
   const [exportFormat, setExportFormat] = useState<ExportFormatId>('pdf');
   const tutorial = useOptionalTutorial();
+
+  useEffect(() => {
+    if (preferredExamId && mathExams.some((e) => e.id === preferredExamId)) {
+      setSelectedExamId(preferredExamId);
+      setSourceMode('math-exam');
+    }
+  }, [preferredExamId, mathExams]);
+
+  const activeExam = useMemo(
+    () => mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0] ?? null,
+    [mathExams, selectedExamId]
+  );
+
+  useEffect(() => {
+    if (!activeExam) {
+      setSelectedExamCode('');
+      return;
+    }
+    const firstCode = activeExam.generatedVersions[0]?.code ?? '';
+    setSelectedExamCode((prev) =>
+      activeExam.generatedVersions.some((v) => v.code === prev) ? prev : firstCode
+    );
+  }, [activeExam]);
+
+  const examExportGate = useMemo(
+    () => (activeExam ? checkExamExportGate(activeExam) : null),
+    [activeExam]
+  );
+
+  const handleUpdateExamExportSettings = (next: ExamExportSettings) => {
+    if (!activeExam || !onSaveMathExam) return;
+    void onSaveMathExam({ ...activeExam, exportSettings: next }, true);
+  };
+
+  const handleExportExamDocx = async () => {
+    if (!activeExam || !selectedExamCode) return;
+    const version = activeExam.generatedVersions.find((v) => v.code === selectedExamCode);
+    if (!version) return;
+    setDownloadingExamDocx(true);
+    try {
+      const buf = await buildStudentExamDocxBuffer(activeExam, version);
+      const blob = new Blob([buf.slice().buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `De_${activeExam.grade.replace(/\s+/g, '')}_Ma${version.code}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      onExamPrinted?.(activeExam.id, preferredFormLabel ?? 'DOCX A4');
+    } finally {
+      setDownloadingExamDocx(false);
+    }
+  };
 
   useEffect(() => {
     if (
@@ -165,6 +278,41 @@ export function PrintStudioApp({
           icon={<Printer className="h-5 w-5" aria-hidden="true" />}
           actions={
             <div className="flex flex-wrap items-center gap-2">
+              {mathExams.length > 0 && (
+                <div
+                  role="tablist"
+                  aria-label="Nguồn tài liệu in"
+                  className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 p-0.5 text-xs font-semibold"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sourceMode === 'lesson-pack'}
+                    onClick={() => setSourceMode('lesson-pack')}
+                    className={`rounded-lg px-3 py-1.5 transition-colors ${
+                      sourceMode === 'lesson-pack'
+                        ? 'bg-white dark:bg-slate-900 text-[#4338CA] dark:text-indigo-300 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Bộ tiết dạy
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sourceMode === 'math-exam'}
+                    onClick={() => setSourceMode('math-exam')}
+                    className={`rounded-lg px-3 py-1.5 transition-colors ${
+                      sourceMode === 'math-exam'
+                        ? 'bg-[#635BFF] text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Đề kiểm tra ({mathExams.length})
+                  </button>
+                </div>
+              )}
+
               {tutorial && (
                 <Button
                   variant="secondary"
@@ -179,33 +327,201 @@ export function PrintStudioApp({
                   <span>Hướng dẫn</span>
                 </Button>
               )}
-              <Button
-                variant="secondary"
-                size="sm"
-                data-tour-id="ps-inspector-toggle"
-                onClick={() => {
-                  setShowInspector((prev) => !prev);
-                  tutorial?.emitTutorialEvent('print-inspector-or-margin-used');
-                }}
-              >
-                <span className="font-mono-num">
-                  Kiểm tra trước khi in ({passedCount}/{preflightChecks.length})
-                </span>
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => onOpenInLessonStudio(selectedPack)}
-              >
-                <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Chỉnh sửa bài dạy</span>
-              </Button>
+              {sourceMode === 'lesson-pack' && (
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    data-tour-id="ps-inspector-toggle"
+                    onClick={() => {
+                      setShowInspector((prev) => !prev);
+                      tutorial?.emitTutorialEvent('print-inspector-or-margin-used');
+                    }}
+                  >
+                    <span className="font-mono-num">
+                      Kiểm tra trước khi in ({passedCount}/{preflightChecks.length})
+                    </span>
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onOpenInLessonStudio(selectedPack)}
+                  >
+                    <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Chỉnh sửa bài dạy</span>
+                  </Button>
+                </>
+              )}
             </div>
           }
         />
       </div>
 
-      {/* 2-Column Print Studio 4.1 Workspace */}
+      {/* Connected Exam Print Mode (Exam Mixer Pro -> Exam Form Designer -> Print Studio -> Smart Grading Studio) */}
+      {sourceMode === 'math-exam' && activeExam ? (
+        <div className="space-y-4">
+          <div className="no-print rounded-2xl border border-indigo-200/80 dark:border-indigo-900 bg-white/95 dark:bg-slate-900/90 p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-xs">
+            <div className="flex flex-wrap items-center gap-2.5 min-w-0 w-full sm:w-auto">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#EEF0FF] dark:bg-indigo-950 text-[#635BFF] dark:text-indigo-300">
+                <Layers className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <select
+                aria-label="Chọn đề kiểm tra để in A4"
+                value={activeExam.id}
+                onChange={(e) => setSelectedExamId(e.target.value)}
+                className="w-full sm:w-auto max-w-full sm:max-w-md min-w-0 flex-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs sm:text-sm font-semibold text-slate-900 dark:text-slate-100 truncate"
+              >
+                {mathExams.map((ex) => (
+                  <option key={ex.id} value={ex.id}>
+                    {ex.title} ({ex.generatedVersions.length} mã đề)
+                  </option>
+                ))}
+              </select>
+              <div
+                role="tablist"
+                aria-label="Chế độ xem đề kiểm tra trong Print Studio"
+                className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-0.5 text-xs"
+              >
+                <button
+                  role="tab"
+                  aria-selected={examSubMode === 'form-designer'}
+                  type="button"
+                  onClick={() => setExamSubMode('form-designer')}
+                  className={`rounded-lg px-2.5 py-1 font-semibold transition-colors ${
+                    examSubMode === 'form-designer'
+                      ? 'bg-[#635BFF] text-white'
+                      : 'text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  Thiết kế mẫu đề
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={examSubMode === 'matrix-preview'}
+                  type="button"
+                  onClick={() => setExamSubMode('matrix-preview')}
+                  className={`rounded-lg px-2.5 py-1 font-semibold transition-colors ${
+                    examSubMode === 'matrix-preview'
+                      ? 'bg-[#635BFF] text-white'
+                      : 'text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  Xem nhanh & Ma trận
+                </button>
+              </div>
+            </div>
+
+            {examSubMode === 'matrix-preview' && (
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedExamCode && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={downloadingExamDocx || !examExportGate?.canExport}
+                    onClick={() => void handleExportExamDocx()}
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {downloadingExamDocx
+                        ? 'Đang tạo DOCX...'
+                        : `Tải Mã ${selectedExamCode} (.DOCX)`}
+                    </span>
+                  </Button>
+                )}
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={activeExam.generatedVersions.length === 0}
+                  onClick={() => {
+                    if (activeExam.generatedVersions.length === 0) return;
+                    onExamPrinted?.(activeExam.id, preferredFormLabel ?? 'In A4 PDF');
+                    window.print();
+                  }}
+                >
+                  <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>In / Lưu PDF A4</span>
+                </Button>
+                {onOpenExamMixer && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onOpenExamMixer(activeExam.id)}
+                  >
+                    <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Quay lại Exam Mixer</span>
+                  </Button>
+                )}
+                {onOpenGradingStudio && activeExam.generatedVersions.length > 0 && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onOpenGradingStudio(activeExam.id)}
+                  >
+                    <ScanLine className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Tạo phiếu OMR & Chấm bài</span>
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {examSubMode === 'form-designer' ? (
+            <ExamFormDesigner
+              exam={activeExam}
+              templates={effectiveTemplates}
+              preferredFormId={preferredFormId}
+              preferredFormLabel={preferredFormLabel}
+              selectedExamCode={selectedExamCode}
+              onSelectExamCode={setSelectedExamCode}
+              onChangeTemplates={handleTemplatesChange}
+              onApplyFormToExam={(examId, tpl, legacySettings) => {
+                if (activeExam && activeExam.id === examId && onSaveMathExam) {
+                  void onSaveMathExam({ ...activeExam, exportSettings: legacySettings }, true);
+                }
+                onExamFormApplied?.(examId, tpl);
+              }}
+              onExamPrinted={onExamPrinted}
+              onOpenExamMixer={onOpenExamMixer}
+              onOpenGradingStudio={onOpenGradingStudio}
+              onOpenAzotaBridge={onOpenAzotaBridge}
+              onNotify={onNotify}
+            />
+          ) : activeExam.generatedVersions.length === 0 ? (
+            <div className="rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50/80 dark:bg-amber-950/40 p-6 text-center space-y-3">
+              <AlertTriangle className="h-7 w-7 text-amber-600 mx-auto" aria-hidden="true" />
+              <h3 className="text-sm font-bold text-amber-950 dark:text-amber-200">
+                Đề "{activeExam.title}" chưa tạo mã đề nào để in A4
+              </h3>
+              <p className="text-xs text-amber-900 dark:text-amber-300 max-w-lg mx-auto">
+                Hãy quay lại Exam Mixer Pro để kiểm tra đáp án gốc và tạo ít nhất 1 mã đề trước khi in hoặc xuất DOCX.
+              </p>
+              {onOpenExamMixer && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => onOpenExamMixer(activeExam.id)}
+                >
+                  <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Mở Exam Mixer để tạo mã đề</span>
+                </Button>
+              )}
+            </div>
+          ) : (
+            <MathExamPrintPreview
+              exam={activeExam}
+              selectedCode={selectedExamCode || activeExam.generatedVersions[0].code}
+              canExport={Boolean(examExportGate?.canExport)}
+              onSelectCode={setSelectedExamCode}
+              onChangeExportSettings={handleUpdateExamExportSettings}
+              onTriggerPrint={() => {
+                onExamPrinted?.(activeExam.id, preferredFormLabel ?? 'In A4 PDF');
+                window.print();
+              }}
+            />
+          )}
+        </div>
+      ) : (
+      /* 2-Column Print Studio 4.1 Workspace (Lesson Pack Mode) */
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start print:block">
         {/* Left Column: Document Toolbar + A4 Sheet Canvas */}
         <div className="lg:col-span-8 space-y-4 print:w-full">
@@ -549,6 +865,7 @@ export function PrintStudioApp({
           )}
         </aside>
       </div>
+      )}
     </main>
   );
 }

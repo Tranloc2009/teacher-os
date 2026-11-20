@@ -423,10 +423,10 @@ test('3. Unsafe legacy OLE/WMF DOCX surfaces transparent WARNING and tampered as
   };
 
   const preMix = evaluatePreMixIntegrity(project);
-  assert.equal(preMix.status, 'WARNING', 'Legacy OLE/WMF phải được cảnh báo minh bạch');
+  assert.equal(preMix.status, 'BLOCKED', 'Legacy OLE/WMF chưa giải mã bắt buộc phải bị BLOCKED theo chuẩn P0');
   assert.ok(
-    preMix.issues.some((i) => i.id.startsWith('q-legacy-eq-')),
-    'Phải phát hiện lỗi q-legacy-eq-* cho MathType OLE cũ'
+    preMix.issues.some((i) => i.id.startsWith('q-legacy-eq-') && i.tier === 'BLOCKED'),
+    'Phải phát hiện lỗi BLOCKED q-legacy-eq-* cho MathType OLE cũ chưa giải mã'
   );
 
   // Tampered checksum tài nguyên bắt buộc phải BLOCKED và chặn trộn

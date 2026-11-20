@@ -22,6 +22,9 @@ import {
 import { extractDocxDocument } from './ooxmlParser';
 import { getSubjectProfile, getUniversalQuestionType, resolveSubjectId } from './subjectProfileRegistry';
 import { convertSvgToPngDataUrl } from './examGenerator/dynamicSvgGraphEngine';
+import { verifyDynamicGraphBinding } from './examGenerator/level3GraphTemplates';
+import type { ExamFormTemplate } from '../types/examForm';
+import { buildStudentInfoLine } from './examFormEngine';
 
 export const DEFAULT_EXAM_EXPORT_SETTINGS: ExamExportSettings = {
   departmentName: 'SỞ GIÁO DỤC VÀ ĐÀO TẠO',
@@ -356,17 +359,34 @@ function renderStudentQuestionXml(
   qNumber: number,
   bodyChunks: string[],
   mediaList: EmbeddedMediaEntry[],
-  fontFamily: string
+  fontFamily: string,
+  formOptions?: {
+    numberPrefix?: string;
+    showPoints?: boolean;
+    optionLabelStyle?: 'dot' | 'paren';
+    sizeHalfPt?: number;
+    questionSpacingBefore?: number;
+  }
 ): void {
   const uType = getUniversalQuestionType(q);
   const stemText = formatContentPayloadForText(q.stem);
+  const prefix = formOptions?.numberPrefix?.trim() || 'Câu';
+  const sz = formOptions?.sizeHalfPt ?? 24;
+  const optPunct = formOptions?.optionLabelStyle === 'paren' ? ')' : '.';
+  const pointsSuffix =
+    formOptions?.showPoints && typeof q.points === 'number' && q.points > 0
+      ? ` (${q.points} điểm)`
+      : '';
 
   // Stem line — TUYỆT ĐỐI không in đáp án hay giải thích vào đề học sinh
   bodyChunks.push(
     makeParagraphXml(
-      renderStyledRunsXml(`Câu ${qNumber}: `, { bold: true, fontFamily }) +
-        renderStyledRunsXml(stemText, { fontFamily }),
-      { spacingBefore: 100, spacingAfter: 40 }
+      renderStyledRunsXml(`${prefix} ${qNumber}${pointsSuffix}: `, {
+        bold: true,
+        fontFamily,
+        sizeHalfPt: sz,
+      }) + renderStyledRunsXml(stemText, { fontFamily, sizeHalfPt: sz }),
+      { spacingBefore: formOptions?.questionSpacingBefore ?? 100, spacingAfter: 40 }
     )
   );
 
@@ -381,8 +401,11 @@ function renderStudentQuestionXml(
       const lbl = getOptionLetterLabel(oIdx);
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(`${lbl}. `, { bold: true, fontFamily }) +
-            renderStyledRunsXml(formatContentPayloadForText(opt.content), { fontFamily }),
+          renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+            renderStyledRunsXml(formatContentPayloadForText(opt.content), {
+              fontFamily,
+              sizeHalfPt: sz,
+            }),
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
@@ -392,8 +415,11 @@ function renderStudentQuestionXml(
       const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(`${lbl}. `, { bold: true, fontFamily }) +
-            renderStyledRunsXml(formatContentPayloadForText(opt.content), { fontFamily }),
+          renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+            renderStyledRunsXml(formatContentPayloadForText(opt.content), {
+              fontFamily,
+              sizeHalfPt: sz,
+            }),
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
@@ -465,10 +491,23 @@ async function packageOoxmlDocxBuffer(params: {
   bodyXml: string;
   mediaList: EmbeddedMediaEntry[];
   marginMm: 10 | 15 | 20;
+  marginsMm?: { top: number; right: number; bottom: number; left: number };
+  orientation?: 'portrait' | 'landscape';
   fontFamily: string;
+  fontSizePt?: number;
+  columns?: 1 | 2;
 }): Promise<Uint8Array> {
   const zip = new JSZip();
-  const twipsMargin = Math.round(params.marginMm * 56.7);
+  const topTwips = Math.round((params.marginsMm?.top ?? params.marginMm) * 56.7);
+  const rightTwips = Math.round((params.marginsMm?.right ?? params.marginMm) * 56.7);
+  const bottomTwips = Math.round((params.marginsMm?.bottom ?? params.marginMm) * 56.7);
+  const leftTwips = Math.round((params.marginsMm?.left ?? params.marginMm) * 56.7);
+  const isLandscape = params.orientation === 'landscape';
+  const pgSzXml = isLandscape
+    ? '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+    : '<w:pgSz w:w="11906" w:h="16838"/>';
+  const colsXml = params.columns === 2 ? '<w:cols w:num="2" w:space="420"/>' : '';
+  const defaultHalfPt = Math.round((params.fontSizePt ?? 12) * 2);
 
   const mediaExts = Array.from(new Set(params.mediaList.map((m) => m.ext)));
   const extMimeMap: Record<string, string> = {
@@ -514,8 +553,8 @@ async function packageOoxmlDocxBuffer(params: {
     <w:rPrDefault>
       <w:rPr>
         <w:rFonts w:ascii="${safeFont}" w:hAnsi="${safeFont}" w:cs="${safeFont}"/>
-        <w:sz w:val="24"/>
-        <w:szCs w:val="24"/>
+        <w:sz w:val="${defaultHalfPt}"/>
+        <w:szCs w:val="${defaultHalfPt}"/>
       </w:rPr>
     </w:rPrDefault>
   </w:docDefaults>
@@ -529,8 +568,9 @@ async function packageOoxmlDocxBuffer(params: {
   <w:body>
     ${params.bodyXml}
     <w:sectPr>
-      <w:pgSz w:w="11906" w:h="16838"/>
-      <w:pgMar w:top="${twipsMargin}" w:right="${twipsMargin}" w:bottom="${twipsMargin}" w:left="${twipsMargin}" w:header="708" w:footer="708" w:gutter="0"/>
+      ${pgSzXml}
+      <w:pgMar w:top="${topTwips}" w:right="${rightTwips}" w:bottom="${bottomTwips}" w:left="${leftTwips}" w:header="708" w:footer="708" w:gutter="0"/>
+      ${colsXml}
     </w:sectPr>
   </w:body>
 </w:document>`;
@@ -553,17 +593,53 @@ async function packageOoxmlDocxBuffer(params: {
  */
 export async function buildStudentExamDocxBuffer(
   exam: MathExamProject,
-  version: MixedExamVersion
+  version: MixedExamVersion,
+  formTemplate?: ExamFormTemplate
 ): Promise<Uint8Array> {
   const gate = checkExamExportGate(exam);
   if (!gate.canExport) {
     throw new Error(`Xuất DOCX bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
   }
 
+  for (const q of version.questions) {
+    const graphBinding = verifyDynamicGraphBinding({ question: q });
+    if (!graphBinding.valid) {
+      throw new Error(
+        graphBinding.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA'
+      );
+    }
+  }
+
   const settings = resolveExportSettings(exam);
   const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
-  const examTitle = settings.examTitleOverride.trim() || exam.title;
-  const fontFamily = settings.fontFamily;
+  const examTitle =
+    formTemplate?.headerSettings.examTitle.trim() ||
+    settings.examTitleOverride.trim() ||
+    exam.title;
+  const departmentName =
+    formTemplate?.headerSettings.departmentName.trim() || settings.departmentName;
+  const schoolName =
+    formTemplate?.headerSettings.schoolName.trim() || settings.schoolName;
+  const subjectGroupName = formTemplate?.headerSettings.subjectGroupName.trim() || '';
+  const schoolYear = formTemplate?.headerSettings.schoolYear.trim() || exam.schoolYear;
+  const subjectDisplay =
+    formTemplate?.headerSettings.subjectOverride.trim() || subjectProfile.name;
+  const gradeDisplay = formTemplate?.headerSettings.gradeOverride.trim() || exam.grade;
+  const durationDisplay =
+    formTemplate?.headerSettings.durationOverrideMinutes ?? exam.durationMinutes;
+  const showExamCode = formTemplate ? formTemplate.headerSettings.showExamCode : true;
+  const showQuestionCountSubtitle = formTemplate
+    ? formTemplate.headerSettings.showQuestionCountSubtitle
+    : true;
+  const headerNoteText = formTemplate
+    ? formTemplate.headerSettings.headerNote
+    : settings.headerNote;
+  const fontFamily = formTemplate?.pageSettings.fontFamily || settings.fontFamily;
+  const fontSizePt = formTemplate?.pageSettings.fontSizePt ?? 12;
+  const sizeHalfPt = Math.round(fontSizePt * 2);
+  const questionSpacingBefore = formTemplate
+    ? Math.max(60, Math.round(formTemplate.pageSettings.questionSpacingPx * 9))
+    : 100;
   const bodyChunks: string[] = [];
   const mediaList: EmbeddedMediaEntry[] = [];
 
@@ -611,27 +687,51 @@ export async function buildStudentExamDocxBuffer(
   );
 
   // Banner Header Table (2 cột: Đơn vị + Thông tin đề & Mã đề)
-  const headerTableRows = [
-    [
-      `${settings.departmentName}\n${settings.schoolName}\n(Đề thi gồm ${version.questions.length} câu hỏi)`,
-      `${examTitle.toUpperCase()}\nMôn: ${subjectProfile.name} · ${exam.grade} · Thời gian: ${exam.durationMinutes} phút\nMÃ ĐỀ: ${version.code}`,
-    ],
-  ];
+  const leftLines = [
+    departmentName,
+    schoolName,
+    subjectGroupName || null,
+    showQuestionCountSubtitle ? `(Đề thi gồm ${version.questions.length} câu hỏi)` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const rightLines = [
+    examTitle.toUpperCase(),
+    `Năm học: ${schoolYear} · Môn: ${subjectDisplay} · ${gradeDisplay}`,
+    `Thời gian làm bài: ${durationDisplay} phút`,
+    showExamCode ? `MÃ ĐỀ: ${version.code}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const headerTableRows = [[leftLines, rightLines]];
   bodyChunks.push(makeWordTableXml(headerTableRows, fontFamily, false));
 
-  bodyChunks.push(
-    makeParagraphXml(
-      renderStyledRunsXml('Họ và tên thí sinh: ........................................................   Số báo danh: ........................', {
-        fontFamily,
-        sizeHalfPt: 22,
-      }),
-      { spacingBefore: 100, spacingAfter: 60 }
-    )
-  );
-  if (settings.headerNote.trim()) {
+  const studentInfoLine = formTemplate
+    ? buildStudentInfoLine(formTemplate)
+    : 'Họ và tên thí sinh: ........................................................   Số báo danh: ........................';
+
+  if (studentInfoLine) {
     bodyChunks.push(
       makeParagraphXml(
-        renderStyledRunsXml(settings.headerNote, { italic: true, sizeHalfPt: 20, fontFamily, color: '475569' }),
+        renderStyledRunsXml(studentInfoLine, {
+          fontFamily,
+          sizeHalfPt: Math.max(20, sizeHalfPt - 2),
+        }),
+        { spacingBefore: 100, spacingAfter: 60 }
+      )
+    );
+  }
+  if (headerNoteText.trim()) {
+    bodyChunks.push(
+      makeParagraphXml(
+        renderStyledRunsXml(headerNoteText, {
+          italic: true,
+          sizeHalfPt: Math.max(18, sizeHalfPt - 4),
+          fontFamily,
+          color: '475569',
+        }),
         { spacingBefore: 0, spacingAfter: 80 }
       )
     );
@@ -642,16 +742,33 @@ export async function buildStudentExamDocxBuffer(
   );
   const renderedGroups = new Set<string>();
   let currentSection = '';
+  const showSectionTitles = formTemplate ? formTemplate.bodySettings.showSectionTitles : true;
 
   preparedQuestions.forEach((q, idx) => {
-    if (q.sectionTitle && q.sectionTitle !== currentSection) {
+    if (showSectionTitles && q.sectionTitle && q.sectionTitle !== currentSection) {
       currentSection = q.sectionTitle;
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(currentSection, { bold: true, sizeHalfPt: 24, fontFamily }),
-          { spacingBefore: 140, spacingAfter: 60, keepNext: true }
+          renderStyledRunsXml(currentSection, { bold: true, sizeHalfPt, fontFamily }),
+          { spacingBefore: 140, spacingAfter: 40, keepNext: true }
         )
       );
+      if (
+        formTemplate?.bodySettings.showSectionInstructions &&
+        formTemplate.bodySettings.sectionInstructionsOverride.trim()
+      ) {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(formTemplate.bodySettings.sectionInstructionsOverride.trim(), {
+              italic: true,
+              sizeHalfPt: Math.max(18, sizeHalfPt - 2),
+              fontFamily,
+              color: '475569',
+            }),
+            { spacingBefore: 0, spacingAfter: 60, keepNext: true }
+          )
+        );
+      }
     }
 
     if (q.groupId && !renderedGroups.has(q.groupId) && groupMap.has(q.groupId)) {
@@ -662,7 +779,7 @@ export async function buildStudentExamDocxBuffer(
           renderStyledRunsXml(`[Ngữ liệu nhóm] ${grp.title}`, {
             bold: true,
             italic: true,
-            sizeHalfPt: 22,
+            sizeHalfPt: Math.max(20, sizeHalfPt - 2),
             fontFamily,
             color: '1E3A8A',
           }),
@@ -672,7 +789,10 @@ export async function buildStudentExamDocxBuffer(
       if (grp.sharedContext.rawSource.trim()) {
         bodyChunks.push(
           makeParagraphXml(
-            renderStyledRunsXml(grp.sharedContext.rawSource, { fontFamily, sizeHalfPt: 22 }),
+            renderStyledRunsXml(grp.sharedContext.rawSource, {
+              fontFamily,
+              sizeHalfPt: Math.max(20, sizeHalfPt - 2),
+            }),
             { indentLeft: 180, spacingBefore: 20, spacingAfter: 60 }
           )
         );
@@ -682,19 +802,57 @@ export async function buildStudentExamDocxBuffer(
       }
     }
 
-    renderStudentQuestionXml(q, idx + 1, bodyChunks, mediaList, fontFamily);
+    renderStudentQuestionXml(
+      q,
+      idx + 1,
+      bodyChunks,
+      mediaList,
+      fontFamily,
+      formTemplate
+        ? {
+            numberPrefix: formTemplate.bodySettings.questionNumberPrefix,
+            showPoints: formTemplate.bodySettings.showPointsPerQuestion,
+            optionLabelStyle: formTemplate.bodySettings.optionLabelStyle,
+            sizeHalfPt,
+            questionSpacingBefore,
+          }
+        : undefined
+    );
   });
 
-  bodyChunks.push(
-    makeParagraphXml(
-      renderStyledRunsXml('——— HẾT ———', { bold: true, fontFamily }),
-      { align: 'center', spacingBefore: 160, spacingAfter: 40 }
-    )
-  );
-  if (settings.footerNote.trim()) {
+  const showEndMarker = formTemplate ? formTemplate.footerSettings.showEndMarker : true;
+  const endMarkerText =
+    formTemplate?.footerSettings.endMarkerText.trim() || '——— HẾT ———';
+  if (showEndMarker) {
     bodyChunks.push(
       makeParagraphXml(
-        renderStyledRunsXml(settings.footerNote, { italic: true, sizeHalfPt: 20, fontFamily, color: '64748B' }),
+        renderStyledRunsXml(endMarkerText, { bold: true, fontFamily, sizeHalfPt }),
+        { align: 'center', spacingBefore: 160, spacingAfter: 40 }
+      )
+    );
+  }
+
+  const footerNoteText = formTemplate
+    ? formTemplate.footerSettings.footerNote
+    : settings.footerNote;
+  const footerSummary = [
+    footerNoteText.trim() || null,
+    formTemplate?.footerSettings.showCodeInFooter && showExamCode
+      ? `Mã đề ${version.code}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  if (footerSummary) {
+    bodyChunks.push(
+      makeParagraphXml(
+        renderStyledRunsXml(footerSummary, {
+          italic: true,
+          sizeHalfPt: Math.max(18, sizeHalfPt - 4),
+          fontFamily,
+          color: '64748B',
+        }),
         { align: 'center', spacingBefore: 0, spacingAfter: 40 }
       )
     );
@@ -704,14 +862,28 @@ export async function buildStudentExamDocxBuffer(
     bodyXml: bodyChunks.join('\n'),
     mediaList,
     marginMm: settings.paperMarginMm,
+    marginsMm: formTemplate
+      ? {
+          top: formTemplate.pageSettings.marginTopMm,
+          right: formTemplate.pageSettings.marginRightMm,
+          bottom: formTemplate.pageSettings.marginBottomMm,
+          left: formTemplate.pageSettings.marginLeftMm,
+        }
+      : undefined,
+    orientation: formTemplate?.pageSettings.orientation ?? 'portrait',
     fontFamily,
+    fontSizePt,
+    columns: formTemplate?.pageSettings.columns ?? 1,
   });
 }
 
 /**
  * Tạo file Word (.docx) ĐÁP ÁN TỔNG HỢP & BẢNG ÁNH XẠ HOÁN VỊ cho GIÁO VIÊN.
  */
-export async function buildAnswerKeyDocxBuffer(exam: MathExamProject): Promise<Uint8Array> {
+export async function buildAnswerKeyDocxBuffer(
+  exam: MathExamProject,
+  formTemplate?: ExamFormTemplate
+): Promise<Uint8Array> {
   const gate = checkExamExportGate(exam);
   if (!gate.canExport) {
     throw new Error(`Xuất Đáp án DOCX bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
@@ -719,8 +891,21 @@ export async function buildAnswerKeyDocxBuffer(exam: MathExamProject): Promise<U
 
   const settings = resolveExportSettings(exam);
   const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
-  const examTitle = settings.examTitleOverride.trim() || exam.title;
-  const fontFamily = settings.fontFamily;
+  const examTitle =
+    formTemplate?.headerSettings.examTitle.trim() ||
+    settings.examTitleOverride.trim() ||
+    exam.title;
+  const fontFamily = formTemplate?.pageSettings.fontFamily || settings.fontFamily;
+  const includeMatrix = formTemplate
+    ? formTemplate.answerLayout.includePerCodeAnswerTable
+    : settings.includeAnswerMatrix;
+  const includeDetailMap = formTemplate
+    ? formTemplate.answerLayout.includeSeparateAnswerKey ||
+      formTemplate.answerLayout.includeMappingAuditTable
+    : settings.includeAnswerKey || settings.includeMappingTable;
+  const includeSolutions = formTemplate
+    ? formTemplate.answerLayout.includeDetailedSolutions
+    : false;
   const bodyChunks: string[] = [];
 
   bodyChunks.push(
@@ -743,8 +928,8 @@ export async function buildAnswerKeyDocxBuffer(exam: MathExamProject): Promise<U
     )
   );
 
-  // 1. Bảng đáp án tổng hợp tất cả mã đề (chia cụm 8 mã/bảng để vừa khổ A4)
-  if (settings.includeAnswerMatrix) {
+  // 1. Bảng đáp án tổng hợp tất cả mã đề (chia cụm 6 mã/bảng để vừa khổ A4)
+  if (includeMatrix) {
     bodyChunks.push(
       makeParagraphXml(
         renderStyledRunsXml('I. BẢNG ĐÁP ÁN TỔNG HỢP CÁC MÃ ĐỀ', { bold: true, sizeHalfPt: 24, fontFamily }),
@@ -768,7 +953,7 @@ export async function buildAnswerKeyDocxBuffer(exam: MathExamProject): Promise<U
   }
 
   // 2. Chi tiết ánh xạ từng mã đề
-  if (settings.includeAnswerKey || settings.includeMappingTable) {
+  if (includeDetailMap) {
     bodyChunks.push(
       makeParagraphXml(
         renderStyledRunsXml('II. CHI TIẾT ĐÁP ÁN & ÁNH XẠ HOÁN VỊ TỪNG MÃ ĐỀ', {
@@ -815,18 +1000,69 @@ export async function buildAnswerKeyDocxBuffer(exam: MathExamProject): Promise<U
     });
   }
 
+  // 3. Lời giải & hướng dẫn chấm chi tiết (nếu mẫu yêu cầu)
+  if (includeSolutions) {
+    const withSolution = exam.questions.filter(
+      (q) =>
+        Boolean(q.solutionGuide?.rawSource?.trim()) ||
+        (q.essayParts && q.essayParts.length > 0)
+    );
+    if (withSolution.length > 0) {
+      bodyChunks.push(
+        makeParagraphXml(
+          renderStyledRunsXml('III. LỜI GIẢI & HƯỚNG DẪN CHẤM CHI TIẾT (ĐỀ GỐC)', {
+            bold: true,
+            sizeHalfPt: 24,
+            fontFamily,
+          }),
+          { spacingBefore: 120, spacingAfter: 60 }
+        )
+      );
+      withSolution.forEach((q, idx) => {
+        const solText = q.solutionGuide?.rawSource?.trim()
+          ? q.solutionGuide.rawSource
+          : (q.essayParts ?? []).map((p) => `${p.label} (${p.points}đ): ${p.content.rawSource}`).join(' | ');
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`Câu gốc ${q.code || idx + 1}: `, {
+              bold: true,
+              fontFamily,
+            }) + renderStyledRunsXml(solText, { fontFamily }),
+            { spacingBefore: 40, spacingAfter: 40 }
+          )
+        );
+      });
+    }
+  }
+
   return packageOoxmlDocxBuffer({
     bodyXml: bodyChunks.join('\n'),
     mediaList: [],
     marginMm: settings.paperMarginMm,
+    marginsMm: formTemplate
+      ? {
+          top: formTemplate.pageSettings.marginTopMm,
+          right: formTemplate.pageSettings.marginRightMm,
+          bottom: formTemplate.pageSettings.marginBottomMm,
+          left: formTemplate.pageSettings.marginLeftMm,
+        }
+      : undefined,
+    orientation: formTemplate?.pageSettings.orientation ?? 'portrait',
     fontFamily,
+    fontSizePt: formTemplate?.pageSettings.fontSizePt ?? 12,
   });
 }
 
 /**
  * Tạo bảng đáp án CSV (UTF-8 BOM) tương thích mở trực tiếp trên Excel/Google Sheets.
+ * Bắt buộc đi qua cổng kiểm chứng chung `checkExamExportGate`.
  */
 export function buildConsolidatedAnswerCsv(exam: MathExamProject): string {
+  const gate = checkExamExportGate(exam);
+  if (!gate.canExport) {
+    throw new Error(`Xuất CSV bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
+  }
+
   const versions = exam.generatedVersions;
   const maxQ = Math.max(0, ...versions.map((v) => v.answerKeyRows.length));
   const csvEscape = (cell: string) => `"${cell.replace(/"/g, '""')}"`;
@@ -843,6 +1079,35 @@ export function buildConsolidatedAnswerCsv(exam: MathExamProject): string {
   }
 
   return `\uFEFF${lines.join('\r\n')}`;
+}
+
+/**
+ * Đóng gói dữ liệu JSON đáp án & ánh xạ hoán vị đi qua cùng cổng kiểm chứng chung `checkExamExportGate`.
+ */
+export function buildMixedExamJsonExportPayload(exam: MathExamProject): Record<string, unknown> {
+  const gate = checkExamExportGate(exam);
+  if (!gate.canExport) {
+    throw new Error(`Xuất JSON bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
+  }
+
+  return {
+    exportedAt: new Date().toISOString(),
+    examId: exam.id,
+    examTitle: exam.title,
+    subject: exam.subject,
+    grade: exam.grade,
+    durationMinutes: exam.durationMinutes,
+    seed: exam.mixConfig.seed,
+    integrityReport: gate.report,
+    versions: exam.generatedVersions.map((v) => ({
+      code: v.code,
+      seedUsed: v.seedUsed,
+      integrityPassed: v.integrityPassed,
+      integrityStatus: v.integrityStatus ?? 'PASS',
+      answerKeyRows: v.answerKeyRows,
+      permutationMap: v.permutationMap,
+    })),
+  };
 }
 
 /**
@@ -914,10 +1179,113 @@ export async function verifyExportedDocxBuffer(
           recommendation: 'Chặn xuất file vì thứ tự hoặc nội dung câu hỏi trong file Word lệch với mã đề đã trộn.',
         });
       }
+
+      // Xác minh thứ tự và nội dung phương án MCQ sau khi trộn (A/B/C/D)
+      if (q.type === 'mcq' && q.options && q.options.length === 4) {
+        let optCursor = 0;
+        q.options.forEach((opt, oIdx) => {
+          const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
+          const optText = opt.content.rawSource.replace(/\s+/g, ' ').trim();
+          const labelMatchRegex = new RegExp(`(?:^|\\s)${lbl}[.)]\\s*`);
+          const subSlice = questionSlice.slice(optCursor);
+          const lblMatch = labelMatchRegex.exec(subSlice);
+          if (!lblMatch) {
+            issues.push({
+              id: `exp-opt-missing-${expectedVersion.code}-${q.id}-${lbl}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              questionId: q.id,
+              questionNumber: idx + 1,
+              code: q.code,
+              optionOrStatementLabel: lbl,
+              message: `File DOCX Mã đề ${expectedVersion.code} thiếu phương án ${lbl} ở Câu ${idx + 1} (${q.code}).`,
+              recommendation: 'Kiểm tra lại nội dung phương án trước khi xuất.',
+            });
+            return;
+          }
+          optCursor += lblMatch.index + lblMatch[0].length;
+          const optSnippet = optText.slice(0, Math.min(24, optText.length));
+          if (optSnippet && !questionSlice.slice(optCursor - 2).includes(optSnippet)) {
+            issues.push({
+              id: `exp-opt-order-mismatch-${expectedVersion.code}-${q.id}-${lbl}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              questionId: q.id,
+              questionNumber: idx + 1,
+              code: q.code,
+              optionOrStatementLabel: lbl,
+              message: `File DOCX Mã đề ${expectedVersion.code} sai nội dung/thứ tự phương án ${lbl} ở Câu ${idx + 1} (${q.code}).`,
+              recommendation: 'Chặn xuất vì phương án hiển thị trong DOCX không khớp thứ tự hoán vị.',
+            });
+          }
+        });
+      }
+
+      // Xác minh đủ 4 mệnh đề Đúng/Sai a)/b)/c)/d)
+      if (q.type === 'true-false' && q.statements && q.statements.length === 4) {
+        let stCursor = 0;
+        q.statements.forEach((st, sIdx) => {
+          const lbl = TF_LABELS[sIdx] ?? getStatementLetterLabel(sIdx);
+          const stText = st.content.rawSource.replace(/\s+/g, ' ').trim();
+          const stMatch = new RegExp(`(?:^|\\s)${lbl}\\)\\s*`).exec(questionSlice.slice(stCursor));
+          if (!stMatch) {
+            issues.push({
+              id: `exp-st-missing-${expectedVersion.code}-${q.id}-${lbl}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              questionId: q.id,
+              questionNumber: idx + 1,
+              code: q.code,
+              optionOrStatementLabel: `${lbl})`,
+              message: `File DOCX Mã đề ${expectedVersion.code} thiếu mệnh đề ${lbl}) ở Câu ${idx + 1} (${q.code}).`,
+              recommendation: 'Kiểm tra lại danh sách mệnh đề Đúng/Sai.',
+            });
+            return;
+          }
+          stCursor += stMatch.index + stMatch[0].length;
+          const stSnippet = stText.slice(0, Math.min(24, stText.length));
+          if (stSnippet && !questionSlice.slice(stCursor - 2).includes(stSnippet)) {
+            issues.push({
+              id: `exp-st-mismatch-${expectedVersion.code}-${q.id}-${lbl}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              questionId: q.id,
+              questionNumber: idx + 1,
+              code: q.code,
+              optionOrStatementLabel: `${lbl})`,
+              message: `File DOCX Mã đề ${expectedVersion.code} sai nội dung mệnh đề ${lbl}) ở Câu ${idx + 1} (${q.code}).`,
+              recommendation: 'Chặn xuất vì mệnh đề Đúng/Sai trong file DOCX không khớp bản trộn.',
+            });
+          }
+        });
+      }
     });
 
+    // Kiểm tra KHÔNG còn placeholder công thức OLE/OMML chưa giải mã trong file xuất ra
+    if (
+      fullText.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+      fullText.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+    ) {
+      issues.push({
+        id: `exp-unresolved-formula-${expectedVersion.code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: `File DOCX học sinh Mã đề ${expectedVersion.code} còn chứa placeholder công thức chưa giải mã ([CÔNG_THỨC_OLE_LEGACY] / [CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]).`,
+        recommendation: 'Chặn phát hành và xử lý toàn bộ công thức trước khi xuất.',
+      });
+    }
+
     // Kiểm tra không rò rỉ nhãn đáp án vào đề học sinh
-    if (/(?:Đáp án đúng:|Đáp án gốc:|Hướng dẫn chấm:|Bảng ánh xạ hoán vị)/i.test(fullText)) {
+    if (
+      /(?:Đáp án đúng:|Đáp án gốc:|Hướng dẫn chấm:|Bảng ánh xạ hoán vị|BẢNG ĐÁP ÁN TỔNG HỢP|ĐÁP ÁN & BẢNG ÁNH XẠ)/i.test(
+        fullText
+      )
+    ) {
       issues.push({
         id: `exp-answer-leak-${expectedVersion.code}`,
         severity: 'error',
@@ -968,6 +1336,209 @@ export async function verifyExportedDocxBuffer(
     passed: issues.every((i) => i.severity !== 'error'),
     issues,
     extractedParagraphCount,
+  };
+}
+
+/**
+ * Đọc lại file Đáp án DOCX (`dap-an/Dap_an_va_Anh_xa.docx`) để xác minh:
+ * - Mở giải nén sạch bằng OOXML parser
+ * - Không chứa placeholder công thức chưa giải mã hoặc chuỗi lỗi 666/6666
+ * - Có đủ toàn bộ mã đề và giá trị đáp án khớp với `answerKeyRows`.
+ */
+export async function verifyExportedAnswerKeyDocxBuffer(
+  buffer: ArrayBuffer | Uint8Array,
+  exam: MathExamProject
+): Promise<{ passed: boolean; issues: MathIntegrityIssue[] }> {
+  const issues: MathIntegrityIssue[] = [];
+  try {
+    const extracted = await extractDocxDocument(buffer);
+    const fullText = extracted.plainTextWithMarkers;
+
+    if (
+      fullText.includes('[CÔNG_THỨC_OLE_LEGACY]') ||
+      fullText.includes('[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]')
+    ) {
+      issues.push({
+        id: 'exp-ans-docx-placeholder',
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: 'File Đáp án DOCX còn chứa placeholder công thức chưa giải mã.',
+        recommendation: 'Xử lý triệt để công thức trước khi xuất.',
+      });
+    }
+
+    for (const ver of exam.generatedVersions) {
+      if (!fullText.includes(`Mã ${ver.code}`) && !fullText.includes(`Mã đề ${ver.code}`)) {
+        issues.push({
+          id: `exp-ans-docx-missing-code-${ver.code}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: `File Đáp án DOCX bị thiếu mục cho Mã đề ${ver.code}.`,
+          recommendation: 'Xuất lại file đáp án.',
+        });
+      }
+      for (const row of ver.answerKeyRows) {
+        if (row.type === 'true-false' && /\b6{3,}\b/.test(row.answer)) {
+          issues.push({
+            id: `exp-ans-docx-tf-666-${ver.code}-${row.number}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'export',
+            questionId: row.questionId,
+            questionNumber: row.number,
+            message: `Phát hiện chuỗi lỗi 666/6666 trong đáp án Đúng/Sai Câu ${row.number} Mã ${ver.code}.`,
+            recommendation: 'Chặn phát hành và sửa khóa câu Đúng/Sai.',
+          });
+        }
+        if (row.answer && row.answer !== '?' && !fullText.includes(row.answer)) {
+          issues.push({
+            id: `exp-ans-docx-missing-row-${ver.code}-${row.number}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'export',
+            questionId: row.questionId,
+            questionNumber: row.number,
+            message: `File Đáp án DOCX không tìm thấy giá trị đáp án "${row.answer}" của Câu ${row.number} Mã ${ver.code}.`,
+            recommendation: 'Kiểm tra lại bảng đáp án tổng hợp.',
+          });
+        }
+      }
+    }
+  } catch (err) {
+    issues.push({
+      id: 'exp-ans-docx-invalid',
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: `File Đáp án DOCX không đọc lại được sau khi tạo: ${
+        err instanceof Error ? err.message : 'Lỗi không xác định'
+      }`,
+      recommendation: 'Không phát hành file lỗi.',
+    });
+  }
+
+  return {
+    passed: issues.every((i) => i.severity !== 'error'),
+    issues,
+  };
+}
+
+function parseCsvRows(csvText: string): string[][] {
+  const cleaned = csvText.replace(/^\uFEFF/, '');
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inQuotes) {
+      if (ch === '"' && cleaned[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\r') {
+      continue;
+    } else if (ch === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.length > 0));
+}
+
+/**
+ * Đọc lại tệp CSV đáp án tổng hợp và đối chiếu từng ô `(Câu, Mã đề)` với `answerKeyRows`.
+ */
+export function verifyExportedCsv(
+  csvText: string,
+  exam: MathExamProject
+): { passed: boolean; issues: MathIntegrityIssue[] } {
+  const issues: MathIntegrityIssue[] = [];
+  const rows = parseCsvRows(csvText);
+  const versions = exam.generatedVersions;
+  const maxQ = Math.max(0, ...versions.map((v) => v.answerKeyRows.length));
+
+  if (rows.length !== maxQ + 1) {
+    issues.push({
+      id: 'exp-csv-row-count',
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: `CSV đáp án tổng hợp có ${rows.length} dòng nhưng mong đợi ${maxQ + 1} dòng (1 tiêu đề + ${maxQ} câu).`,
+      recommendation: 'Kiểm tra lại bộ xuất CSV.',
+    });
+    return { passed: false, issues };
+  }
+
+  const expectedHeader = ['Câu', ...versions.map((v) => `Mã ${v.code}`)];
+  const actualHeader = rows[0];
+  if (
+    actualHeader.length !== expectedHeader.length ||
+    expectedHeader.some((h, idx) => actualHeader[idx] !== h)
+  ) {
+    issues.push({
+      id: 'exp-csv-header-mismatch',
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: `Tiêu đề cột CSV không khớp danh sách mã đề (${actualHeader.join(', ')}).`,
+      recommendation: 'Xuất lại CSV đáp án.',
+    });
+  }
+
+  for (let qIdx = 0; qIdx < maxQ; qIdx++) {
+    const csvRow = rows[qIdx + 1];
+    versions.forEach((ver, vIdx) => {
+      const expectedAns = ver.answerKeyRows[qIdx]?.answer ?? '';
+      const actualAns = csvRow[vIdx + 1] ?? '';
+      if (actualAns !== expectedAns) {
+        issues.push({
+          id: `exp-csv-cell-mismatch-${ver.code}-${qIdx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: qIdx + 1,
+          message: `Ô CSV Câu ${qIdx + 1} Mã ${ver.code} bị lệch: đọc "${actualAns}", mong đợi "${expectedAns}".`,
+          recommendation: 'Chặn xuất vì bảng đáp án CSV bị sai lệch so với mã đề đã trộn.',
+        });
+      }
+      if (ver.answerKeyRows[qIdx]?.type === 'true-false' && /\b6{3,}\b/.test(actualAns)) {
+        issues.push({
+          id: `exp-csv-tf-666-${ver.code}-${qIdx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: qIdx + 1,
+          message: `Ô CSV Câu ${qIdx + 1} Mã ${ver.code} chứa chuỗi lỗi 666/6666 ở câu Đúng/Sai.`,
+          recommendation: 'Chặn xuất và kiểm tra khóa câu Đúng/Sai.',
+        });
+      }
+    });
+  }
+
+  return {
+    passed: issues.every((i) => i.severity !== 'error'),
+    issues,
   };
 }
 
@@ -1100,9 +1671,12 @@ export async function verifyExportedZipBundle(
   const loaded = await JSZip.loadAsync(zipBytes);
   const allPaths = Object.keys(loaded.files);
 
+  const answerDocxEntry = loaded.file('dap-an/Dap_an_va_Anh_xa.docx');
+  const csvEntry = loaded.file('dap-an/Bang_dap_an_tong_hop.csv');
+  const mappingJsonEntry = loaded.file('dap-an/Bang_anh_xa_hoan_vi.json');
   const hasManifest = Boolean(loaded.file('manifest.json'));
-  const hasAnswerDocx = Boolean(loaded.file('dap-an/Dap_an_va_Anh_xa.docx'));
-  const hasCsv = Boolean(loaded.file('dap-an/Bang_dap_an_tong_hop.csv'));
+  const hasAnswerDocx = Boolean(answerDocxEntry);
+  const hasCsv = Boolean(csvEntry);
   const hasIntegrityJson = Boolean(loaded.file('kiem-chung/Bao_cao_toan_ven.json'));
 
   if (!hasManifest || !hasAnswerDocx || !hasCsv || !hasIntegrityJson) {
@@ -1137,6 +1711,50 @@ export async function verifyExportedZipBundle(
     }
   }
 
+  let answerDocxPassed = false;
+  if (answerDocxEntry) {
+    const ansBytes = await answerDocxEntry.async('uint8array');
+    const ansVerify = await verifyExportedAnswerKeyDocxBuffer(ansBytes, exam);
+    answerDocxPassed = ansVerify.passed;
+    issues.push(...ansVerify.issues);
+  }
+
+  let csvPassed = false;
+  if (csvEntry) {
+    const csvText = await csvEntry.async('string');
+    const csvVerify = verifyExportedCsv(csvText, exam);
+    csvPassed = csvVerify.passed;
+    issues.push(...csvVerify.issues);
+  }
+
+  if (mappingJsonEntry) {
+    try {
+      const parsedMap = JSON.parse(await mappingJsonEntry.async('string')) as Array<{
+        code: string;
+        answerKeyRows?: Array<{ answer: string }>;
+      }>;
+      if (!Array.isArray(parsedMap) || parsedMap.length !== exam.generatedVersions.length) {
+        issues.push({
+          id: 'zip-mapping-json-count',
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: 'Tệp Bang_anh_xa_hoan_vi.json không khớp số lượng mã đề.',
+          recommendation: 'Thực hiện xuất lại gói ZIP.',
+        });
+      }
+    } catch {
+      issues.push({
+        id: 'zip-mapping-json-invalid',
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: 'Tệp Bang_anh_xa_hoan_vi.json không đọc lại được (JSON lỗi).',
+        recommendation: 'Thực hiện xuất lại gói ZIP.',
+      });
+    }
+  }
+
   const hasError = issues.some((i) => i.severity === 'error');
   const hasWarn = issues.some((i) => i.severity === 'warning');
 
@@ -1156,9 +1774,25 @@ export async function verifyExportedZipBundle(
       },
       {
         id: 'zip-student-docx',
-        label: 'Kiểm chứng ngược OOXML từng mã đề',
+        label: 'Kiểm chứng ngược OOXML từng đề học sinh',
         passed: verifiedCodes.length === exam.generatedVersions.length && !hasError,
-        detail: `${verifiedCodes.length}/${exam.generatedVersions.length} mã đề mở đọc lại hợp lệ, không rò rỉ đáp án.`,
+        detail: `${verifiedCodes.length}/${exam.generatedVersions.length} mã đề mở đọc lại hợp lệ, đúng thứ tự câu/phương án, không rò rỉ đáp án, không còn placeholder OLE.`,
+      },
+      {
+        id: 'zip-answer-docx',
+        label: 'Kiểm chứng ngược Đáp án DOCX giáo viên',
+        passed: answerDocxPassed,
+        detail: answerDocxPassed
+          ? `Khớp toàn bộ ${exam.generatedVersions.length} mã đề và bảng đáp án trong Dap_an_va_Anh_xa.docx.`
+          : 'Phát hiện sai lệch trong tệp đáp án DOCX.',
+      },
+      {
+        id: 'zip-answer-csv',
+        label: 'Kiểm chứng từng ô bảng đáp án CSV',
+        passed: csvPassed,
+        detail: csvPassed
+          ? 'Từng ô (Câu × Mã đề) trong CSV khớp 100% với bảng ánh xạ hoán vị.'
+          : 'Phát hiện lệch ô đáp án trong CSV.',
       },
     ],
     issues,

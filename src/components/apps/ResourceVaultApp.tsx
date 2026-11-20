@@ -17,6 +17,7 @@ import {
   Trash2,
   Upload,
   UploadCloud,
+  Wand2,
 } from 'lucide-react';
 import { ContextualAcademyBar } from '../tutorial/ContextualAcademyBar';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
@@ -52,6 +53,7 @@ interface ResourceVaultAppProps {
   onInsertIntoActivePack: (resource: ResourceItem) => Promise<void>;
   onOpenActivePackInStudio: () => void;
   onOpenWorkflowCenter?: () => void;
+  onCreateExamFromResource?: (resourceId: string) => void;
   onShowToast?: (tone: 'success' | 'info' | 'error', text: string) => void;
 }
 
@@ -73,6 +75,7 @@ export function ResourceVaultApp({
   onDeleteResource,
   onInsertIntoActivePack,
   onOpenActivePackInStudio,
+  onCreateExamFromResource,
   onShowToast,
 }: ResourceVaultAppProps) {
   const [query, setQuery] = useState('');
@@ -862,15 +865,27 @@ export function ResourceVaultApp({
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        data-tour-id={idx === 0 ? 'rv-insert-btn' : undefined}
-                        onClick={() => void onInsertIntoActivePack(item)}
-                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-blue-100 dark:border-blue-900/60 bg-blue-50/80 dark:bg-blue-950/50 px-4 py-2.5 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 dark:hover:text-white transition-colors"
-                      >
-                        <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Chèn vào bài dạy</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          data-tour-id={idx === 0 ? 'rv-insert-btn' : undefined}
+                          onClick={() => void onInsertIntoActivePack(item)}
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-blue-100 dark:border-blue-900/60 bg-blue-50/80 dark:bg-blue-950/50 px-3 py-2.5 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 dark:hover:text-white transition-colors"
+                        >
+                          <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Chèn vào bài dạy</span>
+                        </button>
+                        {onCreateExamFromResource && (
+                          <button
+                            type="button"
+                            onClick={() => onCreateExamFromResource(item.id)}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50/80 dark:bg-indigo-950/50 px-3 py-2.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-[#635BFF] hover:text-white transition-colors"
+                          >
+                            <Wand2 className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Tạo đề từ tài liệu</span>
+                          </button>
+                        )}
+                      </div>
                     </article>
                   );
                 })}

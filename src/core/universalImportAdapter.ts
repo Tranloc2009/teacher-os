@@ -450,7 +450,12 @@ export async function runUniversalImportSession(
       fileName: input.fileName,
       assets: extracted.assets,
       ommlFragments: extracted.ommlFragments,
+      docxParagraphs: extracted.paragraphs,
+      sourceFileHash: extracted.sourceFileHash,
       legacyOleCount: extracted.legacyOleCount,
+      legacyOleDecodedLatexCount: extracted.legacyOleDecodedLatexCount,
+      legacyOleWmfPreviewCount: extracted.legacyOleWmfPreviewCount,
+      unresolvedOleCount: extracted.unresolvedOleCount,
       unsupportedMediaCount: extracted.unsupportedMediaCount,
       preWarnings: extracted.warnings,
     });
@@ -467,10 +472,10 @@ export async function runUniversalImportSession(
       assets: extracted.assets,
       warnings: parsed.report.warnings,
       technicalDetails: [
-        `OOXML Word: ${extracted.ommlFragments.length} OMML · ${extracted.assets.length} ảnh/bảng · ${extracted.legacyOleCount ?? 0} MathType OLE cũ`,
+        `OOXML Word: ${extracted.ommlFragments.length} OMML · ${extracted.assets.length} ảnh/bảng · OLE giải mã LaTeX: ${extracted.legacyOleDecodedLatexCount ?? 0} · OLE WMF→SVG: ${extracted.legacyOleWmfPreviewCount ?? 0} · OLE chưa giải mã: ${extracted.unresolvedOleCount ?? 0}`,
       ],
       ommlCount: extracted.ommlFragments.length,
-      legacyOleCount: extracted.legacyOleCount,
+      legacyOleCount: extracted.unresolvedOleCount ?? 0,
       unsupportedMediaCount: extracted.unsupportedMediaCount,
       suggestedSubjectOverride: parsed.report.suggestedSubject,
     });

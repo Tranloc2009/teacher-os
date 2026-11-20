@@ -27,6 +27,7 @@ import {
   canExportOfficialAnswerKey,
   convertDraftToMathExamProject,
   generateExamsFromBlueprint,
+  verifyDraftDynamicGraphBindings,
 } from './examBuilderEngine';
 import {
   DEMO_GENERATOR_BANK,
@@ -836,5 +837,86 @@ describe('Phase 3 — Dynamic Math & Graph Engine (30 Mandatory Tests)', () => {
       dispatched.fingerprint,
       computeFunctionFingerprint({ family: 'quadratic', a: 1, b: -4, c: 3 })
     );
+  });
+
+  it('Test 31: Stale graph fingerprint blocks BOTH draft student export gate AND direct DOCX builder (BLOCK EXPORT — STALE GRAPH DATA)', async () => {
+    const v = generateVerifiedVariant({
+      template: getPhase3Template('cubic-extrema'),
+      seed: 'STALE-DOCX-31',
+      variantIndex: 1,
+    }).variant!;
+
+    const draft = makeDraftFromVariants('draft-stale-docx-31', 'Stale DOCX Guard', 'STALE-DOCX-31', [v]);
+    assert.equal(verifyDraftDynamicGraphBindings(draft).valid, true);
+
+    // Tamper SVG fingerprint on question visualAsset
+    const tamperedDraft = structuredClone(draft);
+    tamperedDraft.items[0].question.visualAssets![0].sourceData =
+      tamperedDraft.items[0].question.visualAssets![0].sourceData.replace(
+        v.graphFingerprint!,
+        'STALE-FP-DOCX-31'
+      );
+
+    const draftGuard = verifyDraftDynamicGraphBindings(tamperedDraft);
+    assert.equal(draftGuard.valid, false);
+    assert.ok(draftGuard.reason?.includes(BLOCK_EXPORT_STALE_GRAPH_MSG));
+
+    // Also ensure buildStudentExamDocxBuffer rejects tampered SVG fingerprint directly
+    const project = convertDraftToMathExamProject(draft);
+    const mixed = generateMixedExams(project);
+    const projectWithVersions = { ...project, generatedVersions: mixed.versions };
+    const tamperedVersion = structuredClone(mixed.versions[0]);
+    tamperedVersion.questions[0].visualAssets![0].sourceData =
+      tamperedVersion.questions[0].visualAssets![0].sourceData.replace(
+        v.graphFingerprint!,
+        'STALE-FP-MIXED-31'
+      );
+
+    await assert.rejects(
+      () => buildStudentExamDocxBuffer(projectWithVersions, tamperedVersion),
+      (err: unknown) =>
+        err instanceof Error && err.message.includes(BLOCK_EXPORT_STALE_GRAPH_MSG)
+    );
+  });
+
+  it('Test 32: All Template Builder Level 3 GraphQuestionSubModes & graphFunctionFamily presets generate valid synchronized variants', () => {
+    const quadTpl = getPhase3Template('quadratic-graph');
+    for (const mode of [
+      'monotonicity-increasing',
+      'monotonicity-decreasing',
+      'extrema-points',
+      'extrema-value',
+      'read-graph',
+      'choose-variation-table',
+      'choose-graph',
+    ] as const) {
+      const tpl = { ...structuredClone(quadTpl), familyConfig: { graphQuestionMode: mode } };
+      const out = generateVerifiedVariant({ template: tpl, seed: `QUAD-MODE-${mode}`, variantIndex: 1 });
+      assert.equal(out.ok, true, `Quadratic mode ${mode} failed: ${out.blockingReasons.join('; ')}`);
+    }
+
+    const cubicTpl = getPhase3Template('cubic-monotonicity');
+    for (const policy of ['two-extrema', 'double-root', 'no-extrema'] as const) {
+      const tpl = {
+        ...structuredClone(cubicTpl),
+        familyConfig: { graphQuestionMode: 'monotonicity-increasing' as const, cubicCasePolicy: policy },
+      };
+      const out = generateVerifiedVariant({ template: tpl, seed: `CUBIC-POL-${policy}`, variantIndex: 1 });
+      assert.equal(out.ok, true, `Cubic policy ${policy} failed: ${out.blockingReasons.join('; ')}`);
+      assert.equal(out.variant!.functionAnalysis?.cubicCase, policy);
+    }
+
+    const ratTpl = getPhase3Template('rational-asymptotes');
+    for (const mode of [
+      'asymptotes',
+      'monotonicity-increasing',
+      'read-graph',
+      'choose-variation-table',
+      'choose-graph',
+    ] as const) {
+      const tpl = { ...structuredClone(ratTpl), familyConfig: { graphQuestionMode: mode } };
+      const out = generateVerifiedVariant({ template: tpl, seed: `RAT-MODE-${mode}`, variantIndex: 1 });
+      assert.equal(out.ok, true, `Rational mode ${mode} failed: ${out.blockingReasons.join('; ')}`);
+    }
   });
 });

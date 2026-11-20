@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Download, RefreshCw } from 'lucide-react';
 import {
   LocalSnapshotSummary,
@@ -26,11 +26,14 @@ import {
   listCanvasEdges,
   listCanvasNodes,
   listCanvasViewSettings,
+  listGradingSessions,
   listJournals,
   listLessonPacks,
   listMathExams,
   listResources,
   listWorkflows,
+  loadConnectedWorkflowContext,
+  loadExamFormTemplates,
   normalizeLegacyLessonPack,
   replaceAllFromBackup,
   replaceBoardCanvasState,
@@ -40,6 +43,8 @@ import {
   saveCanvasEdge,
   saveCanvasNode,
   saveCanvasViewSettings,
+  saveConnectedWorkflowContext,
+  saveExamFormTemplates,
   saveJournal,
   saveLessonPack,
   saveMathExam,
@@ -62,7 +67,24 @@ import type {
   CanvasNodeRecord,
   CanvasViewSettings,
 } from './types/canvas';
-import type { MathExamProject } from './types/mathExam';
+import type { MathExamProject, MathExamStep } from './types/mathExam';
+import type { ExamFormTemplate } from './types/examForm';
+import { BUILT_IN_EXAM_FORM_PRESETS } from './core/examFormEngine';
+import type { GradingSession } from './types/grading';
+import type { GeneratedExamDraft } from './types/examGenerator';
+import type {
+  ConnectedWorkflowContext,
+  ConnectedWorkflowStageId,
+  DashboardNextStepSuggestion,
+  ParsedUniversalCommand,
+  WorkflowStageEvaluation,
+} from './types/connectedWorkflow';
+import {
+  computeDashboardNextSteps,
+  createInitialWorkflowContext,
+  evaluateConnectedWorkflowProgress,
+  patchWorkflowContext,
+} from './core/connectedWorkflowEngine';
 import {
   DEFAULT_JOURNALS,
   DEFAULT_RESOURCES,
@@ -114,6 +136,7 @@ import { ToolsHubView } from './components/shell/ToolsHubView';
 import { AppDock } from './components/shell/AppDock';
 import { AppLauncher } from './components/shell/AppLauncher';
 import { CommandPalette } from './components/shell/CommandPalette';
+import { ConnectedWorkflowBar } from './components/shell/ConnectedWorkflowBar';
 import { ContextMenu, PackContextMenuState } from './components/shell/ContextMenu';
 import { SkeletonLoader } from './components/shell/SkeletonLoader';
 import { DesktopHome } from './components/shell/DesktopHome';
@@ -129,8 +152,14 @@ import { ResourceVaultApp } from './components/apps/ResourceVaultApp';
 import { WorkflowCenterApp } from './components/apps/WorkflowCenterApp';
 import { TeachingJournalApp } from './components/apps/TeachingJournalApp';
 import { MathExamMixerApp } from './components/apps/MathExamMixerApp';
-import { SmartExamGeneratorApp } from './components/apps/SmartExamGeneratorApp';
-import { SmartGradingStudioApp } from './components/apps/SmartGradingStudioApp';
+import {
+  GeneratorTabId,
+  SmartExamGeneratorApp,
+} from './components/apps/SmartExamGeneratorApp';
+import {
+  GradingTabId,
+  SmartGradingStudioApp,
+} from './components/apps/SmartGradingStudioApp';
 import { SettingsView } from './components/SettingsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -208,10 +237,28 @@ export default function App() {
   const [lessonStudioMode, setLessonStudioMode] = useState<LessonStudioMode>('editor');
   const [lessonStudioHasDraftChanges, setLessonStudioHasDraftChanges] = useState(false);
   const [printPackId, setPrintPackId] = useState<string>('');
+  const [printPreferredExamId, setPrintPreferredExamId] = useState<string | null>(null);
+  const [printPreferredFormLabel, setPrintPreferredFormLabel] = useState<string | null>(null);
   const [examMixerPreferredExamId, setExamMixerPreferredExamId] = useState<string | null>(null);
+  const [examMixerPreferredStep, setExamMixerPreferredStep] = useState<MathExamStep | null>(null);
+  const [examGeneratorPreferredResourceId, setExamGeneratorPreferredResourceId] = useState<string | null>(null);
+  const [examGeneratorPreferredTab, setExamGeneratorPreferredTab] = useState<GeneratorTabId | null>(null);
+  const [examGeneratorPreferredPrompt, setExamGeneratorPreferredPrompt] = useState<string | null>(null);
+  const [examGeneratorPreferredTopic, setExamGeneratorPreferredTopic] = useState<string | null>(null);
   const [gradingPreferredExamId, setGradingPreferredExamId] = useState<string | null>(null);
+  const [gradingPreferredClassName, setGradingPreferredClassName] = useState<string | null>(null);
+  const [gradingPreferredTab, setGradingPreferredTab] = useState<GradingTabId | null>(null);
 
-  // Layer 3: Shared Core data state (IndexedDB v5)
+  // Connected Workflow Shared Context (persisted across reload in IndexedDB meta)
+  const [workflowContext, setWorkflowContext] = useState<ConnectedWorkflowContext>(() =>
+    createInitialWorkflowContext()
+  );
+  const [gradingSessions, setGradingSessions] = useState<GradingSession[]>([]);
+  const [examFormTemplates, setExamFormTemplates] = useState<ExamFormTemplate[]>(() =>
+    structuredClone(BUILT_IN_EXAM_FORM_PRESETS)
+  );
+
+  // Layer 3: Shared Core data state (IndexedDB v8)
   const [packs, setPacks] = useState<LessonPack[]>([]);
   const [settings, setSettings] = useState<PrintSettings>(DEFAULT_PRINT_SETTINGS);
   const [resources, setResources] = useState<ResourceItem[]>([]);
@@ -263,6 +310,24 @@ export default function App() {
     }));
   }, []);
 
+  const updateWorkflowContext = useCallback(
+    (
+      patch: Partial<Omit<ConnectedWorkflowContext, 'workflowId' | 'createdAt' | 'history'>>,
+      historyItem?: {
+        stage: ConnectedWorkflowStageId;
+        appId: AppId;
+        summary: string;
+      }
+    ) => {
+      setWorkflowContext((prev) => {
+        const next = patchWorkflowContext(prev, patch, historyItem);
+        void saveConnectedWorkflowContext(next);
+        return next;
+      });
+    },
+    []
+  );
+
   const openApp = useCallback((appId: AppId) => {
     setActiveApp(appId);
     setActiveView(appId);
@@ -271,6 +336,12 @@ export default function App() {
       const res = upsertAppTab(prevTabs, appId);
       setActiveTabId(res.activeTabId);
       return res.tabs;
+    });
+    setWorkflowContext((prev) => {
+      if (prev.lastActiveApp === appId) return prev;
+      const next = patchWorkflowContext(prev, { lastActiveApp: appId });
+      void saveConnectedWorkflowContext(next);
+      return next;
     });
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'auto' });
@@ -354,7 +425,12 @@ export default function App() {
     setLoadErrorInfo(null);
     try {
       const result = await initializeDatabase();
-      const snap = await getSnapshotSummary();
+      const [snap, savedWfCtx, loadedSessions, loadedForms] = await Promise.all([
+        getSnapshotSummary(),
+        loadConnectedWorkflowContext(),
+        listGradingSessions().catch(() => [] as GradingSession[]),
+        loadExamFormTemplates(),
+      ]);
       setPacks(result.packs);
       setSettings(result.settings);
       setResources(result.resources);
@@ -366,6 +442,9 @@ export default function App() {
       setCanvasEdges(result.canvasEdges);
       setCanvasViewSettings(result.canvasViewSettings);
       setSnapshotSummary(snap);
+      setWorkflowContext(savedWfCtx);
+      setGradingSessions(loadedSessions);
+      setExamFormTemplates(loadedForms);
       setTemporaryMode(false);
       setStorageBannerError(null);
       if (result.packs.length > 0) {
@@ -729,6 +808,25 @@ export default function App() {
       [optimisticExam, ...prev.filter((m) => m.id !== optimisticExam.id)].sort((a, b) =>
         b.updatedAt.localeCompare(a.updatedAt)
       )
+    );
+
+    // Sync Connected Workflow Context when an exam is saved or mixed
+    updateWorkflowContext(
+      {
+        generatedExamId: optimisticExam.id,
+        generatedExamTitle: optimisticExam.title,
+        examVersionIds: optimisticExam.generatedVersions.map(
+          (v) => `${optimisticExam.id}:${v.code}`
+        ),
+        examVersionCodes: optimisticExam.generatedVersions.map((v) => v.code),
+      },
+      optimisticExam.generatedVersions.length > 0
+        ? {
+            stage: 'mix',
+            appId: 'math-mixer',
+            summary: `Đã tạo ${optimisticExam.generatedVersions.length} mã đề cho "${optimisticExam.title}"`,
+          }
+        : undefined
     );
 
     if (temporaryMode) {
@@ -1265,6 +1363,287 @@ export default function App() {
     setPaletteOpen(false);
   }, []);
 
+  // Computed Connected Workflow 8-stage progress & real-data Dashboard next steps
+  const workflowStages = useMemo(
+    () =>
+      evaluateConnectedWorkflowProgress(workflowContext, {
+        resources,
+        mathExams,
+        gradingSessions,
+      }),
+    [workflowContext, resources, mathExams, gradingSessions]
+  );
+
+  const dashboardNextSteps = useMemo(
+    () =>
+      computeDashboardNextSteps(workflowContext, {
+        resources,
+        mathExams,
+        gradingSessions,
+      }),
+    [workflowContext, resources, mathExams, gradingSessions]
+  );
+
+  const handleSyncWorkflowDraft = useCallback(
+    (draft: GeneratedExamDraft) => {
+      const confirmedCount = draft.items.filter(
+        (it) => it.teacherConfirmed && it.question.answerConfirmed
+      ).length;
+      const blockedCount = draft.items.filter((it) => it.status === 'BLOCKED').length;
+      updateWorkflowContext(
+        {
+          examDraftId: draft.id,
+          examDraftTitle: draft.title,
+          questionSelectionIds: draft.items.map((it) => it.id),
+          examDraftQuestionCount: draft.items.length,
+          examDraftConfirmedCount: confirmedCount,
+          examDraftBlockedCount: blockedCount,
+        },
+        {
+          stage: confirmedCount === draft.items.length && blockedCount === 0 ? 'review' : 'generate',
+          appId: 'exam-generator',
+          summary: `Đề nháp "${draft.title}" (${draft.items.length} câu, đã duyệt ${confirmedCount})`,
+        }
+      );
+    },
+    [updateWorkflowContext]
+  );
+
+  const handleSyncWorkflowExam = useCallback(
+    (exam: MathExamProject) => {
+      updateWorkflowContext({
+        generatedExamId: exam.id,
+        generatedExamTitle: exam.title,
+        examVersionIds: exam.generatedVersions.map((v) => `${exam.id}:${v.code}`),
+        examVersionCodes: exam.generatedVersions.map((v) => v.code),
+      });
+    },
+    [updateWorkflowContext]
+  );
+
+  const handleSyncGradingSessions = useCallback(
+    (sessionsList: GradingSession[]) => {
+      setGradingSessions(sessionsList);
+      const linked =
+        (workflowContext.generatedExamId
+          ? sessionsList.find((s) => s.examId === workflowContext.generatedExamId)
+          : undefined) ?? sessionsList[0];
+      if (!linked) return;
+      const activeSheets = linked.sheets.filter((s) => !s.archivedByDuplicateResolution);
+      const pendingReview = activeSheets.filter(
+        (s) =>
+          !s.confirmedByTeacher &&
+          (s.status === 'review-required' || s.status === 'error' || s.uncertainCount > 0)
+      ).length;
+      const finalized =
+        linked.gradebookEntries?.filter((g) => g.officialScore !== null).length ??
+        (pendingReview === 0 ? activeSheets.length : 0);
+      updateWorkflowContext({
+        gradingSessionId: linked.id,
+        gradingSessionTitle: linked.title,
+        studentClassId: linked.className,
+        gradedSheetCount: activeSheets.length,
+        pendingGradingReviewCount: pendingReview,
+        finalizedGradebookCount: finalized,
+      });
+    },
+    [updateWorkflowContext, workflowContext.generatedExamId]
+  );
+
+  const handleOpenPrintStudioWithExam = useCallback(
+    (examId: string, formLabel?: string) => {
+      const target = mathExams.find((e) => e.id === examId);
+      setPrintPreferredExamId(examId);
+      setPrintPreferredFormLabel(formLabel ?? null);
+      if (target) {
+        updateWorkflowContext(
+          {
+            generatedExamId: target.id,
+            generatedExamTitle: target.title,
+            examVersionIds: target.generatedVersions.map((v) => `${target.id}:${v.code}`),
+            examVersionCodes: target.generatedVersions.map((v) => v.code),
+            examFormLabel: formLabel ?? workflowContext.examFormLabel,
+          },
+          {
+            stage: 'print',
+            appId: 'print-studio',
+            summary: `Mở Print Studio cho "${target.title}"`,
+          }
+        );
+      }
+      openApp('print-studio');
+    },
+    [mathExams, openApp, updateWorkflowContext, workflowContext.examFormLabel]
+  );
+
+  const handleNavigateWorkflowStage = useCallback(
+    (stage: WorkflowStageEvaluation) => {
+      const activeExamId = workflowContext.generatedExamId ?? mathExams[0]?.id ?? null;
+      if (stage.id === 'source') {
+        openApp('resource-vault');
+        return;
+      }
+      if (stage.id === 'select' || stage.id === 'generate') {
+        setExamGeneratorPreferredTab('natural-language');
+        openApp('exam-generator');
+        return;
+      }
+      if (stage.id === 'review') {
+        if (activeExamId) {
+          setExamMixerPreferredExamId(activeExamId);
+          setExamMixerPreferredStep(2);
+          openApp('math-mixer');
+        } else {
+          setExamGeneratorPreferredTab('wizard');
+          openApp('exam-generator');
+        }
+        return;
+      }
+      if (stage.id === 'mix') {
+        if (activeExamId) {
+          setExamMixerPreferredExamId(activeExamId);
+          setExamMixerPreferredStep(3);
+        }
+        openApp('math-mixer');
+        return;
+      }
+      if (stage.id === 'print') {
+        if (activeExamId) {
+          handleOpenPrintStudioWithExam(activeExamId);
+        } else {
+          openApp('print-studio');
+        }
+        return;
+      }
+      if (stage.id === 'grade' || stage.id === 'summary') {
+        if (activeExamId) {
+          setGradingPreferredExamId(activeExamId);
+        }
+        setGradingPreferredTab(stage.id === 'summary' ? 'gradebook' : 'sheet-gen');
+        openApp('grading-studio');
+      }
+    },
+    [handleOpenPrintStudioWithExam, mathExams, openApp, workflowContext.generatedExamId]
+  );
+
+  const handleExecuteNextStep = useCallback(
+    (suggestion: DashboardNextStepSuggestion, useSecondary = false) => {
+      const targetApp =
+        useSecondary && suggestion.secondaryTargetApp
+          ? suggestion.secondaryTargetApp
+          : suggestion.targetApp;
+
+      if (targetApp === 'print-studio' && suggestion.examId) {
+        handleOpenPrintStudioWithExam(suggestion.examId);
+        return;
+      }
+      if (targetApp === 'math-mixer' && suggestion.examId) {
+        setExamMixerPreferredExamId(suggestion.examId);
+        setExamMixerPreferredStep(2);
+        openApp('math-mixer');
+        return;
+      }
+      if (targetApp === 'grading-studio' && suggestion.examId) {
+        setGradingPreferredExamId(suggestion.examId);
+        setGradingPreferredTab(
+          suggestion.id.startsWith('next-grade-') ? 'review' : 'sheet-gen'
+        );
+        openApp('grading-studio');
+        return;
+      }
+      if (targetApp === 'exam-generator' && suggestion.resourceId) {
+        const res = resources.find((r) => r.id === suggestion.resourceId);
+        setExamGeneratorPreferredResourceId(suggestion.resourceId);
+        setExamGeneratorPreferredTab('natural-language');
+        if (res) {
+          updateWorkflowContext(
+            { resourceId: res.id, resourceTitle: res.title },
+            { stage: 'source', appId: 'resource-vault', summary: `Chọn nguồn "${res.title}"` }
+          );
+        }
+        openApp('exam-generator');
+        return;
+      }
+      openApp(targetApp);
+    },
+    [handleOpenPrintStudioWithExam, openApp, resources, updateWorkflowContext]
+  );
+
+  const handleExecuteUniversalCommand = useCallback(
+    (cmd: ParsedUniversalCommand) => {
+      if (cmd.intent === 'nl-generate-exam') {
+        if (cmd.payload.resourceId) {
+          const res = resources.find((r) => r.id === cmd.payload.resourceId);
+          setExamGeneratorPreferredResourceId(cmd.payload.resourceId);
+          if (res) {
+            updateWorkflowContext({ resourceId: res.id, resourceTitle: res.title });
+          }
+        }
+        setExamGeneratorPreferredPrompt(cmd.payload.promptText ?? cmd.payload.rawCommand);
+        setExamGeneratorPreferredTab('natural-language');
+        openApp('exam-generator');
+        showToast('info', 'Đã chuyển câu lệnh vào Natural Language Exam Builder để bạn xác nhận.');
+        return;
+      }
+      if (cmd.intent === 'open-bank-topic') {
+        setExamGeneratorPreferredTopic(cmd.payload.topicQuery ?? '');
+        setExamGeneratorPreferredTab('bank');
+        openApp('exam-generator');
+        return;
+      }
+      if (cmd.intent === 'mix-current-exam') {
+        if (cmd.payload.examId) {
+          setExamMixerPreferredExamId(cmd.payload.examId);
+        }
+        setExamMixerPreferredStep(3);
+        openApp('math-mixer');
+        showToast(
+          'info',
+          `Đã mở Exam Mixer Pro${cmd.payload.versionCount ? ` (gợi ý ${cmd.payload.versionCount} mã đề)` : ''}.`
+        );
+        return;
+      }
+      if (
+        cmd.intent === 'create-omr-sheet' ||
+        cmd.intent === 'open-latest-grading' ||
+        cmd.intent === 'open-azota-bridge'
+      ) {
+        if (cmd.payload.examId) {
+          setGradingPreferredExamId(cmd.payload.examId);
+        }
+        if (cmd.payload.className) {
+          setGradingPreferredClassName(cmd.payload.className);
+          updateWorkflowContext({ studentClassId: cmd.payload.className });
+        }
+        setGradingPreferredTab(
+          cmd.payload.gradingTab ??
+            (cmd.intent === 'open-azota-bridge' ? 'azota' : 'sheet-gen')
+        );
+        openApp('grading-studio');
+        return;
+      }
+      if (cmd.intent === 'print-exam-form') {
+        const examId = cmd.payload.examId ?? workflowContext.generatedExamId ?? mathExams[0]?.id;
+        if (examId) {
+          handleOpenPrintStudioWithExam(examId, cmd.payload.formLabel);
+        } else {
+          openApp('print-studio');
+        }
+        return;
+      }
+      openApp(cmd.targetApp);
+    },
+    [
+      handleOpenPrintStudioWithExam,
+      mathExams,
+      openApp,
+      resources,
+      showToast,
+      updateWorkflowContext,
+      workflowContext.generatedExamId,
+    ]
+  );
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#f8fafc] dark:bg-slate-950">
@@ -1334,13 +1713,17 @@ export default function App() {
     packs.find((p) => p.id === printPackId) ??
     (activePack.id === printPackId ? activePack : packs[0] ?? activePack);
 
+  const printSelectedExam = printPreferredExamId
+    ? mathExams.find((e) => e.id === printPreferredExamId)
+    : undefined;
+
   const activeContextTitle =
     activeApp === 'lesson-studio'
       ? lessonStudioMode === 'library'
         ? 'Kho bài dạy'
         : activePack.title.trim() || 'Bộ tiết dạy mới'
       : activeApp === 'print-studio'
-      ? printSelectedPack?.title.trim() || 'Xem trước A4'
+      ? printSelectedExam?.title.trim() || printSelectedPack?.title.trim() || 'Xem trước A4'
       : undefined;
 
   const draftCount = packs.filter((p) => p.status === 'draft').length;
@@ -1434,6 +1817,19 @@ export default function App() {
         />
 
         <div className="flex-1 min-w-0">
+          <ConnectedWorkflowBar
+            activeApp={activeApp}
+            context={workflowContext}
+            stages={workflowStages}
+            onNavigateStage={handleNavigateWorkflowStage}
+            onResetWorkflow={() => {
+              const fresh = createInitialWorkflowContext();
+              setWorkflowContext(fresh);
+              void saveConnectedWorkflowContext(fresh);
+              showToast('info', 'Đã tạo phiên quy trình kiểm tra mới (dữ liệu đã lưu vẫn được giữ nguyên).');
+            }}
+          />
+
           <div className={activeView === 'desktop' ? 'block' : 'hidden print:hidden'}>
             <ErrorBoundary moduleName="Desktop Home" packs={packs} settings={settings}>
               <DesktopHome
@@ -1444,8 +1840,10 @@ export default function App() {
                 canvasBoards={canvasBoards}
                 canvasNodes={canvasNodes}
                 hasActiveUnsavedDraft={lessonStudioHasDraftChanges}
+                nextStepSuggestions={dashboardNextSteps}
                 onCreateNewPack={handleCreateNew}
                 onOpenApp={openApp}
+                onExecuteNextStep={handleExecuteNextStep}
                 onOpenToolsHub={openToolsHub}
                 onOpenLibrary={() => {
                   setLessonStudioMode('library');
@@ -1505,11 +1903,70 @@ export default function App() {
                   packs={packs}
                   selectedPack={printSelectedPack}
                   settings={settings}
+                  mathExams={mathExams}
+                  examFormTemplates={examFormTemplates}
+                  preferredExamId={printPreferredExamId}
+                  preferredFormId={workflowContext.examFormId ?? null}
+                  preferredFormLabel={printPreferredFormLabel ?? workflowContext.examFormLabel ?? null}
                   onSelectPackId={setPrintPackId}
                   onMarkCompleted={handleMarkPackCompleted}
                   onOpenSettings={() => openApp('settings')}
                   onOpenInLessonStudio={handleEditPack}
                   onQuickUpdateSettings={handleSaveSettings}
+                  onSaveMathExam={handleSaveMathExam}
+                  onSaveExamFormTemplates={(nextTemplates) => {
+                    setExamFormTemplates(nextTemplates);
+                    void saveExamFormTemplates(nextTemplates);
+                  }}
+                  onExamFormApplied={(examId, tpl) => {
+                    const target = mathExams.find((e) => e.id === examId);
+                    updateWorkflowContext(
+                      {
+                        generatedExamId: examId,
+                        generatedExamTitle: target?.title ?? workflowContext.generatedExamTitle,
+                        examFormId: tpl.id,
+                        examFormLabel: tpl.name,
+                      },
+                      {
+                        stage: 'print',
+                        appId: 'print-studio',
+                        summary: `Áp dụng mẫu "${tpl.name}" cho "${target?.title ?? examId}"`,
+                      }
+                    );
+                  }}
+                  onOpenExamMixer={(examId) => {
+                    setExamMixerPreferredExamId(examId);
+                    setExamMixerPreferredStep(5);
+                    openApp('math-mixer');
+                  }}
+                  onOpenGradingStudio={(examId) => {
+                    setGradingPreferredExamId(examId);
+                    setGradingPreferredTab('sheet-gen');
+                    openApp('grading-studio');
+                  }}
+                  onOpenAzotaBridge={(examId) => {
+                    setGradingPreferredExamId(examId);
+                    setGradingPreferredTab('azota');
+                    openApp('grading-studio');
+                  }}
+                  onExamPrinted={(examId, formLabel, formId) => {
+                    const target = mathExams.find((e) => e.id === examId);
+                    updateWorkflowContext(
+                      {
+                        generatedExamId: examId,
+                        generatedExamTitle: target?.title ?? workflowContext.generatedExamTitle,
+                        examFormId: formId ?? workflowContext.examFormId,
+                        examFormLabel: formLabel ?? workflowContext.examFormLabel,
+                        printedAt: new Date().toISOString(),
+                      },
+                      {
+                        stage: 'print',
+                        appId: 'print-studio',
+                        summary: `Đã xuất/in đề "${target?.title ?? examId}"`,
+                      }
+                    );
+                  }}
+                  onNotify={(type, msg) => showToast(type === 'warning' ? 'info' : type, msg)}
                 />
               </ErrorBoundary>
             </div>
@@ -1566,6 +2023,25 @@ export default function App() {
                   onInsertIntoActivePack={handleInsertResourceIntoActivePack}
                   onOpenActivePackInStudio={() => openApp('lesson-studio')}
                   onOpenWorkflowCenter={() => openApp('workflow-center')}
+                  onCreateExamFromResource={(resourceId) => {
+                    const res = resources.find((r) => r.id === resourceId);
+                    setExamGeneratorPreferredResourceId(resourceId);
+                    setExamGeneratorPreferredTab('natural-language');
+                    if (res) {
+                      updateWorkflowContext(
+                        {
+                          resourceId: res.id,
+                          resourceTitle: res.title,
+                        },
+                        {
+                          stage: 'source',
+                          appId: 'resource-vault',
+                          summary: `Chọn tài liệu "${res.title}" từ Resource Vault`,
+                        }
+                      );
+                    }
+                    openApp('exam-generator');
+                  }}
                   onShowToast={showToast}
                 />
               </ErrorBoundary>
@@ -1643,13 +2119,26 @@ export default function App() {
               <ErrorBoundary moduleName="Smart Exam Generator 2.0" packs={packs} settings={settings}>
                 <SmartExamGeneratorApp
                   mathExams={mathExams}
+                  resources={resources}
+                  preferredResourceId={examGeneratorPreferredResourceId}
+                  preferredTab={examGeneratorPreferredTab}
+                  preferredPrompt={examGeneratorPreferredPrompt}
+                  preferredTopicFilter={examGeneratorPreferredTopic}
+                  onClearPreferredResource={() => {
+                    setExamGeneratorPreferredResourceId(null);
+                    setExamGeneratorPreferredPrompt(null);
+                    setExamGeneratorPreferredTopic(null);
+                  }}
+                  onSyncWorkflowDraft={handleSyncWorkflowDraft}
                   onSaveMathExam={handleSaveMathExam}
                   onOpenExamMixerWithExam={(examId) => {
                     setExamMixerPreferredExamId(examId);
+                    setExamMixerPreferredStep(2);
                     openApp('math-mixer');
                   }}
                   onOpenGradingStudioWithExam={(examId) => {
                     setGradingPreferredExamId(examId);
+                    setGradingPreferredTab('sheet-gen');
                     openApp('grading-studio');
                   }}
                   onNotify={showToast}
@@ -1664,14 +2153,18 @@ export default function App() {
                 <MathExamMixerApp
                   mathExams={mathExams}
                   preferredExamId={examMixerPreferredExamId}
+                  preferredStep={examMixerPreferredStep}
                   onSaveMathExam={handleSaveMathExam}
                   onDeleteMathExam={handleDeleteMathExam}
                   onDuplicateMathExam={handleDuplicateMathExam}
                   onShowToast={showToast}
+                  onOpenPrintStudio={(examId) => handleOpenPrintStudioWithExam(examId)}
                   onOpenGradingStudio={(examId) => {
                     setGradingPreferredExamId(examId);
+                    setGradingPreferredTab('sheet-gen');
                     openApp('grading-studio');
                   }}
+                  onWorkflowExamSynced={handleSyncWorkflowExam}
                 />
               </ErrorBoundary>
             </div>
@@ -1683,8 +2176,11 @@ export default function App() {
                 <SmartGradingStudioApp
                   mathExams={mathExams}
                   preferredExamId={gradingPreferredExamId}
+                  preferredClassName={gradingPreferredClassName}
+                  preferredTab={gradingPreferredTab}
                   onOpenExamMixer={() => openApp('math-mixer')}
                   onSaveMathExam={handleSaveMathExam}
+                  onSessionsChanged={handleSyncGradingSessions}
                   onNotify={showToast}
                 />
               </ErrorBoundary>
@@ -1747,10 +2243,19 @@ export default function App() {
         packs={packs}
         resources={resources}
         journals={journals}
+        mathExams={mathExams}
+        gradingSessions={gradingSessions}
+        workflowContext={workflowContext}
         onClose={() => setPaletteOpen(false)}
         onSelectApp={openApp}
         onSelectPack={handleEditPack}
+        onSelectExam={(examId) => {
+          setExamMixerPreferredExamId(examId);
+          setExamMixerPreferredStep(2);
+          openApp('math-mixer');
+        }}
         onRunAction={handleRunPaletteAction}
+        onExecuteUniversalCommand={handleExecuteUniversalCommand}
       />
 
       <ContextMenu

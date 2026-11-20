@@ -263,8 +263,14 @@ test('09. MCQ variant always has 4 unique options and exactly 1 valid answer', (
       assert.equal(res.ok, true);
       const opts = res.variant!.question.options ?? [];
       assert.equal(opts.length, 4);
-      const uniqueTexts = new Set(opts.map((o) => o.content.rawSource));
-      assert.equal(uniqueTexts.size, 4, 'All 4 options must be distinct');
+      const uniqueOptions = new Set(
+        opts.map((o) =>
+          o.visualAsset?.sourceData
+            ? `${o.content.rawSource}::${o.visualAsset.sourceData}`
+            : o.content.rawSource
+        )
+      );
+      assert.equal(uniqueOptions.size, 4, 'All 4 options must be distinct');
       assert.equal(opts.filter((o) => o.isCorrect).length, 1);
       assert.equal(res.variant!.verification.validOptionCount, 1);
       assert.equal(res.variant!.verification.uniqueOptionCount, 4);

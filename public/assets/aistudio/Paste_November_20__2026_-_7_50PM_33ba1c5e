@@ -1,0 +1,1197 @@
+# SUPER MASTER PROMPT — TEACHEROS UNIFIED WORKSPACE 4.0
+## RESOURCE VAULT INTELLIGENCE · NATURAL LANGUAGE EXAM BUILDER · CONNECTED WORKFLOWS · AZOTA INTEGRATION · EXAM FORM DESIGNER
+
+### DEVELOPMENT MODE: CONTINUE EXISTING PROJECT — DO NOT REBUILD
+
+Bạn là Principal Software Architect, Senior React/TypeScript Engineer, Educational Technology Engineer, Information Retrieval Engineer, UX Architect, Integration Engineer và QA Specialist.
+
+**NHIỆM VỤ:** Nâng cấp TeacherOS hiện tại thành nền tảng làm việc giáo dục có liên kết chặt chẽ, dễ sử dụng, cho phép giáo viên tạo đề bằng cách nhập yêu cầu tiếng Việt và khai thác các tài liệu đã lưu trong Resource Vault.
+
+Đây là yêu cầu triển khai CODE THỰC TẾ trong dự án hiện tại, không phải chỉ thiết kế giao diện, lập kế hoạch hoặc tạo mockup.
+
+# 1. BỐI CẢNH DỰ ÁN
+
+TeacherOS hiện đã có hoặc đang phát triển:
+
+- Resource Vault.
+- Smart Exam Generator 2.x/3.0.
+- Exam Mixer Pro.
+- Smart Grading Studio.
+- Unified Question Bank.
+- Exam Blueprint Wizard.
+- Verified Numerical Variant Engine.
+- Advanced Mathematics Engine.
+- Dynamic Math & Graph Engine đang được phát triển.
+- Print Studio.
+- Workflow Center.
+- IndexedDB/Dexie.
+- Aurora Bento Premium UI.
+- React, TypeScript, Vite, Bun và Cloudflare.
+
+Hãy kiểm tra source thực tế để xác nhận trạng thái của từng module.
+
+Không coi những tính năng đang làm dở là đã hoàn thiện.
+
+Không giả định mã nguồn mới nhất đã được Push lên GitHub.
+
+Nếu repository và workspace chưa đồng bộ, phải báo rõ trước khi chỉnh sửa.
+
+**TUYỆT ĐỐI KHÔNG XÂY LẠI TEACHEROS TỪ ĐẦU.**
+
+# 2. MỤC TIÊU TỔNG THỂ
+
+Giáo viên có thể thực hiện một quy trình:
+
+1. Đưa đề kiểm tra, tài liệu Word/PDF vào Resource Vault.
+2. TeacherOS lập chỉ mục và nhận diện những câu hỏi có thể tái sử dụng.
+3. Giáo viên nhập yêu cầu bằng tiếng Việt.
+4. Hệ thống phân tích yêu cầu.
+5. Tìm những câu phù hợp từ Resource Vault và ngân hàng câu hỏi.
+6. Tạo biến thể số khi câu có mẫu toán học được kiểm chứng.
+7. Tính lại đáp án và lời giải.
+8. Lắp ráp đề theo ma trận.
+9. Giáo viên chọn mẫu trình bày.
+10. Xem trước và chỉnh sửa.
+11. Xác nhận đáp án.
+12. Chuyển sang Exam Mixer để tạo mã đề.
+13. Xuất Word/PDF.
+14. Tạo phiếu OMR và chấm bài khi phù hợp.
+15. Có thể chuyển dữ liệu sang Azota nếu có phương thức tích hợp hợp lệ.
+
+Các bước phải kết nối trong cùng một hệ thống, tránh nhập lại thông tin nhiều lần.
+
+# 3. KIẾN TRÚC: RESOURCE VAULT LÀ NGUỒN TRI THỨC CHÍNH
+
+## 3.1. Resource Vault Question Intelligence
+
+Nâng cấp Resource Vault để hệ thống có thể sử dụng tài liệu làm nguồn sinh đề.
+
+Hỗ trợ các nguồn được ứng dụng hiện tại đọc được:
+
+- DOCX.
+- PDF có lớp văn bản.
+- PDF scan/ảnh nếu có OCR cục bộ phù hợp.
+- XLSX/CSV.
+- Bộ câu hỏi đã phân tích trong Exam Mixer.
+- Các file tài liệu đã lưu trong Resource Vault.
+
+Tuyệt đối không thay đổi file gốc.
+
+Không tự cho rằng tất cả tài liệu đều chứa câu hỏi có thể trích xuất chính xác.
+
+## 3.2. Question Extraction
+
+Thiết kế pipeline:
+
+Resource File
+→ Document Parser
+→ Content Segmentation
+→ Question Boundary Detection
+→ Question Type Detection
+→ Answer Extraction
+→ Metadata Classification
+→ Quality Validation
+→ Indexing.
+
+Tái sử dụng parser hiện có của TeacherOS.
+
+Phải giữ nguyên:
+
+- Công thức toán học.
+- Bảng.
+- Hình ảnh.
+- Các phương án trả lời.
+- Đáp án chính thức nếu có.
+- Câu hỏi nhóm.
+- Đoạn văn chung.
+- Dữ kiện dùng chung.
+
+Không được tách một câu hỏi khỏi hình hoặc dữ kiện liên quan.
+
+Nếu tài liệu chứa MathType OLE/OMML không thể chuyển đổi an toàn, giữ nguyên nội dung và đánh dấu cần xác nhận.
+
+Không đoán đáp án khi file nguồn không cung cấp đáp án và engine hiện có không thể kiểm chứng.
+
+## 3.3. Source Provenance
+
+Mỗi câu hỏi trích xuất cần có:
+
+- Resource ID.
+- File Name.
+- Folder ID.
+- Source Page/Section nếu xác định được.
+- Question ID.
+- Content Hash.
+- Subject.
+- Grade.
+- Chapter.
+- Topic.
+- Question Type.
+- Cognitive Level.
+- Answer Status.
+- Verification Status.
+- Image/Math References.
+
+Khi giáo viên xem một câu hỏi, phải có nút:
+
+**Xem câu hỏi trong tài liệu gốc.**
+
+Nếu nguồn là PDF, mở đúng trang khi có thể.
+
+Nếu nguồn là DOCX, mở vị trí hoặc đoạn tương ứng theo khả năng của trình xem.
+
+Không tạo số trang giả.
+
+## 3.4. Unified Question Index
+
+Không tạo một ngân hàng câu hỏi độc lập gây trùng lặp dữ liệu.
+
+Xây dựng một lớp chỉ mục hợp nhất kết nối:
+
+- Resource Vault.
+- Unified Question Bank.
+- Exam Mixer Projects.
+- Verified Question Templates.
+
+Tài liệu trong Resource Vault vẫn thuộc quyền quản lý của Resource Vault.
+
+Question Bank lưu dữ liệu câu hỏi có cấu trúc, tham chiếu đến tài liệu gốc.
+
+Tránh sao chép toàn bộ tệp nhiều lần.
+
+Dùng stable IDs và versioning.
+
+Khi tài liệu nguồn cập nhật, có cơ chế phát hiện thay đổi và tái lập chỉ mục an toàn.
+
+Không tự ghi đè những câu đã được giáo viên chỉnh sửa hoặc duyệt.
+
+# 4. TÌM KIẾM CÂU HỎI THÔNG MINH
+
+Xây dựng Smart Question Retrieval Engine.
+
+Cho phép tìm theo:
+
+- Môn học.
+- Lớp.
+- Chương.
+- Bài.
+- Chủ đề.
+- Yêu cầu cần đạt.
+- Mức độ nhận thức.
+- Loại câu hỏi.
+- Từ khóa.
+- Thời gian làm bài.
+- Nguồn tài liệu.
+- Khả năng tạo biến thể.
+
+Ưu tiên cơ chế tìm kiếm LOCAL-FIRST:
+
+- Metadata Filtering.
+- Vietnamese Text Normalization.
+- Keyword Search.
+- TF-IDF/BM25 hoặc giải pháp tìm kiếm phù hợp.
+- Duplicate Detection.
+- Relevance Ranking.
+- Constraint-Based Selection.
+
+Không cần AI API để thực hiện tìm kiếm cơ bản.
+
+Hỗ trợ tìm kiếm tiếng Việt có dấu và không dấu.
+
+Phân biệt mức độ phù hợp nội dung với mức độ tự tin về đáp án.
+
+Không tự tuyên bố tìm kiếm ngữ nghĩa sâu nếu hệ thống chưa thực sự có semantic model.
+
+## KẾT QUẢ TÌM KIẾM
+
+Mỗi câu gợi ý phải hiển thị:
+
+- Nội dung.
+- Nguồn.
+- Chủ đề.
+- Mức độ.
+- Lý do được chọn.
+- Có thể đổi số hay không.
+- Trạng thái kiểm chứng.
+- Nút xem nguồn.
+
+Giáo viên có thể thay thế câu được chọn bằng câu khác tương đương về tiêu chí ma trận.
+
+# 5. NATURAL LANGUAGE EXAM BUILDER
+
+Đây là tính năng trọng tâm.
+
+Thêm giao diện:
+
+**Tạo đề bằng yêu cầu tiếng Việt**
+
+Giáo viên có thể nhập yêu cầu tự nhiên, ví dụ:
+
+"Tạo cho tôi một đề kiểm tra Toán 12 giữa học kỳ 1, thời gian 45 phút, gồm 12 câu trắc nghiệm, 4 câu đúng sai và 6 câu trả lời ngắn. Lấy câu hỏi từ thư mục Toán 12 trong Resource Vault. Ưu tiên chương Hàm số và Đạo hàm. Mức độ 30% nhận biết, 40% thông hiểu, 30% vận dụng. Những câu toán phù hợp hãy đổi số để tạo câu mới, tính lại đáp án. Tạo 4 mã đề 101, 102, 103, 104 và xuất theo mẫu đề kiểm tra của trường."
+
+Hệ thống phải chuyển yêu cầu thành cấu trúc có thể xử lý.
+
+## 5.1. Natural Language Command Parser
+
+Tạo bộ phân tích yêu cầu tiếng Việt có kiểm soát.
+
+Trích xuất các trường:
+
+- Intent.
+- Subject.
+- Grade.
+- Exam Type.
+- Duration.
+- Question Count.
+- Question Types.
+- Chapter/Topic.
+- Difficulty Distribution.
+- Resource Vault Scope.
+- Variation Mode.
+- Exam Version Count.
+- Exam Form ID.
+- Export Format.
+
+## 5.2. KHÔNG GIẢ VỜ LÀ AI
+
+Trong phiên này, ưu tiên parser dựa trên:
+
+- Rule-Based Intent Detection.
+- Keyword Dictionaries.
+- Synonym Mapping.
+- Constraint Extraction.
+- Structured Prompt Templates.
+- Editable Parsed Specifications.
+
+Có thể hiểu các mẫu yêu cầu tiếng Việt phổ biến.
+
+Không giả định parser có thể hiểu mọi câu lệnh tùy ý như mô hình ngôn ngữ lớn.
+
+Nếu yêu cầu không rõ, phải đánh dấu trường thiếu và cho giáo viên chỉnh sửa bằng giao diện.
+
+Không tự đoán thông số quan trọng.
+
+Không dùng Gemini/OpenAI API trong runtime.
+
+Nếu sau này có chế độ AI tùy chọn, phải tách riêng, chỉ bật khi có sự đồng ý rõ ràng và không gửi tài liệu riêng tư lên nhà cung cấp nếu chưa được phép.
+
+## 5.3. COMMAND INTERPRETATION PREVIEW
+
+Sau khi nhập lệnh, hiển thị:
+
+"Tôi đã hiểu yêu cầu như sau:"
+
+- Môn: Toán.
+- Lớp: 12.
+- Loại đề: Giữa học kỳ.
+- Thời gian: 45 phút.
+- Nguồn: Resource Vault / Toán 12.
+- Số câu: 22.
+- Trắc nghiệm: 12.
+- Đúng/Sai: 4.
+- Trả lời ngắn: 6.
+- Chế độ: Hybrid.
+- Số mã đề: 4.
+- Mẫu trình bày: Mẫu trường học.
+
+Giáo viên có thể chỉnh mọi trường.
+
+Chỉ khi bấm **Xác nhận cấu hình & Tạo đề**, engine mới bắt đầu tạo đề.
+
+Không tự tạo đề khi yêu cầu còn mâu thuẫn.
+
+Ví dụ: Tổng số câu được yêu cầu khác tổng các loại câu.
+
+# 6. AUTOMATIC EXAM GENERATION
+
+Sau khi yêu cầu được xác nhận:
+
+1. Chọn nguồn dữ liệu.
+2. Lọc câu.
+3. Kiểm tra ma trận.
+4. Xếp hạng câu phù hợp.
+5. Phát hiện trùng lặp.
+6. Chọn câu.
+7. Sinh biến thể được hỗ trợ.
+8. Kiểm chứng.
+9. Lắp ráp đề.
+10. Cho giáo viên duyệt.
+
+Hỗ trợ ba chế độ:
+
+**BANK ONLY**
+Chỉ lấy câu gốc.
+
+**VERIFIED VARIANTS**
+Chỉ lấy câu có thể sinh biến thể kiểm chứng.
+
+**HYBRID**
+Kết hợp câu gốc và biến thể.
+
+Nếu thiếu câu phù hợp, hiển thị cụ thể:
+
+- Chủ đề nào thiếu.
+- Loại câu nào thiếu.
+- Mức độ nào thiếu.
+- Có bao nhiêu câu được tìm thấy.
+- Bao nhiêu câu bị BLOCKED.
+- Có thể nới điều kiện nào.
+
+Chỉ thay đổi ma trận khi giáo viên đồng ý.
+
+Không tự bịa câu hỏi để đủ số lượng.
+
+# 7. NUMERICAL VARIANT ENGINE
+
+Tái sử dụng các engine đã phát triển:
+
+- Verified Numerical Variant Engine.
+- Advanced Mathematics Engine.
+- Dynamic Math & Graph Engine khi hoàn thiện.
+
+Không viết lại bộ giải toán hiện có.
+
+## QUY TRÌNH ĐỔI SỐ
+
+Original Question
+→ Supported Template Identification
+→ Parameter Extraction
+→ Constraint Validation
+→ New Parameter Generation
+→ Answer Recalculation
+→ Independent Mathematical Verification
+→ New Distractors
+→ Explanation Recalculation
+→ Teacher Review.
+
+Chỉ được sinh biến thể khi câu hỏi đã được ánh xạ tới mẫu tham số được hỗ trợ và kiểm chứng.
+
+Không tự động thay số trong văn bản bằng regex.
+
+Không thay số trong ảnh, đồ thị tĩnh hoặc MathType nhị phân.
+
+Nếu câu hỏi dùng đồ thị động đã được xác minh, cập nhật đồng thời:
+
+- Hệ số.
+- Đạo hàm.
+- Cực trị.
+- Đồ thị.
+- Bảng biến thiên.
+- Đáp án.
+- Lời giải.
+
+Nếu một phần không cập nhật được, chuyển sang BLOCKED.
+
+## VARIANT AUDIT
+
+Mỗi biến thể cần lưu:
+
+- Parent Question ID.
+- Variant ID.
+- Template ID.
+- Seed.
+- Parameters.
+- Original Answer.
+- New Answer.
+- Explanation.
+- Validation Report.
+- Source Reference.
+
+Không ghi đè câu gốc.
+
+Không coi biến thể là câu hoàn toàn mới về mức độ nhận thức nếu chưa xác minh.
+
+# 8. CONNECTED WORKFLOW ARCHITECTURE
+
+Đây là yêu cầu quan trọng thứ hai.
+
+Hiện TeacherOS có nhiều ứng dụng nhưng trải nghiệm phải trở thành một luồng thống nhất.
+
+Xây dựng:
+
+**TeacherOS Connected Workflow Layer**
+
+Các module liên kết:
+
+Resource Vault
+→ Unified Question Bank
+→ Smart Exam Generator
+→ Exam Mixer Pro
+→ Exam Form Designer
+→ Print Studio
+→ Smart Grading Studio
+→ Gradebook
+→ Teaching Journal / Workflow Center.
+
+## 8.1. ONE CONTINUOUS WORKFLOW
+
+Ví dụ giáo viên đang ở Resource Vault:
+
+1. Chọn một file đề Toán.
+2. Bấm "Tạo đề từ tài liệu này".
+3. Smart Exam Generator mở với Source ID đã chọn.
+4. Giáo viên cấu hình ma trận.
+5. Tạo đề.
+6. Bấm "Trộn thành 4 mã đề".
+7. Exam Mixer nhận đúng đề.
+8. Bấm "Áp dụng mẫu đề".
+9. Xuất/in đề.
+10. Bấm "Tạo phiếu chấm".
+11. Smart Grading mở đúng bài kiểm tra.
+
+Không bắt giáo viên phải tìm lại tài liệu hoặc chọn lại bài kiểm tra ở mỗi bước.
+
+## 8.2. SHARED CONTEXT
+
+Thiết kế dữ liệu ngữ cảnh chuyển ứng dụng:
+
+- Workflow ID.
+- Resource ID.
+- Question Selection IDs.
+- Exam Draft ID.
+- Generated Exam ID.
+- Exam Version IDs.
+- Exam Form ID.
+- Grading Session ID.
+- Student Class ID.
+
+Không truyền toàn bộ file binary giữa các component qua React props nếu đã có storage layer phù hợp.
+
+Sử dụng ID ổn định, typed contracts và các adapters.
+
+Không tạo những kết nối chồng chéo bằng nhiều global variables khó quản lý.
+
+## 8.3. CONTEXTUAL ACTIONS
+
+Mỗi công cụ hiển thị những hành động hợp lý:
+
+Resource Vault:
+- Phân tích câu hỏi.
+- Thêm vào ngân hàng.
+- Tạo đề từ tài liệu.
+
+Question Bank:
+- Sinh biến thể.
+- Thêm vào đề.
+- Xem nguồn.
+
+Exam Generator:
+- Đổi câu.
+- Kiểm tra đáp án.
+- Trộn đề.
+- Chọn mẫu trình bày.
+
+Exam Mixer:
+- Chọn mẫu in.
+- Xuất DOCX/PDF.
+- Tạo phiếu OMR.
+
+Smart Grading:
+- Chấm bài.
+- Xem bảng điểm.
+- Xuất ảnh minh chứng.
+
+Không tạo nút chỉ để trang trí.
+
+## 8.4. WORKFLOW PROGRESS
+
+Hiển thị tiến trình:
+
+Nguồn tài liệu
+→ Chọn câu
+→ Tạo đề
+→ Duyệt
+→ Trộn mã đề
+→ In
+→ Chấm
+→ Tổng hợp.
+
+Cho phép quay lại bước trước mà không mất dữ liệu.
+
+Có trạng thái:
+
+- Not Started.
+- In Progress.
+- Needs Review.
+- Completed.
+- Blocked.
+
+Không đánh dấu hoàn tất khi thiếu dữ liệu hoặc chưa được xác nhận.
+
+# 9. UNIVERSAL COMMAND BAR
+
+Để giáo viên dễ sử dụng, bổ sung một thanh lệnh chung trong TeacherOS.
+
+Ví dụ các câu lệnh:
+
+- "Tạo đề Toán 12 từ Resource Vault."
+- "Mở ngân hàng câu hỏi chương Hàm số."
+- "Trộn đề này thành 4 mã."
+- "Tạo phiếu trả lời cho lớp 12A2."
+- "Mở kết quả chấm bài gần nhất."
+- "Xuất đề theo mẫu giữa học kỳ."
+
+Command Bar phải có hai nhóm:
+
+**Navigation Commands**
+Mở công cụ hoặc tài liệu.
+
+**Workflow Commands**
+Thực hiện hành động có cấu hình và xác nhận.
+
+Các hành động thay đổi dữ liệu quan trọng cần xác nhận.
+
+Không tự động xóa, xuất bản hoặc gửi dữ liệu chỉ từ một câu lệnh không rõ nghĩa.
+
+Không tạo chatbot giả không có engine xử lý.
+
+# 10. UX SIMPLIFICATION
+
+Áp dụng nguyên tắc:
+
+**Một mục tiêu của giáo viên → Một luồng thao tác dễ hiểu.**
+
+## HOME DASHBOARD
+
+Thay vì chỉ hiển thị danh sách ứng dụng, ưu tiên các nhiệm vụ:
+
+- Tạo đề kiểm tra.
+- Trộn đề.
+- Quản lý tài liệu.
+- Chấm bài.
+- Xem bảng điểm.
+- Chuẩn bị bài giảng.
+
+Hiển thị công việc gần đây và gợi ý bước tiếp theo dựa trên trạng thái dữ liệu thực.
+
+Ví dụ:
+
+"Bạn vừa tạo 4 mã đề Toán 12. Bước tiếp theo: In đề hoặc tạo phiếu OMR."
+
+Không dùng AI để đoán hành vi giáo viên.
+
+## ONBOARDING
+
+Thêm:
+
+- Hướng dẫn ngắn lần đầu.
+- Mẫu câu lệnh có thể bấm.
+- Empty States hữu ích.
+- Tooltip rõ ràng.
+- Chế độ Cơ bản/Nâng cao nếu cần.
+
+Không làm rối giao diện với quá nhiều nút.
+
+## NAVIGATION
+
+Bảo đảm:
+- Breadcrumb.
+- Back Navigation.
+- Recent Items.
+- Search.
+- App-to-App Navigation.
+- State Persistence.
+
+Không mất lựa chọn khi chuyển qua lại giữa công cụ.
+
+# 11. AZOTA INTEGRATION
+
+Đây là yêu cầu tích hợp có điều kiện, phải xử lý nghiêm túc.
+
+Mục tiêu mong muốn:
+
+- Kết nối tài khoản Azota khi có API chính thức được cấp quyền.
+- Nhập dữ liệu được Azota cho phép truy cập.
+- Xuất đề từ TeacherOS sang Azota khi được hỗ trợ.
+- Có thể đồng bộ danh sách bài kiểm tra hoặc kết quả nếu phạm vi API chính thức cho phép.
+
+**KHÔNG MẶC ĐỊNH AZOTA CÓ API CÔNG KHAI DÀNH CHO BÊN THỨ BA.**
+
+## 11.1. OFFICIAL API VERIFICATION
+
+Trước khi code kết nối thật:
+
+1. Kiểm tra tài liệu nhà phát triển chính thức của Azota.
+2. Xác minh Azota có cung cấp API cho bên thứ ba hay đối tác không.
+3. Xác minh phương thức cấp quyền.
+4. Xác minh phạm vi truy cập.
+5. Xác minh giới hạn API và điều kiện sử dụng.
+6. Chỉ tích hợp các endpoint được tài liệu chính thức hoặc Azota trực tiếp xác nhận.
+
+Nếu không có bằng chứng về API hợp lệ:
+
+- Không bịa endpoint.
+- Không hard-code API giả.
+- Không reverse-engineer private API.
+- Không sao chép cookie/session.
+- Không yêu cầu giáo viên nhập mật khẩu Azota vào TeacherOS.
+- Không bypass CORS.
+- Không scraping nội dung sau đăng nhập.
+- Không dùng unofficial token.
+
+Đánh dấu:
+
+**AZOTA DIRECT API — NOT AVAILABLE / NOT VERIFIED.**
+
+Giải thích rõ trạng thái trong UI.
+
+## 11.2. PROVIDER ADAPTER
+
+Thiết kế kiến trúc mở rộng:
+
+AzotaIntegrationProvider
+
+Có khả năng hỗ trợ những thao tác được xác minh:
+
+- CheckAvailability.
+- Connect.
+- Disconnect.
+- ImportQuestions.
+- ExportExam.
+- ImportResults.
+- SyncMetadata.
+
+Không tuyên bố mọi thao tác đều được Azota hỗ trợ.
+
+Các phương thức chưa có API phải trả về trạng thái NOT_SUPPORTED rõ ràng.
+
+Không tạo API mock rồi báo kết nối thật thành công.
+
+## 11.3. FILE-BASED FALLBACK
+
+Nếu chưa thể tích hợp API trực tiếp:
+
+Cho phép giáo viên:
+
+1. Xuất đề từ TeacherOS sang DOCX/PDF hoặc định dạng phù hợp được Azota hỗ trợ.
+2. Nhập file đó vào Azota bằng thao tác chủ động.
+3. Nhập file kết quả Excel được giáo viên xuất từ Azota, nếu cấu trúc file tương thích.
+4. Xem trước dữ liệu, ánh xạ cột và xác nhận trước khi nhập vào TeacherOS.
+
+Tái sử dụng import/export hiện có.
+
+Không yêu cầu backend mới.
+
+Không giả vờ quá trình nhập file là đồng bộ API tự động.
+
+## 11.4. SECURITY
+
+Chỉ khi API chính thức được xác minh và giáo viên đồng ý mới được thiết lập kết nối.
+
+Nếu API cần client secret:
+- Không nhúng secret trong Vite frontend.
+- Không lưu secret trong IndexedDB.
+- Xem xét backend/proxy bảo mật riêng có phạm vi tối thiểu, nếu thật sự cần.
+- Không triển khai backend đó trước khi phương thức xác thực được xác minh.
+
+Mọi truyền dữ liệu ra Azota phải có sự đồng ý rõ ràng.
+
+Ưu tiên chỉ gửi dữ liệu tối thiểu cần cho thao tác.
+
+Không tự upload toàn bộ Resource Vault.
+
+Không đồng bộ điểm học sinh ngầm.
+
+# 12. EXAM FORM DESIGNER
+
+Đây là yêu cầu quan trọng thứ tư.
+
+Xây dựng công cụ:
+
+**Exam Form Designer — Bộ thiết kế mẫu đề kiểm tra**
+
+Giáo viên được chọn mẫu trước khi xuất.
+
+## 12.1. PRESET TEMPLATES
+
+Cung cấp các mẫu có thể chỉnh sửa:
+
+- Kiểm tra 15 phút.
+- Kiểm tra 45 phút.
+- Kiểm tra giữa học kỳ.
+- Kiểm tra cuối học kỳ.
+- Đề luyện tập.
+- Đề thi thử.
+- Đề trắc nghiệm.
+- Đề tự luận.
+- Đề kết hợp.
+- Mẫu tùy chỉnh của giáo viên.
+
+Không tuyên bố một mẫu là chuẩn chính thức của Bộ GD&ĐT nếu chưa có tài liệu và quy định tương ứng.
+
+Các mẫu chỉ là cấu hình gợi ý.
+
+## 12.2. FORM CONFIGURATION
+
+Giáo viên có thể chỉnh:
+
+### Header
+- Tên trường.
+- Tổ bộ môn.
+- Năm học.
+- Tên kỳ kiểm tra.
+- Môn học.
+- Khối lớp.
+- Thời gian làm bài.
+- Mã đề.
+
+### Student Information
+- Họ và tên.
+- Lớp.
+- Số báo danh.
+- Mã học sinh.
+- Ngày kiểm tra.
+
+### Page Layout
+- A4.
+- Portrait/Landscape.
+- Lề trên/dưới/trái/phải.
+- Font chữ.
+- Cỡ chữ.
+- Giãn dòng.
+- Khoảng cách giữa câu.
+- Chia cột.
+- Header/Footer.
+- Số trang.
+- Vị trí mã đề.
+
+### Exam Structure
+- Các phần câu hỏi.
+- Tên từng phần.
+- Hướng dẫn làm bài.
+- Số điểm từng phần.
+- Số thứ tự câu.
+- Định dạng phương án A/B/C/D.
+- Vị trí hình ảnh.
+- Vị trí công thức.
+
+### Answer Key
+- Bảng đáp án riêng.
+- Đáp án theo từng mã đề.
+- Lời giải nếu có.
+- Bảng điểm và hướng dẫn chấm.
+
+## 12.3. VISUAL FORM EDITOR
+
+Thiết kế bố cục:
+
+Bên trái:
+Danh sách mẫu và cấu hình.
+
+Ở giữa:
+Preview trang A4.
+
+Bên phải:
+Thuộc tính phần tử đang chọn.
+
+Có:
+- Chọn mẫu.
+- Chỉnh thông tin.
+- Xem trước.
+- Lưu thành mẫu riêng.
+- Nhân bản mẫu.
+- Đặt mẫu mặc định.
+- Hoàn tác thay đổi.
+- Xuất DOCX/PDF.
+
+Ưu tiên editor dựa trên layout schema có cấu trúc.
+
+Không bắt buộc triển khai trình kéo thả tự do nếu không bảo đảm chính xác khi xuất Word.
+
+Đặc biệt, Preview và file DOCX thực tế phải thống nhất trong phạm vi engine xuất tài liệu hỗ trợ.
+
+## 12.4. TEMPLATE STORAGE
+
+Mẫu đề có:
+
+- Form ID.
+- Name.
+- Version.
+- Page Settings.
+- Header Settings.
+- Body Settings.
+- Answer Layout.
+- Footer Settings.
+- CreatedAt.
+- UpdatedAt.
+
+Lưu local-first.
+
+Có Import/Export mẫu dạng JSON hợp lệ.
+
+Không làm mất mẫu cũ khi cập nhật ứng dụng.
+
+## 12.5. DOCX & PDF EXPORT
+
+Tái sử dụng Print Studio và exporter hiện có.
+
+Không viết lại DOCX engine nếu không cần.
+
+Bảo đảm:
+
+- Font tiếng Việt ổn định.
+- Công thức không bị lỗi.
+- Hình không lệch.
+- Câu hỏi không tách khỏi hình không phù hợp.
+- Không mất mã đề.
+- Đáp án đúng từng mã đề.
+- Bảng biến thiên/đồ thị được giữ nguyên.
+- Không cắt nội dung.
+- Hỗ trợ ngắt trang hợp lý.
+
+Nếu không thể xuất một loại tài nguyên sang định dạng được chọn, phải cảnh báo trước khi tải file.
+
+Không xuất tài liệu lỗi một cách im lặng.
+
+# 13. INTEGRATED EXAM CREATION EXPERIENCE
+
+Xây dựng luồng giao diện thống nhất:
+
+## STEP 1 — REQUEST
+
+Giáo viên nhập yêu cầu.
+
+## STEP 2 — UNDERSTAND
+
+Hệ thống chuyển thành cấu hình và hiển thị để xác nhận.
+
+## STEP 3 — SOURCE
+
+Chọn Resource Vault, Question Bank hoặc cả hai.
+
+## STEP 4 — GENERATE
+
+Tìm câu, tạo biến thể được kiểm chứng, lắp ráp ma trận.
+
+## STEP 5 — REVIEW
+
+Giáo viên xem:
+- Câu hỏi.
+- Nguồn.
+- Đáp án.
+- Lời giải.
+- Trạng thái kiểm chứng.
+
+## STEP 6 — CHOOSE FORM
+
+Chọn mẫu trình bày và xem trước.
+
+## STEP 7 — PUBLISH/EXPORT
+
+Chỉ cho phép những hành động đáp ứng điều kiện:
+
+- Xuất DOCX.
+- Xuất PDF nếu được hỗ trợ.
+- Chuyển Exam Mixer.
+- Tạo phiếu OMR.
+- Xuất file tương thích Azota nếu có.
+
+Không công bố hoặc gửi bài thi lên dịch vụ ngoài khi chưa được giáo viên xác nhận.
+
+# 14. DATA ARCHITECTURE
+
+Audit IndexedDB/Dexie schema hiện tại.
+
+Không mặc định schema vẫn là v8 nếu dự án đã nâng cấp.
+
+Ưu tiên tái sử dụng bảng và model hiện có.
+
+Có thể bổ sung các thành phần dữ liệu:
+
+- ResourceQuestionIndex.
+- ParsedExamCommand.
+- WorkflowContext.
+- WorkflowHistory.
+- ExamFormTemplate.
+- ExternalIntegrationConfig.
+- RetrievalProvenance.
+
+Không tạo bảng mới nếu cấu trúc hiện hữu đã đáp ứng.
+
+Nếu cần migration:
+- Dùng phiên bản schema tiếp theo phù hợp.
+- Migration không phá hủy.
+- Không reset dữ liệu.
+- Kiểm tra nâng cấp từ database cũ.
+- Giữ các bản nháp và mã đề.
+- Có phương án backup.
+
+# 15. DATA INTEGRITY
+
+Các nguyên tắc bắt buộc:
+
+1. File gốc bất biến.
+2. Câu gốc bất biến.
+3. Biến thể có ID riêng.
+4. Đáp án biến thể được kiểm chứng.
+5. Đồ thị và công thức thuộc đúng biến thể.
+6. Mã đề có Answer Mapping riêng.
+7. Mẫu trình bày không làm thay đổi nội dung đề.
+8. Chấm OMR chỉ dùng đáp án chính thức đã xác nhận.
+9. Nguồn câu hỏi được lưu vết.
+10. Các thay đổi quan trọng có lịch sử kiểm tra.
+
+Không làm mất dữ liệu chỉ vì giáo viên chuyển qua ứng dụng khác.
+
+# 16. UI/UX DESIGN
+
+Giữ nguyên:
+
+**AURORA BENTO PREMIUM**
+
+Phong cách:
+- Hiện đại.
+- Chuyên nghiệp.
+- Sáng.
+- Tông xanh/tím nhẹ.
+- Cards rõ ràng.
+- Font tiếng Việt ổn định.
+- Responsive.
+- Hiệu ứng tối giản.
+
+Không thiết kế lại toàn bộ TeacherOS.
+
+Không tạo thêm nhiều màn hình nếu có thể tái sử dụng màn hình cũ.
+
+Ưu tiên giảm thao tác.
+
+Ví dụ:
+
+Trước đây:
+Resource Vault → tải file → mở Exam Mixer → nhập file lại → chọn câu → mở Print Studio.
+
+Sau nâng cấp:
+Resource Vault → Tạo đề từ tài liệu → Nhập yêu cầu → Chọn mẫu → Xuất.
+
+Đây là thay đổi UX cốt lõi.
+
+# 17. TESTING
+
+Bắt buộc viết test cho:
+
+## RESOURCE VAULT
+1. Đọc câu hỏi từ file đã lưu.
+2. Giữ nguyên công thức.
+3. Giữ hình gắn đúng câu.
+4. Không sửa file gốc.
+5. Lưu source reference.
+6. Không nhập trùng không kiểm soát.
+
+## NATURAL LANGUAGE COMMANDS
+7. Phân tích yêu cầu tiếng Việt.
+8. Nhận môn và lớp.
+9. Nhận số lượng câu.
+10. Nhận loại câu.
+11. Nhận mức độ.
+12. Nhận nguồn Resource Vault.
+13. Phát hiện yêu cầu mâu thuẫn.
+14. Không tự đoán thông số chưa rõ.
+
+## EXAM GENERATION
+15. Chọn câu đúng chủ đề.
+16. Đúng ma trận.
+17. Không chọn trùng.
+18. Sinh biến thể hợp lệ.
+19. Tính lại đáp án.
+20. Không biến đổi câu BLOCKED.
+21. Báo thiếu câu trung thực.
+
+## CONNECTED WORKFLOW
+22. Resource Vault → Exam Generator.
+23. Exam Generator → Exam Mixer.
+24. Exam Mixer → Form Designer.
+25. Form Designer → Print Studio.
+26. Exam Mixer → Smart Grading.
+27. Dữ liệu ngữ cảnh không bị mất.
+28. Reload không làm mất workflow.
+
+## AZOTA
+29. Không có API chính thức → không gọi endpoint không xác minh.
+30. File export/import fallback hoạt động.
+31. Không lộ credentials.
+32. Không tự upload dữ liệu.
+33. Provider trạng thái NOT_SUPPORTED hoạt động đúng.
+
+Nếu có API chính thức, bổ sung contract tests với phạm vi đã xác minh.
+
+## EXAM FORM
+34. Chọn mẫu.
+35. Chỉnh header.
+36. Lưu mẫu mới.
+37. Áp dụng mẫu cho nhiều mã đề.
+38. DOCX xuất đúng.
+39. Không mất công thức và hình.
+40. Đáp án không bị thay đổi khi chỉnh layout.
+
+## REGRESSION
+41. Exam Mixer vẫn trộn câu.
+42. Answer Mapping vẫn chính xác.
+43. Smart Grading không bị ảnh hưởng.
+44. IndexedDB giữ dữ liệu.
+45. TypeScript PASS.
+46. Production Build PASS.
+
+Không báo PASS nếu chưa chạy.
+
+Không dùng dữ liệu giả để chứng minh kết nối thật.
+
+# 18. EXECUTION STRATEGY — TRÁNH HẾT TOKEN
+
+Không triển khai tất cả chức năng đồng thời.
+
+Chia thành bốn đợt có thể kiểm thử độc lập.
+
+## PHASE A — RESOURCE VAULT + NATURAL LANGUAGE
+
+Ưu tiên cao nhất:
+
+1. Audit Resource Vault.
+2. Kết nối Unified Question Bank.
+3. Lập chỉ mục câu hỏi.
+4. Xây Search/Retrieval Engine.
+5. Xây bộ phân tích yêu cầu tiếng Việt.
+6. Tạo đề bằng câu hỏi từ nguồn thật.
+7. Tạo biến thể bằng engine hiện có.
+8. Hiển thị kết quả và nguồn.
+9. Test và Build.
+
+**Hoàn thành Phase A trước khi bắt đầu Phase B.**
+
+## PHASE B — CONNECTED WORKFLOW
+
+1. Tạo shared workflow context.
+2. Kết nối Resource Vault.
+3. Kết nối Exam Generator.
+4. Kết nối Exam Mixer.
+5. Kết nối Print Studio.
+6. Kết nối Smart Grading.
+7. Tạo contextual actions.
+8. Tối ưu UX.
+9. Regression Tests.
+
+## PHASE C — EXAM FORM DESIGNER
+
+1. Tạo template schema.
+2. Tạo các preset.
+3. Tạo Form Editor.
+4. Live A4 Preview.
+5. Lưu mẫu.
+6. Tích hợp DOCX exporter.
+7. Kiểm tra layout và font.
+8. Test và Build.
+
+## PHASE D — AZOTA INTEGRATION
+
+1. Xác minh khả năng tích hợp chính thức.
+2. Nếu có API được cấp quyền, thiết kế provider.
+3. Nếu chưa có, triển khai file-based compatibility.
+4. Tạo giao diện trạng thái kết nối minh bạch.
+5. Kiểm tra bảo mật.
+6. Test và Build.
+
+**KHÔNG xây dựng Azota API giả.**
+
+# 19. TOKEN OPTIMIZATION RULES
+
+Tài khoản Gemini AI Studio có hạn mức.
+
+Bắt buộc:
+
+- Không đọc lại toàn bộ repo khi không cần.
+- Không tạo lại module đã có.
+- Không thiết kế lại App Shell.
+- Không viết lại Shuffle Engine.
+- Không viết lại Math Engine.
+- Không tạo thư viện câu hỏi thứ hai.
+- Không triển khai cloud backend không cần thiết.
+- Không thêm package quá lớn.
+- Không viết báo cáo dài trong lúc code.
+- Không tạo nút giả.
+- Không chạy vòng lặp sửa lỗi vô hạn.
+
+Hoàn thành từng Phase theo chiều dọc:
+
+UI → Data → Logic → Integration → Tests → Build.
+
+Sau mỗi Phase, bảo đảm dự án vẫn có thể build.
+
+# 20. CLOUDFLARE & GITHUB SAFETY
+
+Dự án sử dụng React/Vite/TypeScript/Bun.
+
+Giữ nguyên hệ thống deployment hiện tại.
+
+Nếu thêm dependency:
+- Cập nhật package.json.
+- Đồng bộ bun.lock.
+- Chạy bun install --frozen-lockfile.
+- Chạy bun run build.
+
+Không sửa lockfile bằng tay.
+
+Không vô hiệu hóa TypeScript checking.
+
+Không xóa test cũ.
+
+Không reset IndexedDB.
+
+Không force-push.
+
+Không khẳng định đã Push GitHub nếu chưa xác minh.
+
+Nếu workspace chứa thay đổi chưa được Push, cảnh báo trước khi đồng bộ hoặc ghi đè.
+
+# 21. ACCEPTANCE CRITERIA
+
+Dự án chỉ được coi là đạt mục tiêu khi giáo viên có thể:
+
+1. Mở Resource Vault.
+2. Chọn thư mục tài liệu thật.
+3. Nhập yêu cầu bằng tiếng Việt.
+4. Xem cấu hình được hệ thống hiểu.
+5. Xác nhận cấu hình.
+6. Hệ thống tìm được các câu phù hợp.
+7. Xem nguồn từng câu.
+8. Tạo biến thể số có kiểm chứng.
+9. Tạo đề theo ma trận.
+10. Duyệt đáp án.
+11. Chọn mẫu đề.
+12. Xuất DOCX đúng bố cục.
+13. Chuyển sang Exam Mixer mà không nhập lại dữ liệu.
+14. Tạo mã đề chính xác.
+15. Tiếp tục sang Smart Grading khi phù hợp.
+
+Với Azota, chỉ đánh dấu tích hợp API hoàn thành nếu có bằng chứng API chính thức hoạt động; nếu không, báo rõ chỉ hoàn thành nhập/xuất file.
+
+# 22. FINAL EXECUTION COMMAND
+
+**BẮT ĐẦU PHASE A NGAY TRÊN SOURCE HIỆN TẠI.**
+
+Ưu tiên tạo ra luồng hoạt động thật:
+
+**Resource Vault → Yêu cầu tiếng Việt → Tìm câu hỏi → Sinh biến thể → Tạo đề → Giáo viên duyệt.**
+
+Không chỉ viết kế hoạch.
+
+Không triển khai dàn trải cả 4 Phase nếu Phase A chưa đạt.
+
+Giữ hệ thống hiện tại ổn định.
+
+Sau khi hoàn thành Phase A, báo cáo ngắn:
+
+- Source Revision.
+- Modules Reused.
+- Features Implemented.
+- Files Changed.
+- Resource Retrieval Results.
+- Natural Language Parsing Results.
+- Variant Verification.
+- Integration Tests.
+- TypeScript Status.
+- Production Build Status.
+- Remaining Phases.
+- GitHub Sync Status.
+
+## FINAL GOAL
+
+**BIẾN TEACHEROS THÀNH MỘT WORKSPACE GIÁO DỤC THỐNG NHẤT: GIÁO VIÊN CHỈ CẦN LƯU TÀI LIỆU, MÔ TẢ YÊU CẦU BẰNG TIẾNG VIỆT, HỆ THỐNG TỰ TÌM CÂU HỎI PHÙ HỢP, SINH BIẾN THỂ CÓ KIỂM CHỨNG, TẠO ĐỀ THEO MẪU VÀ KẾT NỐI LIỀN MẠCH VỚI CÁC CÔNG CỤ CÒN LẠI.**

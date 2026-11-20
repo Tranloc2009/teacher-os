@@ -1,6 +1,10 @@
 import JSZip from 'jszip';
 import { MathVisualAsset } from '../types/mathExam';
 import { createMathVisualAsset } from './mathIntegrity';
+import {
+  convertWmfToSvg,
+  decodeOleFormulaPayload,
+} from './oleAndWmfDecoder';
 
 export interface XmlNode {
   type: 'element' | 'text';
@@ -18,13 +22,32 @@ export interface ExtractedOmmlFragment {
   complexFallback: boolean;
 }
 
+export interface DocxUnresolvedOleDetail {
+  location: string;
+  progId?: string;
+  oleTarget?: string;
+  wmfPreviewTarget?: string;
+  reason: string;
+}
+
 export interface DocxParagraphSegment {
   text: string;
   ommlFragments: ExtractedOmmlFragment[];
   assetIds: string[];
   tableText?: string;
+  tableRows?: string[][];
+  paragraphLocation?: string;
   hasBoldCorrectCue?: boolean;
+  /** Nhãn phương án A/B/C/D thực sự được gạch chân (w:u khác none) trong đoạn này */
+  underlinedOptionLabels?: Array<'A' | 'B' | 'C' | 'D'>;
+  /** Nhãn ý a)/b)/c)/d) thực sự được gạch chân (w:u khác none) trong đoạn này */
+  underlinedStatementLabels?: Array<'a' | 'b' | 'c' | 'd'>;
+  /** Đoạn chứa ảnh neo (wp:anchor) — thường dùng cho hình vẽ đứng sát trước tiêu đề câu */
+  hasAnchoredImage?: boolean;
   hasLegacyOleEquation?: boolean;
+  oleDecodedLatexCount?: number;
+  oleWmfPreviewAssetIds?: string[];
+  unresolvedOleCount?: number;
 }
 
 export interface DocxExtractionResult {
@@ -36,10 +59,16 @@ export interface DocxExtractionResult {
   hasLegacyOleEquation: boolean;
   hasVbaMacro?: boolean;
   legacyOleCount?: number;
+  legacyOleDecodedLatexCount?: number;
+  legacyOleWmfPreviewCount?: number;
+  unresolvedOleCount?: number;
+  unresolvedOleDetails?: DocxUnresolvedOleDetail[];
   legacyOleProgIds?: string[];
   unsupportedMediaCount?: number;
+  convertedWmfMediaCount?: number;
   tableCount?: number;
   supportedImageCount?: number;
+  sourceFileHash?: string;
 }
 
 export const DOCX_MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -540,6 +569,9 @@ interface MediaDescriptor {
   ext: string;
   supported: boolean;
   dataUrl?: string;
+  rawBytes?: Uint8Array;
+  convertedFromWmf?: boolean;
+  wmfFailureReason?: string;
 }
 
 interface DocxNumberingLevelDef {
@@ -666,10 +698,11 @@ function parseDocxNumberingXml(xml: string): DocxNumberingRegistry {
 function resolveParagraphAutoNumberPrefix(
   pNode: XmlNode,
   rawText: string,
+  hasNonEmptyContent: boolean,
   numbering: DocxNumberingRegistry
 ): string {
   const trimmed = rawText.trim();
-  if (!trimmed) return '';
+  if (!trimmed && !hasNonEmptyContent) return '';
 
   const pPr = findChildren(pNode, 'w:pPr')[0];
   const numPr = findChildren(pPr, 'w:numPr')[0];
@@ -722,13 +755,15 @@ function resolveParagraphAutoNumberPrefix(
   if (numFmt === 'lowerLetter') {
     return `${formatted}) `;
   }
-  if (numFmt === 'decimal' && ilvl === 0) {
+  if (numFmt === 'decimal') {
     const rawLvlText = lvlDef?.lvlText ?? '';
     if (/(?:Câu|Cau|Question|Bài|Bai)/i.test(rawLvlText)) {
       const expanded = rawLvlText.replace(/%\d+/g, formatted).trim();
       return /[:.)]$/.test(expanded) ? `${expanded} ` : `${expanded}: `;
     }
-    return `Câu ${formatted}: `;
+    if (ilvl === 0) {
+      return `Câu ${formatted}: `;
+    }
   }
   if (numFmt === 'upperRoman' && ilvl === 0) {
     return `Phần ${formatted}. `;
@@ -739,15 +774,22 @@ function resolveParagraphAutoNumberPrefix(
 interface DocxExtractionContext {
   relsById: Map<string, string>;
   mediaByTarget: Map<string, MediaDescriptor>;
+  embeddingsByTarget: Map<string, Uint8Array>;
   resolvedAssetByTarget: Map<string, MathVisualAsset>;
   assets: MathVisualAsset[];
   imageCounter: { count: number };
   ommlCounter: { count: number };
+  oleSvgCounter: { count: number };
   oleCounter: {
     count: number;
+    decodedLatexCount: number;
+    wmfPreviewCount: number;
+    unresolvedCount: number;
+    unresolvedDetails: DocxUnresolvedOleDetail[];
     progIds: Set<string>;
     wmfPreviewRefs: Set<string>;
   };
+  convertedWmfMediaCount: { count: number };
   unsupportedMediaRefs: Set<string>;
   numbering: DocxNumberingRegistry;
   warnings: string[];
@@ -806,21 +848,62 @@ function collectBodyBlockElements(container: XmlNode): XmlNode[] {
   return blocks;
 }
 
-function recordOleElement(
+function computeBinaryContentHash(bytes: Uint8Array): string {
+  // Deterministic 64-bit dual-FNV hex digest (sync, works identically in browser & Node)
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b1;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    h1 ^= b;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= b ^ (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
+function resolveOleElement(
   oleContainerNode: XmlNode,
-  ctx: DocxExtractionContext
-): void {
+  ctx: DocxExtractionContext,
+  paragraphLocation: string
+): {
+  replacementText: string;
+  assetId?: string;
+  decodedLatex: boolean;
+  wmfPreviewUsed: boolean;
+  unresolved: boolean;
+} {
   ctx.oleCounter.count += 1;
   const oleObjNodes =
     oleContainerNode.tag === 'o:OLEObject'
       ? [oleContainerNode]
       : findAllDescendants(oleContainerNode, 'o:OLEObject');
+
+  let progId: string | undefined;
+  let oleTarget: string | undefined;
+  let oleBytes: Uint8Array | undefined;
+
   for (const ole of oleObjNodes) {
-    const progId = ole.attrs?.ProgID || ole.attrs?.['o:ProgID'] || ole.attrs?.progId;
-    if (progId) {
-      ctx.oleCounter.progIds.add(progId);
+    const p = ole.attrs?.ProgID || ole.attrs?.['o:ProgID'] || ole.attrs?.progId;
+    if (p) {
+      progId = p;
+      ctx.oleCounter.progIds.add(p);
+    }
+    const rId = ole.attrs?.['r:id'] || ole.attrs?.['o:relid'];
+    if (rId) {
+      const target = ctx.relsById.get(rId);
+      if (target) {
+        oleTarget = target;
+        const bin = ctx.embeddingsByTarget.get(target);
+        if (bin) oleBytes = bin;
+      }
     }
   }
+
+  let wmfPreviewTarget: string | undefined;
+  let wmfPreviewBytes: Uint8Array | undefined;
+  let supportedRasterPreviewAsset: MathVisualAsset | undefined;
+
   const vmlPreviews = findAllDescendants(oleContainerNode, 'v:imagedata');
   for (const preview of vmlPreviews) {
     const rId =
@@ -829,14 +912,103 @@ function recordOleElement(
       preview.attrs?.['o:relid'];
     if (!rId) continue;
     const target = ctx.relsById.get(rId);
-    if (target) {
-      const media = ctx.mediaByTarget.get(target);
-      if (media && !media.supported) {
-        ctx.oleCounter.wmfPreviewRefs.add(target);
-        ctx.unsupportedMediaRefs.add(target);
+    if (!target) continue;
+    const media = ctx.mediaByTarget.get(target);
+    if (!media) continue;
+    if (media.ext.toLowerCase() === 'wmf' && media.rawBytes) {
+      wmfPreviewTarget = target;
+      wmfPreviewBytes = media.rawBytes;
+      ctx.oleCounter.wmfPreviewRefs.add(target);
+    } else if (media.supported && media.dataUrl && !media.convertedFromWmf) {
+      const resolved = resolveImageAssetByRelId(rId, ctx, paragraphLocation);
+      if (resolved?.kind === 'asset') {
+        supportedRasterPreviewAsset = resolved.asset;
       }
+    } else if (!media.supported) {
+      wmfPreviewTarget = target;
+      ctx.oleCounter.wmfPreviewRefs.add(target);
     }
   }
+
+  const decoded = decodeOleFormulaPayload({
+    oleBytes,
+    wmfPreviewBytes,
+    progId,
+  });
+
+  if (decoded.mode === 'ole-mtef-latex' && decoded.latex) {
+    ctx.oleCounter.decodedLatexCount += 1;
+    return {
+      replacementText: `$${decoded.latex}$`,
+      decodedLatex: true,
+      wmfPreviewUsed: false,
+      unresolved: false,
+    };
+  }
+
+  if (decoded.mode === 'ole-wmf-svg-preview' && decoded.svgDataUrl) {
+    ctx.oleCounter.wmfPreviewCount += 1;
+    ctx.oleSvgCounter.count += 1;
+    const svgId = `docx-ole-svg-${ctx.oleSvgCounter.count}`;
+    const asset = createMathVisualAsset({
+      id: svgId,
+      kind: 'geometry-svg',
+      label: `Công thức OLE (WMF→SVG #${ctx.oleSvgCounter.count})`,
+      sourceData: decoded.svgDataUrl,
+      altText: `Công thức toán trích từ WMF preview (${progId ?? 'OLE'})`,
+      required: true,
+      sourcePartPath: wmfPreviewTarget ?? oleTarget ?? 'word/embeddings',
+      sourceOrdinal: ctx.oleSvgCounter.count,
+      sourceLocation: paragraphLocation,
+    });
+    ctx.assets.push(asset);
+    return {
+      replacementText: ` [[ASSET:${svgId}]] `,
+      assetId: svgId,
+      decodedLatex: false,
+      wmfPreviewUsed: true,
+      unresolved: false,
+    };
+  }
+
+  if (supportedRasterPreviewAsset) {
+    ctx.oleCounter.wmfPreviewCount += 1;
+    return {
+      replacementText: ` [[ASSET:${supportedRasterPreviewAsset.id}]] `,
+      assetId: supportedRasterPreviewAsset.id,
+      decodedLatex: false,
+      wmfPreviewUsed: true,
+      unresolved: false,
+    };
+  }
+
+  ctx.oleCounter.unresolvedCount += 1;
+  if (wmfPreviewTarget) {
+    ctx.unsupportedMediaRefs.add(wmfPreviewTarget);
+  }
+  ctx.oleCounter.unresolvedDetails.push({
+    location: paragraphLocation,
+    progId,
+    oleTarget,
+    wmfPreviewTarget,
+    reason:
+      decoded.reason ??
+      'Không giải mã được MTEF và không có ảnh xem trước WMF/PNG hợp lệ.',
+  });
+  return {
+    replacementText: ' [CÔNG_THỨC_OLE_LEGACY] ',
+    decodedLatex: false,
+    wmfPreviewUsed: false,
+    unresolved: true,
+  };
+}
+
+function isRunUnderlined(rPr?: XmlNode): boolean {
+  if (!rPr) return false;
+  const uNode = findFirstDescendant(rPr, 'w:u');
+  if (!uNode) return false;
+  const val = (uNode.attrs?.['w:val'] ?? 'single').toLowerCase();
+  return val !== 'none' && val !== 'false' && val !== '0';
 }
 
 function extractParagraphContent(
@@ -847,25 +1019,56 @@ function extractParagraphContent(
   let text = '';
   const ommlFragments: ExtractedOmmlFragment[] = [];
   const assetIds: string[] = [];
+  const oleWmfPreviewAssetIds: string[] = [];
+  const runTokens: Array<{ text: string; underlined: boolean }> = [];
   let hasBoldCorrectCue = false;
   let hasLegacyOleEquation = false;
+  let hasAnchoredImage = false;
+  let oleDecodedLatexCount = 0;
+  let unresolvedOleCount = 0;
 
-  const attachRelId = (rId: string) => {
+  const attachRelId = (rId: string): boolean => {
     const resolved = resolveImageAssetByRelId(rId, ctx, paragraphLocation);
-    if (!resolved) return;
+    if (!resolved) return false;
     if (resolved.kind === 'asset') {
       if (!assetIds.includes(resolved.asset.id)) {
         assetIds.push(resolved.asset.id);
       }
       text += ` [[ASSET:${resolved.asset.id}]] `;
+      return true;
     } else {
       ctx.unsupportedMediaRefs.add(resolved.target);
+      return false;
     }
   };
 
   const walkParagraphNode = (node: XmlNode) => {
     if (node.type === 'text') return;
     const tag = node.tag ?? '';
+
+    // Handle mc:AlternateContent cleanly: prefer mc:Choice, only walk mc:Fallback if Choice yielded no content/media
+    if (tag === 'mc:AlternateContent') {
+      const choice = findChildren(node, 'mc:Choice')[0];
+      const fallback = findChildren(node, 'mc:Fallback')[0];
+      const beforeTextLen = text.length;
+      const beforeAssets = assetIds.length;
+      const beforeOmml = ommlFragments.length;
+      if (choice) {
+        for (const ch of choice.children ?? []) {
+          walkParagraphNode(ch);
+        }
+      }
+      const choiceYieldedSomething =
+        text.length > beforeTextLen ||
+        assetIds.length > beforeAssets ||
+        ommlFragments.length > beforeOmml;
+      if (!choiceYieldedSomething && fallback) {
+        for (const fb of fallback.children ?? []) {
+          walkParagraphNode(fb);
+        }
+      }
+      return;
+    }
 
     if (tag === 'm:oMathPara' || tag === 'm:oMath') {
       ctx.ommlCounter.count += 1;
@@ -874,23 +1077,56 @@ function extractParagraphContent(
       text += frag.latex || '[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]';
       if (frag.complexFallback) {
         ctx.warnings.push(
-          `Công thức OMML #${ctx.ommlCounter.count} có cấu trúc phức tạp — hệ thống đã giữ nguyên XML gốc nhưng cần giáo viên rà soát lại phần hiển thị.`
+          `Công thức OMML #${ctx.ommlCounter.count} tại ${paragraphLocation} có cấu trúc phức tạp — cần giáo viên rà soát lại phần hiển thị.`
         );
       }
       return;
     }
 
     if (tag === 'w:object' || tag === 'o:OLEObject') {
-      hasLegacyOleEquation = true;
-      recordOleElement(node, ctx);
-      text += ' [CÔNG_THỨC_OLE_LEGACY] ';
+      const res = resolveOleElement(node, ctx, paragraphLocation);
+      if (res.decodedLatex) oleDecodedLatexCount += 1;
+      if (res.wmfPreviewUsed && res.assetId) {
+        if (!assetIds.includes(res.assetId)) assetIds.push(res.assetId);
+        oleWmfPreviewAssetIds.push(res.assetId);
+      }
+      if (res.unresolved) {
+        hasLegacyOleEquation = true;
+        unresolvedOleCount += 1;
+      }
+      text += res.replacementText;
+      return;
+    }
+
+    if (tag === 'w:drawing') {
+      if (findFirstDescendant(node, 'wp:anchor')) {
+        hasAnchoredImage = true;
+      }
+      const blips = findAllDescendants(node, 'a:blip');
+      for (const blip of blips) {
+        const rId = blip.attrs?.['r:embed'] || blip.attrs?.['r:link'];
+        if (rId) attachRelId(rId);
+      }
+      return;
+    }
+
+    if (tag === 'w:pict') {
+      const vmlImages = findAllDescendants(node, 'v:imagedata');
+      for (const vImg of vmlImages) {
+        const rId =
+          vImg.attrs?.['r:id'] ||
+          vImg.attrs?.['r:embed'] ||
+          vImg.attrs?.['r:pict'] ||
+          vImg.attrs?.['o:relid'];
+        if (rId) attachRelId(rId);
+      }
       return;
     }
 
     if (tag === 'w:r') {
       const rPr = findChildren(node, 'w:rPr')[0];
       const isBold = Boolean(findFirstDescendant(rPr, 'w:b'));
-      const hasUnderline = Boolean(findFirstDescendant(rPr, 'w:u'));
+      const hasUnderline = isRunUnderlined(rPr);
       const colorVal = findFirstDescendant(rPr, 'w:color')?.attrs?.['w:val']?.toLowerCase();
       const hasRedOrBlueHighlight =
         Boolean(colorVal && colorVal !== '000000' && colorVal !== 'auto') ||
@@ -898,70 +1134,50 @@ function extractParagraphContent(
 
       const vertAlign = findFirstDescendant(rPr, 'w:vertAlign')?.attrs?.['w:val'];
 
-      // 1. Check OLE objects inside run (<w:object> / <o:OLEObject>)
-      const oleObjectsInRun = findAllDescendants(node, 'w:object');
-      if (oleObjectsInRun.length > 0) {
-        hasLegacyOleEquation = true;
-        for (const oleNode of oleObjectsInRun) {
-          recordOleElement(oleNode, ctx);
-          text += ' [CÔNG_THỨC_OLE_LEGACY] ';
-        }
-      } else {
-        const bareOleNodes = findAllDescendants(node, 'o:OLEObject');
-        if (bareOleNodes.length > 0) {
-          hasLegacyOleEquation = true;
-          for (const oleNode of bareOleNodes) {
-            recordOleElement(oleNode, ctx);
-            text += ' [CÔNG_THỨC_OLE_LEGACY] ';
-          }
-        }
-      }
-
-      // 2. Check DrawingML embedded images (<a:blip>)
-      const blips = findAllDescendants(node, 'a:blip');
-      for (const blip of blips) {
-        const rId = blip.attrs?.['r:embed'] || blip.attrs?.['r:link'];
-        if (rId) attachRelId(rId);
-      }
-
-      // 3. Check standalone VML pictures (<w:pict><v:shape><v:imagedata r:id="..."/></v:shape></w:pict>)
-      const picts = findAllDescendants(node, 'w:pict');
-      for (const pict of picts) {
-        const vmlImages = findAllDescendants(pict, 'v:imagedata');
-        for (const vImg of vmlImages) {
-          const rId =
-            vImg.attrs?.['r:id'] ||
-            vImg.attrs?.['r:embed'] ||
-            vImg.attrs?.['r:pict'] ||
-            vImg.attrs?.['o:relid'];
-          if (rId) attachRelId(rId);
-        }
-      }
-
-      let runText = '';
+      // Walk direct children of <w:r> in document order so text, OLE, drawings, and AlternateContent stay strictly ordered!
       for (const child of node.children ?? []) {
         if (child.type !== 'element') continue;
-        if (child.tag === 'w:t') {
-          runText += collectNodeText(child);
-        } else if (child.tag === 'w:tab') {
-          runText += ' ';
-        } else if (child.tag === 'w:br') {
-          runText += '\n';
+        const cTag = child.tag ?? '';
+        if (cTag === 'w:rPr') continue;
+        if (
+          cTag === 'mc:AlternateContent' ||
+          cTag === 'w:object' ||
+          cTag === 'o:OLEObject' ||
+          cTag === 'w:drawing' ||
+          cTag === 'w:pict' ||
+          cTag === 'm:oMath' ||
+          cTag === 'm:oMathPara'
+        ) {
+          walkParagraphNode(child);
+          continue;
         }
-      }
 
-      if (runText) {
-        if ((isBold || hasUnderline || hasRedOrBlueHighlight) && /^\s*[A-Da-d]\./.test(runText.trim())) {
-          hasBoldCorrectCue = true;
+        let runChunk = '';
+        if (cTag === 'w:t' || cTag === 'w:delText') {
+          runChunk = collectNodeText(child);
+        } else if (cTag === 'w:tab') {
+          runChunk = '\t';
+        } else if (cTag === 'w:br' || cTag === 'w:cr') {
+          runChunk = '\n';
         }
-        if (vertAlign === 'subscript') {
-          const sub = toUnicodeSubOrSup(runText, 'subscript');
-          text += sub.fullyMapped ? sub.text : `_{${runText}}`;
-        } else if (vertAlign === 'superscript') {
-          const sup = toUnicodeSubOrSup(runText, 'superscript');
-          text += sup.fullyMapped ? sup.text : `^{${runText}}`;
-        } else {
-          text += runText;
+
+        if (runChunk) {
+          runTokens.push({ text: runChunk, underlined: hasUnderline });
+          if (
+            (isBold || hasUnderline || hasRedOrBlueHighlight) &&
+            /^\s*[A-Da-d]\./.test(runChunk.trim())
+          ) {
+            hasBoldCorrectCue = true;
+          }
+          if (vertAlign === 'subscript') {
+            const sub = toUnicodeSubOrSup(runChunk, 'subscript');
+            text += sub.fullyMapped ? sub.text : `_{${runChunk}}`;
+          } else if (vertAlign === 'superscript') {
+            const sup = toUnicodeSubOrSup(runChunk, 'superscript');
+            text += sup.fullyMapped ? sup.text : `^{${runChunk}}`;
+          } else {
+            text += runChunk;
+          }
         }
       }
       return;
@@ -974,7 +1190,65 @@ function extractParagraphContent(
 
   walkParagraphNode(pNode);
 
-  const autoPrefix = resolveParagraphAutoNumberPrefix(pNode, text, ctx.numbering);
+  // Detect exact underlined option labels (A/B/C/D) and statement labels (a/b/c/d) across adjacent runs
+  // (Handles both `<u>A.</u>` and `<u>A</u>.` where punctuation is in the following non-underlined run!)
+  const underlinedOptionLabels: Array<'A' | 'B' | 'C' | 'D'> = [];
+  const underlinedStatementLabels: Array<'a' | 'b' | 'c' | 'd'> = [];
+  for (let i = 0; i < runTokens.length; i++) {
+    const tok = runTokens[i];
+    if (!tok.underlined) continue;
+    const prevTail = i > 0 ? runTokens[i - 1].text : '';
+    const nextHead = i + 1 < runTokens.length ? runTokens[i + 1].text : '';
+    const trimmedTok = tok.text.trim();
+
+    // Case 1: Run itself contains `A.` or `B.` or multiple option headers underlined
+    const optMatches = Array.from(
+      tok.text.matchAll(/(?:^|[\s\t])([ABCD])\s*\./g)
+    );
+    for (const m of optMatches) {
+      const lbl = m[1] as 'A' | 'B' | 'C' | 'D';
+      if (!underlinedOptionLabels.includes(lbl)) underlinedOptionLabels.push(lbl);
+    }
+    // Case 2: Only single letter `A`/`B`/`C`/`D` is underlined, followed by `.` or `)` in next run
+    if (
+      /^[ABCD]$/.test(trimmedTok) &&
+      (prevTail === '' || /[\s\t\n]$/.test(prevTail)) &&
+      /^\s*[.)]/.test(nextHead)
+    ) {
+      const lbl = trimmedTok as 'A' | 'B' | 'C' | 'D';
+      if (!underlinedOptionLabels.includes(lbl)) underlinedOptionLabels.push(lbl);
+    }
+
+    // Statement labels `a)` / `b)` / `c)` / `d)`
+    const stmtMatches = Array.from(
+      tok.text.matchAll(/(?:^|[\s\t])([abcd])\s*\)/g)
+    );
+    for (const m of stmtMatches) {
+      const lbl = m[1] as 'a' | 'b' | 'c' | 'd';
+      if (!underlinedStatementLabels.includes(lbl)) {
+        underlinedStatementLabels.push(lbl);
+      }
+    }
+    if (
+      /^[abcd]$/.test(trimmedTok) &&
+      (prevTail === '' || /[\s\t\n]$/.test(prevTail)) &&
+      /^\s*\)/.test(nextHead)
+    ) {
+      const lbl = trimmedTok as 'a' | 'b' | 'c' | 'd';
+      if (!underlinedStatementLabels.includes(lbl)) {
+        underlinedStatementLabels.push(lbl);
+      }
+    }
+  }
+
+  const hasNonEmptyContent =
+    text.trim().length > 0 || assetIds.length > 0 || ommlFragments.length > 0;
+  const autoPrefix = resolveParagraphAutoNumberPrefix(
+    pNode,
+    text,
+    hasNonEmptyContent,
+    ctx.numbering
+  );
   if (autoPrefix) {
     text = `${autoPrefix}${text.trimStart()}`;
   }
@@ -983,8 +1257,18 @@ function extractParagraphContent(
     text,
     ommlFragments,
     assetIds,
+    paragraphLocation,
     hasBoldCorrectCue,
+    underlinedOptionLabels:
+      underlinedOptionLabels.length > 0 ? underlinedOptionLabels : undefined,
+    underlinedStatementLabels:
+      underlinedStatementLabels.length > 0 ? underlinedStatementLabels : undefined,
+    hasAnchoredImage: hasAnchoredImage || undefined,
     hasLegacyOleEquation,
+    oleDecodedLatexCount: oleDecodedLatexCount > 0 ? oleDecodedLatexCount : undefined,
+    oleWmfPreviewAssetIds:
+      oleWmfPreviewAssetIds.length > 0 ? oleWmfPreviewAssetIds : undefined,
+    unresolvedOleCount: unresolvedOleCount > 0 ? unresolvedOleCount : undefined,
   };
 }
 
@@ -1021,12 +1305,15 @@ export function isExamHeaderBannerTable(tableBody: string): boolean {
 export async function extractDocxDocument(
   buffer: ArrayBuffer | Uint8Array
 ): Promise<DocxExtractionResult> {
-  const byteLen = buffer instanceof ArrayBuffer ? buffer.byteLength : buffer.byteLength;
+  const rawUint8 =
+    buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const byteLen = rawUint8.byteLength;
   if (byteLen > DOCX_MAX_FILE_BYTES) {
     throw new Error('File .docx vượt quá giới hạn 50 MB.');
   }
+  const sourceFileHash = computeBinaryContentHash(rawUint8);
 
-  const zip = await JSZip.loadAsync(buffer);
+  const zip = await JSZip.loadAsync(rawUint8);
   const entryNames = Object.keys(zip.files);
   if (entryNames.length > DOCX_MAX_ZIP_ENTRIES) {
     throw new Error(`File .docx chứa quá nhiều mục (${entryNames.length} > ${DOCX_MAX_ZIP_ENTRIES}), có thể là ZIP không an toàn.`);
@@ -1051,6 +1338,8 @@ export async function extractDocxDocument(
   }
   const relsById = new Map<string, string>();
   const mediaByTarget = new Map<string, MediaDescriptor>();
+  const embeddingsByTarget = new Map<string, Uint8Array>();
+  const convertedWmfMediaCount = { count: 0 };
 
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {
@@ -1069,14 +1358,22 @@ export async function extractDocxDocument(
         : `word/${target.replace(/^\.\//, '')}`;
       relsById.set(id, normalizedTarget);
 
+      if (/\/embeddings\//i.test(normalizedTarget) && !embeddingsByTarget.has(normalizedTarget)) {
+        const embEntry = zip.file(normalizedTarget);
+        if (embEntry) {
+          const embBytes = await embEntry.async('uint8array');
+          embeddingsByTarget.set(normalizedTarget, embBytes);
+        }
+      }
+
       if (/\/media\//i.test(normalizedTarget) && !mediaByTarget.has(normalizedTarget)) {
         const mediaEntry = zip.file(normalizedTarget);
-        const ext = normalizedTarget.split('.').pop() ?? '';
+        const ext = (normalizedTarget.split('.').pop() ?? '').toLowerCase();
         const mimeInfo = getMimeFromExt(ext);
         const fileName = normalizedTarget.split('/').pop() ?? `image.${ext}`;
         if (mediaEntry && mimeInfo.supported) {
           let base64 = await mediaEntry.async('base64');
-          if (ext.toLowerCase() === 'svg') {
+          if (ext === 'svg') {
             const rawSvg = await mediaEntry.async('string');
             const cleanSvg = sanitizeSvgMarkup(rawSvg);
             if (cleanSvg !== rawSvg) {
@@ -1095,12 +1392,38 @@ export async function extractDocxDocument(
             supported: true,
             dataUrl,
           });
+        } else if (mediaEntry && ext === 'wmf') {
+          const rawBytes = await mediaEntry.async('uint8array');
+          const wmfConv = convertWmfToSvg(rawBytes);
+          if (wmfConv.ok && wmfConv.svgDataUrl) {
+            convertedWmfMediaCount.count += 1;
+            mediaByTarget.set(normalizedTarget, {
+              normalizedTarget,
+              fileName,
+              ext,
+              supported: true,
+              dataUrl: wmfConv.svgDataUrl,
+              rawBytes,
+              convertedFromWmf: true,
+            });
+          } else {
+            mediaByTarget.set(normalizedTarget, {
+              normalizedTarget,
+              fileName,
+              ext,
+              supported: false,
+              rawBytes,
+              wmfFailureReason: wmfConv.reason,
+            });
+          }
         } else if (mediaEntry && !mimeInfo.supported) {
+          const rawBytes = await mediaEntry.async('uint8array');
           mediaByTarget.set(normalizedTarget, {
             normalizedTarget,
             fileName,
             ext,
             supported: false,
+            rawBytes,
           });
         }
       }
@@ -1131,15 +1454,22 @@ export async function extractDocxDocument(
   const ctx: DocxExtractionContext = {
     relsById,
     mediaByTarget,
+    embeddingsByTarget,
     resolvedAssetByTarget: new Map(),
     assets: [],
     imageCounter: { count: 0 },
     ommlCounter: { count: 0 },
+    oleSvgCounter: { count: 0 },
     oleCounter: {
       count: 0,
+      decodedLatexCount: 0,
+      wmfPreviewCount: 0,
+      unresolvedCount: 0,
+      unresolvedDetails: [],
       progIds: new Set<string>(),
       wmfPreviewRefs: new Set<string>(),
     },
+    convertedWmfMediaCount,
     unsupportedMediaRefs: new Set<string>(),
     numbering,
     warnings,
@@ -1147,7 +1477,7 @@ export async function extractDocxDocument(
 
   const paragraphs: DocxParagraphSegment[] = [];
   const allOmml: ExtractedOmmlFragment[] = [];
-  let hasLegacyOleEquation = false;
+  let hasUnresolvedLegacyOle = false;
   let tableOrdinal = 0;
   let paragraphOrdinal = 0;
   let hasSeenQuestion = false;
@@ -1162,7 +1492,7 @@ export async function extractDocxDocument(
         ctx,
         `word/document.xml#w:p[${paragraphOrdinal}]`
       );
-      if (seg.hasLegacyOleEquation) hasLegacyOleEquation = true;
+      if (seg.hasLegacyOleEquation) hasUnresolvedLegacyOle = true;
       allOmml.push(...seg.ommlFragments);
       if (seg.text.trim() || seg.assetIds.length > 0) {
         if (QUESTION_BOUNDARY_RE.test(seg.text)) {
@@ -1174,6 +1504,7 @@ export async function extractDocxDocument(
       const nextTableOrdinal = tableOrdinal + 1;
       const rows = findChildren(child, 'w:tr');
       const rowTexts: string[] = [];
+      const tableRows: string[][] = [];
       const rowAssetIds: string[] = [];
       for (const tr of rows) {
         const cells = findChildren(tr, 'w:tc');
@@ -1188,7 +1519,7 @@ export async function extractDocxDocument(
             )
           );
           for (const cs of cellSegs) {
-            if (cs.hasLegacyOleEquation) hasLegacyOleEquation = true;
+            if (cs.hasLegacyOleEquation) hasUnresolvedLegacyOle = true;
             allOmml.push(...cs.ommlFragments);
             rowAssetIds.push(...cs.assetIds);
           }
@@ -1200,6 +1531,7 @@ export async function extractDocxDocument(
             nonEmptyCellTexts.some((t) => CELL_NEWLINE_MARKER_RE.test(t));
           cellTexts.push(nonEmptyCellTexts.join(preserveCellLineBreaks ? '\n' : ' '));
         }
+        tableRows.push(cellTexts);
         rowTexts.push(cellTexts.join(' | '));
       }
       const tableBody = rowTexts.filter(Boolean).join('\n');
@@ -1214,6 +1546,8 @@ export async function extractDocxDocument(
             ommlFragments: [],
             assetIds: [...rowAssetIds],
             tableText: tableBody,
+            tableRows,
+            paragraphLocation: `word/document.xml#w:tbl[banner]`,
           });
         } else {
           tableOrdinal = nextTableOrdinal;
@@ -1235,21 +1569,23 @@ export async function extractDocxDocument(
             ommlFragments: [],
             assetIds: [tblAssetId, ...rowAssetIds],
             tableText: tableBody,
+            tableRows,
+            paragraphLocation: `word/document.xml#w:tbl[${tableOrdinal}]`,
           });
         }
       }
     }
   }
 
-  if (hasLegacyOleEquation || ctx.oleCounter.count > 0) {
+  if (ctx.oleCounter.unresolvedCount > 0) {
     const progIds = Array.from(ctx.oleCounter.progIds);
     const progIdNote = progIds.length > 0 ? ` (${progIds.join(', ')})` : '';
-    const wmfPreviewNote =
-      ctx.oleCounter.wmfPreviewRefs.size > 0
-        ? ` kèm ${ctx.oleCounter.wmfPreviewRefs.size} ảnh xem trước WMF/EMF`
-        : '';
     warnings.push(
-      `Phát hiện ${ctx.oleCounter.count} đối tượng công thức Equation 3.0 / MathType OLE cũ${progIdNote}${wmfPreviewNote} trong file .docx. Do định dạng nhị phân cũ không đọc trực tiếp được biểu thức, hãy chuyển sang Word Equation (OMML) hoặc LaTeX ($...$) trước khi trộn.`
+      `CHẶN XUẤT: Có ${ctx.oleCounter.unresolvedCount}/${ctx.oleCounter.count} công thức OLE${progIdNote} chưa giải mã được sang LaTeX hoặc WMF→SVG hợp lệ. Không thể xuất đề chứa placeholder.`
+    );
+  } else if (ctx.oleCounter.wmfPreviewCount > 0) {
+    warnings.push(
+      `Đã dựng ảnh vector SVG từ WMF preview cho ${ctx.oleCounter.wmfPreviewCount} công thức OLE (hiển thị được, nhưng chưa có LaTeX máy đọc được — cần kiểm tra trước khi chấm tự động biểu thức).`
     );
   }
 
@@ -1263,7 +1599,7 @@ export async function extractDocxDocument(
         ? `, +${ctx.unsupportedMediaRefs.size - 3} tệp khác`
         : '';
     warnings.push(
-      `Phát hiện ${ctx.unsupportedMediaRefs.size} tệp hình ảnh/vector định dạng WMF/EMF (${sampleTargets}${moreSuffix}) trong .docx không thể xem trước trực tiếp trên trình duyệt — hãy chuyển sang PNG/SVG hoặc LaTeX.`
+      `Phát hiện ${ctx.unsupportedMediaRefs.size} tệp hình ảnh/vector WMF/EMF không đọc được (${sampleTargets}${moreSuffix}) trong .docx — hãy kiểm tra hoặc thay bằng PNG/SVG/LaTeX.`
     );
   }
 
@@ -1273,12 +1609,18 @@ export async function extractDocxDocument(
     ommlFragments: allOmml,
     assets: ctx.assets,
     warnings: Array.from(new Set(warnings)),
-    hasLegacyOleEquation: hasLegacyOleEquation || ctx.oleCounter.count > 0,
+    hasLegacyOleEquation: hasUnresolvedLegacyOle || ctx.oleCounter.unresolvedCount > 0,
     hasVbaMacro,
     legacyOleCount: ctx.oleCounter.count,
+    legacyOleDecodedLatexCount: ctx.oleCounter.decodedLatexCount,
+    legacyOleWmfPreviewCount: ctx.oleCounter.wmfPreviewCount,
+    unresolvedOleCount: ctx.oleCounter.unresolvedCount,
+    unresolvedOleDetails: ctx.oleCounter.unresolvedDetails,
     legacyOleProgIds: Array.from(ctx.oleCounter.progIds),
     unsupportedMediaCount: ctx.unsupportedMediaRefs.size,
+    convertedWmfMediaCount: ctx.convertedWmfMediaCount.count,
     tableCount: tableOrdinal,
     supportedImageCount: ctx.imageCounter.count,
+    sourceFileHash,
   };
 }

@@ -21,6 +21,7 @@ import type {
   BankQuestionRecord,
   CubicCriticalCasePolicy,
   DerivativeQuestionSubMode,
+  DynamicFunctionFamilyId,
   GraphQuestionSubMode,
   LinearSystemQuestionSubMode,
   ParameterConstraint,
@@ -629,12 +630,58 @@ export function TemplateBuilderPanel({
             {/* Level 3 Dynamic Math & Graph Configuration */}
             {isLevel3 && (
               <>
+                {draft.familyId === 'graph-variation-table' && (
+                  <label className="space-y-1 text-xs sm:col-span-2">
+                    <span className="font-semibold text-sky-700 dark:text-sky-300">
+                      Họ hàm số sinh đồ thị &amp; bảng biến thiên
+                    </span>
+                    <select
+                      value={draft.familyConfig?.graphFunctionFamily ?? 'cubic'}
+                      onChange={(e) => {
+                        const nextFuncFamily = e.target.value as DynamicFunctionFamilyId;
+                        const paramPreset: ParameterConstraint[] =
+                          nextFuncFamily === 'quadratic'
+                            ? structuredClone(VERIFIED_TEMPLATE_FAMILIES['quadratic-graph'].defaultParameters)
+                            : nextFuncFamily === 'rational'
+                            ? structuredClone(VERIFIED_TEMPLATE_FAMILIES['rational-asymptotes'].defaultParameters)
+                            : structuredClone(VERIFIED_TEMPLATE_FAMILIES['cubic-monotonicity'].defaultParameters);
+                        setDraft((prev) => ({
+                          ...prev,
+                          familyConfig: {
+                            ...(prev.familyConfig ?? {}),
+                            graphFunctionFamily: nextFuncFamily,
+                            ...(nextFuncFamily === 'cubic'
+                              ? { cubicCasePolicy: prev.familyConfig?.cubicCasePolicy ?? 'two-extrema' }
+                              : {}),
+                          },
+                          parameters: paramPreset,
+                        }));
+                        setVariantCounter(1);
+                      }}
+                      className="w-full rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50/40 dark:bg-sky-950/30 px-2.5 py-2 text-xs font-medium"
+                    >
+                      <option value="quadratic">Hàm bậc hai: f(x) = ax² + bx + c</option>
+                      <option value="cubic">Hàm bậc ba: f(x) = ax³ + bx² + cx + d</option>
+                      <option value="rational">Hàm phân thức: f(x) = (ax + b)/(cx + d)</option>
+                    </select>
+                  </label>
+                )}
+
                 <label className="space-y-1 text-xs">
                   <span className="font-semibold text-sky-700 dark:text-sky-300">
                     Loại câu hỏi Đồ thị &amp; BBT (Level 3)
                   </span>
                   <select
-                    value={draft.familyConfig?.graphQuestionMode ?? 'choose-graph'}
+                    value={
+                      draft.familyConfig?.graphQuestionMode ??
+                      (draft.familyId === 'rational-asymptotes'
+                        ? 'asymptotes'
+                        : draft.familyId === 'cubic-extrema'
+                        ? 'extrema-value'
+                        : draft.familyId === 'graph-variation-table'
+                        ? 'choose-variation-table'
+                        : 'monotonicity-increasing')
+                    }
                     onChange={(e) =>
                       updateFamilyConfig({
                         graphQuestionMode: e.target.value as GraphQuestionSubMode,
@@ -643,30 +690,37 @@ export function TemplateBuilderPanel({
                     className="w-full rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50/40 dark:bg-sky-950/30 px-2.5 py-2 text-xs"
                   >
                     {(draft.familyId === 'rational-asymptotes' ||
-                      draft.familyId === 'rational-monotonicity') ? (
+                      draft.familyId === 'rational-monotonicity' ||
+                      (draft.familyId === 'graph-variation-table' &&
+                        draft.familyConfig?.graphFunctionFamily === 'rational')) ? (
                       <>
                         <option value="asymptotes">Xác định đường tiệm cận (TCĐ &amp; TCN)</option>
-                        <option value="monotonicity">Xét tính đơn điệu trên từng khoảng</option>
+                        <option value="monotonicity-increasing">Xét tính đơn điệu trên từng khoảng</option>
                         <option value="choose-variation-table">Chọn bảng biến thiên đúng (4 SVG)</option>
                         <option value="choose-graph">Chọn đồ thị đúng (4 đồ thị SVG)</option>
-                        <option value="read-graph">Đọc đồ thị nhận diện hàm số</option>
+                        <option value="read-graph">Đọc đồ thị nhận diện tiệm cận</option>
                       </>
-                    ) : draft.familyId === 'quadratic-graph' ? (
+                    ) : (draft.familyId === 'quadratic-graph' ||
+                        (draft.familyId === 'graph-variation-table' &&
+                          draft.familyConfig?.graphFunctionFamily === 'quadratic')) ? (
                       <>
-                        <option value="extrema-point">Tìm tọa độ đỉnh / điểm cực trị parabol</option>
-                        <option value="monotonicity">Tìm khoảng đồng biến / nghịch biến</option>
-                        <option value="read-graph">Đọc đồ thị parabol tìm hàm số</option>
+                        <option value="monotonicity-increasing">Tìm khoảng đồng biến</option>
+                        <option value="monotonicity-decreasing">Tìm khoảng nghịch biến</option>
+                        <option value="extrema-points">Tìm tọa độ đỉnh parabol</option>
+                        <option value="extrema-value">Tìm giá trị cực trị parabol</option>
+                        <option value="read-graph">Đọc đồ thị parabol tìm cực trị</option>
                         <option value="choose-variation-table">Chọn bảng biến thiên đúng (4 SVG)</option>
                         <option value="choose-graph">Chọn đồ thị đúng (4 đồ thị SVG)</option>
                       </>
                     ) : (
                       <>
-                        <option value="monotonicity">Tìm khoảng đồng biến / nghịch biến</option>
-                        <option value="extrema-point">Tìm điểm cực đại / cực tiểu</option>
+                        <option value="monotonicity-increasing">Tìm khoảng đồng biến</option>
+                        <option value="monotonicity-decreasing">Tìm khoảng nghịch biến</option>
+                        <option value="extrema-points">Tìm tọa độ điểm cực đại / cực tiểu</option>
                         <option value="extrema-value">Tìm giá trị cực đại / cực tiểu</option>
                         <option value="choose-variation-table">Chọn bảng biến thiên đúng (4 SVG)</option>
                         <option value="choose-graph">Chọn đồ thị đúng (4 đồ thị SVG)</option>
-                        <option value="read-graph">Đọc đồ thị nhận diện hàm bậc ba</option>
+                        <option value="read-graph">Đọc đồ thị tìm giá trị cực trị</option>
                       </>
                     )}
                   </select>
@@ -674,7 +728,8 @@ export function TemplateBuilderPanel({
 
                 {(draft.familyId === 'cubic-monotonicity' ||
                   draft.familyId === 'cubic-extrema' ||
-                  draft.familyId === 'graph-variation-table') && (
+                  (draft.familyId === 'graph-variation-table' &&
+                    (draft.familyConfig?.graphFunctionFamily ?? 'cubic') === 'cubic')) && (
                   <label className="space-y-1 text-xs">
                     <span className="font-semibold text-sky-700 dark:text-sky-300">
                       Trường hợp nghiệm đạo hàm f&apos;(x) = 0

@@ -1,6 +1,8 @@
 import {
+  AnswerProvenance,
   ExamSubjectId,
   FillBlankSlot,
+  FormulaRenderStatus,
   MATH_SECTION_TITLES,
   MatchingColumnItem,
   MatchingPairMapping,
@@ -13,6 +15,7 @@ import {
   MultiSelectOption,
   OrderingStepItem,
   QuestionGroup,
+  SectionCountAudit,
   SubjectDetectionSuggestion,
   TrueFalseLabel,
   TrueFalseStatement,
@@ -27,6 +30,7 @@ import {
 } from './mathIntegrity';
 import { detectClipboardMathArtifacts } from './mathTextParser';
 import {
+  DocxParagraphSegment,
   ExtractedOmmlFragment,
   extractDocxDocument,
   isExamHeaderBannerTable,
@@ -44,6 +48,7 @@ export type ImportSourceFormat = 'docx' | 'html' | 'text';
 export interface ImportDiagnosticReport {
   sourceFormat: ImportSourceFormat;
   fileName?: string;
+  sourceFileHash?: string;
   suggestedSubject: SubjectDetectionSuggestion;
   totalParsed: number;
   countsByType: Record<UniversalQuestionType, number>;
@@ -51,9 +56,13 @@ export interface ImportDiagnosticReport {
   assetsAttached: number;
   ommlCount: number;
   legacyOleCount?: number;
+  legacyOleDecodedLatexCount?: number;
+  legacyOleWmfPreviewCount?: number;
+  unresolvedOleCount?: number;
   unsupportedMediaCount?: number;
   confirmedAnswerCount: number;
   unconfirmedAnswerCount: number;
+  sectionCountAudits?: SectionCountAudit[];
   warnings: string[];
   unparsedSegments: string[];
   canImport: boolean;
@@ -70,10 +79,15 @@ export interface UniversalImportOptions {
   codePrefix?: string;
   assets?: MathVisualAsset[];
   ommlFragments?: ExtractedOmmlFragment[];
+  docxParagraphs?: DocxParagraphSegment[];
+  sourceFileHash?: string;
   preWarnings?: string[];
   sourceFormat?: ImportSourceFormat;
   fileName?: string;
   legacyOleCount?: number;
+  legacyOleDecodedLatexCount?: number;
+  legacyOleWmfPreviewCount?: number;
+  unresolvedOleCount?: number;
   unsupportedMediaCount?: number;
 }
 
@@ -213,8 +227,55 @@ export function normalizeHtmlToImportText(html: string): {
   return { text: working, assets };
 }
 
+export function normalizeShortAnswerValue(raw: string): {
+  rawAnswer: string;
+  canonicalAnswer: string;
+  normalizedAnswer: string;
+  acceptedFormats: string[];
+} {
+  const cleaned = raw.replace(/\u00a0/g, ' ').trim();
+  if (!cleaned) {
+    return { rawAnswer: '', canonicalAnswer: '', normalizedAnswer: '', acceptedFormats: [] };
+  }
+  const normalizedSign = cleaned.replace(/[−–—]/g, '-').replace(/\s+/g, ' ').trim();
+  const numericCandidate = normalizedSign.replace(/^\$+|\$+$/g, '').trim();
+  const isDecimalWithComma = /^-?\d+,\d+$/.test(numericCandidate);
+  const isDecimalWithDot = /^-?\d+\.\d+$/.test(numericCandidate);
+
+  const normalizedAnswer = isDecimalWithComma
+    ? numericCandidate.replace(',', '.')
+    : numericCandidate;
+
+  const variants = new Set<string>([cleaned]);
+  if (normalizedSign !== cleaned) variants.add(normalizedSign);
+  if (normalizedAnswer !== cleaned) variants.add(normalizedAnswer);
+  if (isDecimalWithComma) {
+    variants.add(numericCandidate);
+    variants.add(numericCandidate.replace(',', '.'));
+  } else if (isDecimalWithDot) {
+    variants.add(numericCandidate.replace('.', ','));
+  }
+
+  return {
+    rawAnswer: cleaned,
+    canonicalAnswer: normalizedSign,
+    normalizedAnswer,
+    acceptedFormats: Array.from(variants),
+  };
+}
+
 interface ExtractedAnswerKeyEntry {
   raw: string;
+  sourceKind: 'answer-table' | 'solution-line' | 'inline-key';
+  location: string;
+  conflictingEvidences?: string[];
+}
+
+function normalizeComparableKey(raw: string): string {
+  const cleaned = raw.replace(/\u00a0/g, ' ').replace(/[−–—]/g, '-').trim();
+  const singleMcq = cleaned.match(/^(?:Chọn|Đáp\s*án)?\s*([ABCD])(?:\b|\.)/i);
+  if (singleMcq && cleaned.length <= 16) return singleMcq[1].toUpperCase();
+  return cleaned.replace(/\s+/g, '').replace(',', '.').toLowerCase();
 }
 
 function parseTableKeyLines(
@@ -233,15 +294,7 @@ function parseTableKeyLines(
   const grid = tableLines.map((ln) => ln.split('|').map((c) => c.trim()));
   for (let r = 0; r < grid.length; r++) {
     const row = grid[r];
-    // Case A: "1 | A | 2 | B" or "Câu 1 | A | Câu 2 | B"
-    for (let c = 0; c + 1 < row.length; c += 2) {
-      const mNum = row[c].match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
-      const val = row[c + 1];
-      if (mNum && val && !/^(?:Câu|Question|Đáp án|Key)$/i.test(val)) {
-        pairs.push({ qNum: Number(mNum[1]), val });
-      }
-    }
-    // Case B: Horizontal pair of rows: row r = numbers (e.g., Câu | 1 | 2 | 3), row r+1 = answers (Đáp án | A | B | C)
+    // Case B FIRST (KNTT 2x6 horizontal table): row r = Câu | 1 | 2 | 3 | 4 | 5 | 6, row r+1 = Đáp án | A | B | C | D | A | B
     if (r + 1 < grid.length) {
       const nextRow = grid[r + 1];
       const numCols: Array<{ colIdx: number; qNum: number }> = [];
@@ -249,22 +302,143 @@ function parseTableKeyLines(
         const mNum = cell.match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
         if (mNum) numCols.push({ colIdx: cIdx, qNum: Number(mNum[1]) });
       });
-      if (numCols.length >= 2 && nextRow.length >= 2) {
+      const hasExplicitHeaderPair =
+        numCols.length === 1 &&
+        /^(?:Câu|Question|Bài)\s*[:.]?$/i.test(row[0] ?? '') &&
+        /^(?:Đáp\s*án|Chọn|Key|Đáp\s*số|Trả\s*lời)\s*[:.]?$/i.test(nextRow[0] ?? '');
+      if ((numCols.length >= 2 || hasExplicitHeaderPair) && nextRow.length >= 2) {
         const nextRowIsMostlyAnswers = numCols.some(({ colIdx }) => {
-          const v = nextRow[colIdx] ?? '';
-          return Boolean(v) && !/^\d{1,3}$/.test(v);
+          const v = (nextRow[colIdx] ?? '').trim();
+          return (
+            Boolean(v) &&
+            !/^(?:Câu|Question|Bài|Đáp\s*án|Chọn|Key)$/i.test(v)
+          );
         });
-        if (nextRowIsMostlyAnswers) {
+        // Make sure row r+1 is not itself another consecutive question-number header row (e.g. 7 | 8 | 9 | 10)
+        const nextRowNums = numCols
+          .map(({ colIdx }) => (nextRow[colIdx] ?? '').trim())
+          .filter((v) => /^\d{1,3}$/.test(v));
+        const looksLikeNextNumberRow =
+          nextRowNums.length === numCols.length &&
+          numCols.length >= 3 &&
+          Number(nextRowNums[1]) === Number(nextRowNums[0]) + 1 &&
+          Number(nextRowNums[2]) === Number(nextRowNums[1]) + 1;
+
+        if (nextRowIsMostlyAnswers && !looksLikeNextNumberRow) {
           for (const { colIdx, qNum } of numCols) {
             const v = (nextRow[colIdx] ?? '').trim();
             if (v) pairs.push({ qNum, val: v });
           }
           r += 1;
+          continue;
         }
+      }
+    }
+
+    // Case A: Vertical or paired cells in one row: "1 | A | 2 | B" or "Câu 1 | A | Câu 2 | B"
+    for (let c = 0; c + 1 < row.length; c += 2) {
+      const mNum = row[c].match(/^(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[:.]?$/i);
+      const val = row[c + 1];
+      if (mNum && val && !/^(?:Câu|Question|Đáp\s*án|Key)$/i.test(val)) {
+        pairs.push({ qNum: Number(mNum[1]), val });
       }
     }
   }
   return { pairs, nextIdx: cursor - 1 };
+}
+
+const MATRIX_REGION_HEADER_RE =
+  /^\s*(?:[A-Z]\.\s*)?(?:MA\s+TRẬN(?:\s+ĐỀ(?:\s+KIỂM\s+TRA|\s+THI)?)?|BẢNG\s+ĐẶC\s+TẢ|ĐẶC\s+TẢ\s+ĐỀ(?:\s+KIỂM\s+TRA|\s+THI)?)\b/i;
+
+const EXAM_BODY_OPEN_RE =
+  /^\s*(?:[B]\.\s*)?(?:ĐỀ\s+(?:KIỂM\s+TRA|THI|MINH\s+HỌA|ÔN\s+TẬP)|PHẦN\s+(?:I|1)\b)/i;
+
+const EXAM_END_MARKER_RE =
+  /^\s*(?:[-–—=*_]{2,}\s*)?(?:HẾT|THE\s+END)(?:\s*[-–—=*_]{2,})?\s*[.!]*$/i;
+
+const ANSWER_KEY_REGION_HEADER_RE =
+  /^\s*(?:#+\s*)?(?:[A-Z]\.\s*)?(?:BẢNG\s+ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+(?:CHẤM|GIẢI))?))?|ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+(?:CHẤM|GIẢI))?)|\s*(?:ĐỀ\s+GỐC|CHI\s+TIẾT|THAM\s+KHẢO))?|LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+(?:CHẤM|GIẢI(?:\s+CHI\s+TIẾT)?)|ANSWER\s+KEY)\s*[:.–-]?\s*$/i;
+
+function segmentDocumentRegions(rawText: string): {
+  bodyText: string;
+  keyText: string;
+  skippedMatrixLines: number;
+  sawEndMarker: boolean;
+} {
+  const lines = rawText.split(/\r?\n/);
+  const bodyLines: string[] = [];
+  const keyLines: string[] = [];
+
+  type DocRegion = 'INTRO' | 'MATRIX_SPEC' | 'STUDENT_EXAM' | 'ANSWER_KEY_AND_SOLUTION';
+  let region: DocRegion = 'INTRO';
+  let sawAnyQuestion = false;
+  let skippedMatrixLines = 0;
+  let sawEndMarker = false;
+
+  const qLineRe = /^\s*(?:\*{1,2}|\[)?(?:Câu|Question|Bài)\s+\d{1,3}(?:\]|\*{1,2})?\s*[.:)\-–]/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (region === 'ANSWER_KEY_AND_SOLUTION') {
+      keyLines.push(rawLine);
+      continue;
+    }
+
+    if (region === 'INTRO' || region === 'MATRIX_SPEC') {
+      if (MATRIX_REGION_HEADER_RE.test(trimmed)) {
+        region = 'MATRIX_SPEC';
+        skippedMatrixLines += 1;
+        continue;
+      }
+      if (region === 'MATRIX_SPEC') {
+        if (EXAM_BODY_OPEN_RE.test(trimmed) || detectSectionHeader(trimmed)) {
+          region = 'STUDENT_EXAM';
+          if (detectSectionHeader(trimmed)) {
+            bodyLines.push(rawLine);
+          }
+          continue;
+        }
+        skippedMatrixLines += 1;
+        continue;
+      }
+      if (
+        EXAM_BODY_OPEN_RE.test(trimmed) ||
+        detectSectionHeader(trimmed) ||
+        qLineRe.test(trimmed)
+      ) {
+        region = 'STUDENT_EXAM';
+      }
+    }
+
+    if (region === 'STUDENT_EXAM') {
+      if (qLineRe.test(trimmed)) {
+        sawAnyQuestion = true;
+      }
+      if (sawAnyQuestion && EXAM_END_MARKER_RE.test(trimmed)) {
+        sawEndMarker = true;
+        region = 'ANSWER_KEY_AND_SOLUTION';
+        continue;
+      }
+      if (
+        sawAnyQuestion &&
+        ANSWER_KEY_REGION_HEADER_RE.test(trimmed)
+      ) {
+        region = 'ANSWER_KEY_AND_SOLUTION';
+        continue;
+      }
+    }
+
+    bodyLines.push(rawLine);
+  }
+
+  return {
+    bodyText: bodyLines.join('\n').trim(),
+    keyText: keyLines.join('\n').trim(),
+    skippedMatrixLines,
+    sawEndMarker,
+  };
 }
 
 function extractTrailingAnswerKeySection(rawText: string): {
@@ -272,32 +446,12 @@ function extractTrailingAnswerKeySection(rawText: string): {
   keyByNumber: Map<number, ExtractedAnswerKeyEntry>;
   keyBySectionAndNumber: Map<string, ExtractedAnswerKeyEntry>;
   hasSectionedKeys: boolean;
+  skippedMatrixLines: number;
+  sawEndMarker: boolean;
 } {
-  const keyHeaderRe =
-    /(?:^|\n)\s*(?:#+\s*)?(?:BẢNG\s+ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+CHẤM)?))?|ĐÁP\s+ÁN(?:\s+VÀ\s+(?:LỜI\s+GIẢI(?:\s+CHI\s+TIẾT)?|HƯỚNG\s+DẪN(?:\s+CHẤM)?)|\s*(?:ĐỀ\s+GỐC|CHI\s+TIẾT|THAM\s+KHẢO))|LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+(?:CHẤM|GIẢI(?:\s+CHI\s+TIẾT)?)|ANSWER\s+KEY)\s*[:.–-]?\s*(?:\n|$)/i;
-  const match = keyHeaderRe.exec(rawText);
-  if (!match || match.index === undefined) {
-    return {
-      bodyText: rawText,
-      keyByNumber: new Map(),
-      keyBySectionAndNumber: new Map(),
-      hasSectionedKeys: false,
-    };
-  }
-
-  // Chỉ cắt nếu phần header nằm ở sau 25% văn bản (tránh cắt nhầm tiêu đề đầu đề)
-  if (match.index < rawText.length * 0.25) {
-    return {
-      bodyText: rawText,
-      keyByNumber: new Map(),
-      keyBySectionAndNumber: new Map(),
-      hasSectionedKeys: false,
-    };
-  }
-
-  const bodyText = rawText.slice(0, match.index).trim();
-  const keyText = rawText
-    .slice(match.index + match[0].length)
+  const segmented = segmentDocumentRegions(rawText);
+  const bodyText = segmented.bodyText;
+  const keyText = segmented.keyText
     .replace(/\[\[ASSET:[^\]]+\]\]/g, '')
     .trim();
 
@@ -305,79 +459,305 @@ function extractTrailingAnswerKeySection(rawText: string): {
   const keyBySectionAndNumber = new Map<string, ExtractedAnswerKeyEntry>();
   let hasSectionedKeys = false;
 
+  if (!keyText) {
+    return {
+      bodyText,
+      keyByNumber,
+      keyBySectionAndNumber,
+      hasSectionedKeys: false,
+      skippedMatrixLines: segmented.skippedMatrixLines,
+      sawEndMarker: segmented.sawEndMarker,
+    };
+  }
+
   const keyLines = keyText.split(/\r?\n/);
   let keySectionOrdinal = 0;
   let keySectionHint: UniversalQuestionType | undefined;
+  let inDetailedSolution = false;
+  let activeSolutionQNum: number | null = null;
+  let activeSolutionTfMap = new Map<TrueFalseLabel, boolean>();
 
-  const recordPair = (qNum: number, val: string) => {
-    if (!Number.isFinite(qNum) || !val) return;
+  const mergeEntry = (
+    map: Map<string | number, ExtractedAnswerKeyEntry>,
+    mapKey: string | number,
+    val: string,
+    sourceKind: ExtractedAnswerKeyEntry['sourceKind'],
+    location: string
+  ) => {
+    const existing = map.get(mapKey);
+    if (!existing) {
+      map.set(mapKey, { raw: val, sourceKind, location });
+      return;
+    }
+    const prevNorm = normalizeComparableKey(existing.raw);
+    const nextNorm = normalizeComparableKey(val);
+    if (prevNorm && nextNorm && prevNorm !== nextNorm) {
+      const evidences = new Set<string>(existing.conflictingEvidences ?? []);
+      evidences.add(`${existing.location}: "${existing.raw}"`);
+      evidences.add(`${location}: "${val}"`);
+      existing.conflictingEvidences = Array.from(evidences);
+    }
+  };
+
+  const recordPair = (
+    qNum: number,
+    val: string,
+    sourceKind: ExtractedAnswerKeyEntry['sourceKind'],
+    location: string
+  ) => {
+    const trimmedVal = val.replace(/\u00a0/g, ' ').trim();
+    if (!Number.isFinite(qNum) || trimmedVal === '') return;
     if (keySectionOrdinal > 0) {
       hasSectionedKeys = true;
-      keyBySectionAndNumber.set(`part:${keySectionOrdinal}::${qNum}`, { raw: val });
+      mergeEntry(
+        keyBySectionAndNumber,
+        `part:${keySectionOrdinal}::${qNum}`,
+        trimmedVal,
+        sourceKind,
+        location
+      );
     }
     if (keySectionHint) {
-      keyBySectionAndNumber.set(`hint:${keySectionHint}::${qNum}`, { raw: val });
+      mergeEntry(
+        keyBySectionAndNumber,
+        `hint:${keySectionHint}::${qNum}`,
+        trimmedVal,
+        sourceKind,
+        location
+      );
     }
     if (!keyByNumber.has(qNum) || keySectionOrdinal === 0) {
-      keyByNumber.set(qNum, { raw: val });
+      mergeEntry(keyByNumber, qNum, trimmedVal, sourceKind, location);
     }
+  };
+
+  const flushActiveSolutionTf = () => {
+    if (activeSolutionQNum !== null && activeSolutionTfMap.size > 0) {
+      const summary = (['a', 'b', 'c', 'd'] as TrueFalseLabel[])
+        .map((lbl) => {
+          if (!activeSolutionTfMap.has(lbl)) return '';
+          return `${lbl}) ${activeSolutionTfMap.get(lbl) ? 'Đ' : 'S'}`;
+        })
+        .filter(Boolean)
+        .join(', ');
+      if (summary) {
+        recordPair(
+          activeSolutionQNum,
+          summary,
+          'solution-line',
+          `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+        );
+      }
+    }
+    activeSolutionTfMap = new Map();
   };
 
   for (let i = 0; i < keyLines.length; i++) {
     const ln = keyLines[i].trim();
     if (!ln) continue;
 
-    // Nếu đã có bảng đáp án nhanh và sang phần LỜI GIẢI CHI TIẾT -> dừng đọc key để tránh đè bởi số bước giải
     if (
-      /^(?:#+\s*)?(?:LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+GIẢI(?:\s+CHI\s+TIẾT)?)\s*[:.–-]?$/i.test(ln) &&
-      (keyByNumber.size > 0 || keyBySectionAndNumber.size > 0)
+      /^(?:#+\s*)?(?:[A-Z]\.\s*)?(?:LỜI\s+GIẢI\s+CHI\s+TIẾT|HƯỚNG\s+DẪN\s+GIẢI(?:\s+CHI\s+TIẾT)?)\s*[:.–-]?$/i.test(
+        ln
+      )
     ) {
-      break;
+      flushActiveSolutionTf();
+      inDetailedSolution = true;
+      keySectionOrdinal = 0;
+      keySectionHint = undefined;
+      activeSolutionQNum = null;
+      continue;
     }
 
     const sec = detectSectionHeader(ln);
     if (sec) {
-      keySectionOrdinal += 1;
+      flushActiveSolutionTf();
+      keySectionOrdinal = sec.sectionOrdinal ?? keySectionOrdinal + 1;
       keySectionHint = sec.sectionHintType;
+      activeSolutionQNum = null;
       continue;
     }
 
-    if (ln.includes('|')) {
+    if (!inDetailedSolution && ln.includes('|')) {
       const { pairs, nextIdx } = parseTableKeyLines(keyLines, i);
-      pairs.forEach((p) => recordPair(p.qNum, p.val));
+      pairs.forEach((p) =>
+        recordPair(
+          p.qNum,
+          p.val,
+          'answer-table',
+          `Bảng đáp án Phần ${keySectionOrdinal || 1} Câu ${p.qNum}`
+        )
+      );
       if (pairs.length > 0) {
         i = nextIdx;
         continue;
       }
     }
 
-    // Hỗ trợ dạng: "1.A  2.B", "Câu 1: Đ-S-Đ-S", "1: 12,5", "3. for; to", "Câu 3: A, C"
+    if (inDetailedSolution) {
+      const solQMatch = ln.match(/^(?:Câu|Question|Bài)\s+(\d{1,3})\s*[.:)\-–]\s*(.*)$/i);
+      if (solQMatch) {
+        flushActiveSolutionTf();
+        activeSolutionQNum = Number(solQMatch[1]);
+        const rest = solQMatch[2].trim();
+        const directChoose = rest.match(/(?:Chọn|Đáp\s*án(?:\s+đúng)?)\s*[:.]?\s*([ABCD])\b/i);
+        if (directChoose) {
+          recordPair(
+            activeSolutionQNum,
+            directChoose[1].toUpperCase(),
+            'solution-line',
+            `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+          );
+        }
+        const directShort = rest.match(/(?:Đáp\s*số|ĐS|Trả\s*lời)\s*[:.]\s*(.+)$/i);
+        if (directShort && directShort[1].trim() !== '') {
+          recordPair(
+            activeSolutionQNum,
+            directShort[1].trim(),
+            'solution-line',
+            `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+          );
+        }
+        continue;
+      }
+
+      if (activeSolutionQNum !== null) {
+        const chooseMatch = ln.match(/(?:Chọn|Đáp\s*án(?:\s+đúng)?)\s*[:.]?\s*([ABCD])\b/i);
+        if (chooseMatch) {
+          recordPair(
+            activeSolutionQNum,
+            chooseMatch[1].toUpperCase(),
+            'solution-line',
+            `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+          );
+        }
+        const shortMatch = ln.match(/(?:Đáp\s*số|ĐS|Kết\s*quả)\s*[:.]\s*(.+)$/i);
+        if (shortMatch && shortMatch[1].trim() !== '') {
+          recordPair(
+            activeSolutionQNum,
+            shortMatch[1].trim(),
+            'solution-line',
+            `Lời giải Phần ${keySectionOrdinal || 1} Câu ${activeSolutionQNum}`
+          );
+        }
+        const tfSolMatch = ln.match(/^\s*([a-d])\s*[).]\s*.*\b(Đúng|Sai|True|False)\b/i);
+        if (tfSolMatch) {
+          const lbl = tfSolMatch[1].toLowerCase() as TrueFalseLabel;
+          const isT = /^(?:Đúng|True)$/i.test(tfSolMatch[2]);
+          activeSolutionTfMap.set(lbl, isT);
+        }
+      }
+      continue;
+    }
+
+    // Hỗ trợ dạng: "1.A  2.B", "Câu 1: Đ-S-Đ-S", "Câu 1. a) Đ, b) S, c) Đ, d) S", "1: −4,3", "2: 0", "3. for; to"
     const pairRe =
       /(?:^|\s)(?:Câu|Question|Bài)?\s*(\d{1,3})\s*[.:)\-–]\s*([^\n]+?)(?=(?:\s+(?:Câu|Question|Bài)?\s*\d{1,3}\s*[.:)\-–])|$)/gi;
     let m: RegExpExecArray | null;
+    let matchedAnyPair = false;
     while ((m = pairRe.exec(ln)) !== null) {
+      matchedAnyPair = true;
       const qNum = Number(m[1]);
       const val = m[2].trim();
-      recordPair(qNum, val);
+      recordPair(
+        qNum,
+        val,
+        'answer-table',
+        `Khóa đáp án Phần ${keySectionOrdinal || 1} Câu ${qNum}`
+      );
+    }
+    // Hỗ trợ dạng bảng đáp án rút gọn không dấu phân cách: "1A 2B 3C 4D 5A ... 12D"
+    if (!matchedAnyPair) {
+      const compactMcqRe = /(?:^|[\s,;])(\d{1,3})\s*([ABCD])(?=$|[\s,;])/gi;
+      while ((m = compactMcqRe.exec(ln)) !== null) {
+        const qNum = Number(m[1]);
+        const val = m[2].toUpperCase();
+        recordPair(
+          qNum,
+          val,
+          'answer-table',
+          `Khóa đáp án Phần ${keySectionOrdinal || 1} Câu ${qNum}`
+        );
+      }
     }
   }
 
-  return { bodyText, keyByNumber, keyBySectionAndNumber, hasSectionedKeys };
+  flushActiveSolutionTf();
+
+  return {
+    bodyText,
+    keyByNumber,
+    keyBySectionAndNumber,
+    hasSectionedKeys,
+    skippedMatrixLines: segmented.skippedMatrixLines,
+    sawEndMarker: segmented.sawEndMarker,
+  };
 }
 
 interface ParsedSectionChunk {
   sectionTitle: string;
+  sectionOrdinal?: number;
   sectionHintType?: UniversalQuestionType;
+  declaredCount?: number;
+  declaredCountEvidence?: string;
+}
+
+function parseSectionOrdinalToken(token: string): number | undefined {
+  const upper = token.trim().toUpperCase();
+  if (/^\d+$/.test(upper)) {
+    const n = Number(upper);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+  const romanMap: Record<string, number> = {
+    I: 1,
+    II: 2,
+    III: 3,
+    IV: 4,
+    V: 5,
+    VI: 6,
+    VII: 7,
+    VIII: 8,
+    IX: 9,
+    X: 10,
+  };
+  if (romanMap[upper]) return romanMap[upper];
+  if (/^[A-D]$/.test(upper)) return upper.charCodeAt(0) - 64;
+  return undefined;
+}
+
+function extractDeclaredCountFromText(text: string): {
+  count?: number;
+  evidence?: string;
+} {
+  // Pattern 1: "từ câu 1 đến câu 12"
+  const rangeM = text.match(/từ\s+câu\s+(\d{1,3})\s+đến\s+(?:câu\s+)?(\d{1,3})/i);
+  if (rangeM) {
+    const start = Number(rangeM[1]);
+    const end = Number(rangeM[2]);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return { count: end - start + 1, evidence: rangeM[0] };
+    }
+  }
+  // Pattern 2: "gồm 4 câu", "(6 câu)", "có 12 câu"
+  const countM = text.match(/(?:gồm|có|\()\s*(\d{1,3})\s+câu(?:\s+hỏi)?\b/i);
+  if (countM) {
+    const c = Number(countM[1]);
+    if (Number.isFinite(c) && c > 0 && c <= 200) {
+      return { count: c, evidence: countM[0] };
+    }
+  }
+  return {};
 }
 
 function detectSectionHeader(line: string): ParsedSectionChunk | null {
   const trimmed = line.trim();
-  if (trimmed.length > 140) return null;
+  if (trimmed.length > 180) return null;
   const headerRe =
-    /^(?:PHẦN|SECTION|PART)\s+(?:[IVX]+|\d+|[A-D])\s*[.:–-]?\s*(.*)$/i;
+    /^(?:PHẦN|SECTION|PART)\s+([IVX]+|\d+|[A-D])\s*[.:–-]?\s*(.*)$/i;
   const m = trimmed.match(headerRe);
   if (!m) return null;
-  const rest = m[1].toLowerCase();
+  const sectionOrdinal = parseSectionOrdinalToken(m[1]);
+  const rest = m[2].toLowerCase();
   let hint: UniversalQuestionType | undefined;
   if (/đọc\s*hiểu|reading|cloze|ngữ\s*liệu/.test(rest)) hint = 'reading-comprehension';
   else if (/đúng\s*\/?\s*sai|true\s*\/?\s*false/.test(rest)) hint = 'true-false';
@@ -386,9 +766,16 @@ function detectSectionHeader(line: string): ParsedSectionChunk | null {
   else if (/ghép\s*đôi|matching|nối\s*cột/.test(rest)) hint = 'matching';
   else if (/sắp\s*xếp|ordering|arrangement/.test(rest)) hint = 'ordering';
   else if (/tự\s*luận|làm\s*văn|writing|essay/.test(rest)) hint = 'essay';
-  else if (/trắc\s*nghiệm|multiple\s*choice|vocabulary|grammar|phonetics/.test(rest)) hint = 'mcq';
+  else if (/trắc\s*nghiệm|nhiều\s*phương\s*án|multiple\s*choice|vocabulary|grammar|phonetics/.test(rest)) hint = 'mcq';
 
-  return { sectionTitle: trimmed, sectionHintType: hint };
+  const declared = extractDeclaredCountFromText(trimmed);
+  return {
+    sectionTitle: trimmed,
+    sectionOrdinal,
+    sectionHintType: hint,
+    declaredCount: declared.count,
+    declaredCountEvidence: declared.evidence,
+  };
 }
 
 interface PendingPassageRange {
@@ -527,9 +914,47 @@ export function parseUniversalExamText(
     };
   }
 
-  const { bodyText, keyByNumber, keyBySectionAndNumber, hasSectionedKeys } =
-    extractTrailingAnswerKeySection(trimmed);
+  const {
+    bodyText,
+    keyByNumber,
+    keyBySectionAndNumber,
+    hasSectionedKeys,
+    skippedMatrixLines,
+  } = extractTrailingAnswerKeySection(trimmed);
   const lines = bodyText.split(/\r?\n/);
+
+  // Map DOCX paragraph underline metadata by line text for exact per-question candidate tracking
+  const underlinedOptsByLine = new Map<string, Array<'A' | 'B' | 'C' | 'D'>>();
+  const underlinedStmtsByLine = new Map<string, Array<'a' | 'b' | 'c' | 'd'>>();
+  const paragraphLocByLine = new Map<string, string>();
+  const oleWmfPreviewIdSet = new Set<string>();
+  for (const seg of options?.docxParagraphs ?? []) {
+    for (const pid of seg.oleWmfPreviewAssetIds ?? []) {
+      oleWmfPreviewIdSet.add(pid);
+    }
+    const segLines = seg.text.split(/\r?\n/);
+    for (const sl of segLines) {
+      const normKey = sl.trim();
+      if (!normKey) continue;
+      if (seg.paragraphLocation && !paragraphLocByLine.has(normKey)) {
+        paragraphLocByLine.set(normKey, seg.paragraphLocation);
+      }
+      if (seg.underlinedOptionLabels?.length) {
+        const cur = underlinedOptsByLine.get(normKey) ?? [];
+        for (const l of seg.underlinedOptionLabels) {
+          if (!cur.includes(l)) cur.push(l);
+        }
+        underlinedOptsByLine.set(normKey, cur);
+      }
+      if (seg.underlinedStatementLabels?.length) {
+        const cur = underlinedStmtsByLine.get(normKey) ?? [];
+        for (const l of seg.underlinedStatementLabels) {
+          if (!cur.includes(l)) cur.push(l);
+        }
+        underlinedStmtsByLine.set(normKey, cur);
+      }
+    }
+  }
 
   interface RawQuestionBlock {
     questionNumber: number;
@@ -538,6 +963,15 @@ export function parseUniversalExamText(
     sectionHintType?: UniversalQuestionType;
     lines: string[];
     passageGroupKey?: string;
+    paragraphLocation?: string;
+  }
+
+  interface SectionMetaTracker {
+    sectionOrdinal: number;
+    sectionTitle: string;
+    declaredCount?: number;
+    declaredCountEvidence?: string;
+    actualCount: number;
   }
 
   let currentSectionTitle =
@@ -545,6 +979,30 @@ export function parseUniversalExamText(
   let currentSectionHint: UniversalQuestionType | undefined;
   let currentSectionOrdinal = 1;
   let sawSectionOrQuestion = false;
+
+  const sectionTrackers = new Map<number, SectionMetaTracker>();
+  const ensureSectionTracker = (
+    ordinal: number,
+    title: string,
+    declaredCount?: number,
+    evidence?: string
+  ): SectionMetaTracker => {
+    let tr = sectionTrackers.get(ordinal);
+    if (!tr) {
+      tr = {
+        sectionOrdinal: ordinal,
+        sectionTitle: title,
+        declaredCount,
+        declaredCountEvidence: evidence,
+        actualCount: 0,
+      };
+      sectionTrackers.set(ordinal, tr);
+    } else if (declaredCount !== undefined && tr.declaredCount === undefined) {
+      tr.declaredCount = declaredCount;
+      tr.declaredCountEvidence = evidence;
+    }
+    return tr;
+  };
 
   const pendingPassages: Map<string, PendingPassageRange> = new Map();
   let activePassageKey: string | undefined;
@@ -571,14 +1029,33 @@ export function parseUniversalExamText(
       sawSectionOrQuestion = true;
       currentSectionTitle = sec.sectionTitle;
       currentSectionHint = sec.sectionHintType;
+      ensureSectionTracker(
+        currentSectionOrdinal,
+        sec.sectionTitle,
+        sec.declaredCount,
+        sec.declaredCountEvidence
+      );
       collectingPassageLines = null;
       activePassageKey = undefined;
-      pendingLeadAssetLines = [];
+      // Do NOT clear pendingLeadAssetLines if an anchored image was placed right before a section/question; clear only if unrelated
       if (currentBlock) {
         blocks.push(currentBlock);
         currentBlock = null;
       }
       continue;
+    }
+
+    // 1b. Section instruction line (right after section header, before first question of that section)
+    if (!currentBlock && sawSectionOrQuestion && trimmedLine && !questionStartRe.test(rawLine)) {
+      const decl = extractDeclaredCountFromText(trimmedLine);
+      if (decl.count !== undefined) {
+        ensureSectionTracker(
+          currentSectionOrdinal,
+          currentSectionTitle,
+          decl.count,
+          decl.evidence
+        );
+      }
     }
 
     // 2. Shared Passage Intro
@@ -612,6 +1089,9 @@ export function parseUniversalExamText(
         blocks.push(currentBlock);
       }
       const qNum = Number(qMatch[1]);
+      const tr = ensureSectionTracker(currentSectionOrdinal, currentSectionTitle);
+      tr.actualCount += 1;
+
       let linkedKey: string | undefined;
       if (activePassageKey) {
         const pMeta = pendingPassages.get(activePassageKey);
@@ -638,6 +1118,7 @@ export function parseUniversalExamText(
         sectionHintType: currentSectionHint,
         lines: initialLines,
         passageGroupKey: linkedKey,
+        paragraphLocation: paragraphLocByLine.get(trimmedLine),
       };
       continue;
     }
@@ -654,7 +1135,6 @@ export function parseUniversalExamText(
     if (currentBlock) {
       currentBlock.lines.push(rawLine);
     } else if (trimmedLine) {
-      // Tuyệt đối không biến bảng khung tiêu đề hoặc hình ảnh rời trước Câu 1 thành một QuestionGroup gom toàn bộ đề
       if (/\[\[ASSET:/.test(trimmedLine)) {
         const assetIdsInLine = Array.from(trimmedLine.matchAll(/\[\[ASSET:([^\]]+)\]\]/g)).map(
           (m) => m[1]
@@ -669,12 +1149,12 @@ export function parseUniversalExamText(
                 isExamHeaderBannerTable(found.sourceData)
               );
             }));
-        if (!isHeaderAsset && sawSectionOrQuestion) {
-          // Ảnh/bảng đứng ngay đầu một PHẦN (sau khi đã vào thân đề) chỉ gắn với câu kế tiếp thay vì gom nhóm toàn bộ phần
+        if (!isHeaderAsset) {
+          // Ảnh neo (wp:anchor) hoặc bảng đứng ngay trước câu kế tiếp luôn được gắn vào câu đó
           pendingLeadAssetLines.push(rawLine);
         }
       } else if (
-        !/^(?:ĐỀ\s+KIỂM\s+TRA|ĐỀ\s+THI|SỞ\s+GIÁO\s+DỤC|PHÒNG\s+GIÁO\s+DỤC|BỘ\s+GIÁO\s+DỤC|MÔN|THỜI\s+GIAN|TRƯỜNG|LỚP|HỌ\s+VÀ\s+TÊN|SỐ\s+BÁO\s+DANH|MÃ\s+ĐỀ|NĂM\s+HỌC|HỌC\s+K[ÌỲ])/i.test(
+        !/^(?:ĐỀ\s+KIỂM\s+TRA|ĐỀ\s+THI|SỞ\s+GIÁO\s+DỤC|PHÒNG\s+GIÁO\s+DỤC|BỘ\s+GIÁO\s+DỤC|MÔN|THỜI\s+GIAN|TRƯỜNG|LỚP|HỌ\s+VÀ\s+TÊN|SỐ\s+BÁO\s+DANH|MÃ\s+ĐỀ|NĂM\s+HỌC|HỌC\s+K[ÌỲ]|THÍ\s+SINH)/i.test(
           trimmedLine
         ) &&
         !isExamHeaderBannerTable(trimmedLine)
@@ -694,12 +1174,97 @@ export function parseUniversalExamText(
     qNumOccurrences.set(blk.questionNumber, (qNumOccurrences.get(blk.questionNumber) ?? 0) + 1);
   }
 
+  const sectionCountAudits: SectionCountAudit[] = Array.from(sectionTrackers.values()).map(
+    (tr) => ({
+      sectionTitle: tr.sectionTitle,
+      sectionOrdinal: tr.sectionOrdinal,
+      declaredCount: tr.declaredCount,
+      actualCount: tr.actualCount,
+      mismatch:
+        tr.declaredCount !== undefined && tr.declaredCount !== tr.actualCount,
+      evidence: tr.declaredCountEvidence,
+    })
+  );
+
   const now = new Date().toISOString();
   const warnings = [...baseWarnings];
+  if (skippedMatrixLines > 0) {
+    warnings.push(
+      `Đã tự động bỏ qua ${skippedMatrixLines} dòng thuộc vùng MA TRẬN / BẢNG ĐẶC TẢ trước phần đề thi chính thức.`
+    );
+  }
+  for (const audit of sectionCountAudits) {
+    if (audit.mismatch) {
+      warnings.push(
+        `Lệch số lượng câu tại "${audit.sectionTitle}": đề khai báo ${audit.declaredCount} câu (${audit.evidence ?? 'theo tiêu đề'}) nhưng đọc được ${audit.actualCount} câu.`
+      );
+    }
+  }
+
   const questions: MathQuestion[] = [];
   const groupQuestionsMap = new Map<string, string[]>();
   const codePrefix = options?.codePrefix ?? 'IMP';
   const usedCodes = new Set<string>();
+
+  const computeFormulaStatusForQuestion = (
+    rawTexts: string[],
+    attachedAssets: MathVisualAsset[]
+  ): FormulaRenderStatus => {
+    const joined = rawTexts.join('\n');
+    const unresolvedOleMatches = joined.match(/\[CÔNG_THỨC_OLE_LEGACY\]/g) ?? [];
+    const unresolvedOmmlMatches = joined.match(/\[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA\]/g) ?? [];
+    const unresolvedCount = unresolvedOleMatches.length + unresolvedOmmlMatches.length;
+    const previewAssets = attachedAssets.filter((a) => oleWmfPreviewIdSet.has(a.id));
+    const hasOmml = collectOmmlForText(joined, ommlFragments).length > 0;
+    const hasLatex = /\$[^$]+\$/.test(joined);
+
+    if (unresolvedCount > 0) {
+      return {
+        displayable: false,
+        machineReadable: false,
+        sourceKind: 'unresolved-ole',
+        unresolvedCount,
+        previewAssetIds: previewAssets.map((a) => a.id),
+        details: [
+          `Còn ${unresolvedCount} công thức chưa giải mã được (placeholder) trong câu hỏi.`,
+        ],
+      };
+    }
+    if (previewAssets.length > 0) {
+      return {
+        displayable: true,
+        machineReadable: false,
+        sourceKind: 'ole-wmf-preview',
+        unresolvedCount: 0,
+        previewAssetIds: previewAssets.map((a) => a.id),
+        details: [
+          `Có ${previewAssets.length} công thức dựng từ ảnh vector WMF→SVG (hiển thị được, không có LaTeX máy đọc được).`,
+        ],
+      };
+    }
+    if (hasOmml) {
+      return {
+        displayable: true,
+        machineReadable: true,
+        sourceKind: 'omml',
+        unresolvedCount: 0,
+      };
+    }
+    if (hasLatex) {
+      return {
+        displayable: true,
+        machineReadable: true,
+        sourceKind: 'latex',
+        unresolvedCount: 0,
+      };
+    }
+    return {
+      displayable: true,
+      machineReadable: true,
+      sourceKind: 'none',
+      unresolvedCount: 0,
+    };
+  };
 
   blocks.forEach((blk, idx) => {
     const qId = createIdFn('mq');
@@ -715,41 +1280,77 @@ export function parseUniversalExamText(
     }
     usedCodes.add(code);
 
-    const rawChunk = blk.lines.join('\n').trim();
-    const { cleanedText: bodyWithInline, assets: qAssets } = extractAssetMarkersAndClean(
-      rawChunk,
-      assetLookup
-    );
+    // Collect DOCX underline evidence strictly belonging to this question's lines
+    const qUnderlinedOptionLabels: Array<'A' | 'B' | 'C' | 'D'> = [];
+    const qUnderlinedStmtLabels: Array<'a' | 'b' | 'c' | 'd'> = [];
+    for (const ln of blk.lines) {
+      const key = ln.trim();
+      const opts = underlinedOptsByLine.get(key);
+      if (opts) {
+        for (const o of opts) {
+          if (!qUnderlinedOptionLabels.includes(o)) qUnderlinedOptionLabels.push(o);
+        }
+      }
+      const stmts = underlinedStmtsByLine.get(key);
+      if (stmts) {
+        for (const s of stmts) {
+          if (!qUnderlinedStmtLabels.includes(s)) qUnderlinedStmtLabels.push(s);
+        }
+      }
+    }
 
-    // Kiểm tra đáp án inline trong khối câu hỏi
-    const inlineAnsMatch = bodyWithInline.match(
-      /(?:^|\n)\s*(?:Đáp án(?:\s+đúng)?|ĐA|Answer|Key)\s*[:.]\s*([^\n]+)$/i
+    const rawChunkWithMarkers = blk.lines.join('\n').trim();
+
+    // Kiểm tra đáp án inline trong khối câu hỏi (giữ nguyên [[ASSET:...]] để phân bổ đúng cho từng phương án!)
+    const inlineAnsMatch = rawChunkWithMarkers.match(
+      /(?:^|\n)\s*(?:Đáp án(?:\s+đúng)?|ĐA|Đáp\s*số|ĐS|Answer|Key)\s*[:.]\s*([^\n]+)$/i
     );
-    const bodyClean = inlineAnsMatch
-      ? bodyWithInline.slice(0, inlineAnsMatch.index).trim()
-      : bodyWithInline;
+    const bodyWithMarkers = inlineAnsMatch
+      ? rawChunkWithMarkers.slice(0, inlineAnsMatch.index).trim()
+      : rawChunkWithMarkers;
     const inlineAnswerRaw = inlineAnsMatch ? inlineAnsMatch[1].trim() : '';
 
     const numRepeatsAcrossSections = (qNumOccurrences.get(blk.questionNumber) ?? 0) > 1;
-    const sectionScopedKey =
+    const sectionScopedEntry =
       keyBySectionAndNumber.get(`part:${blk.sectionOrdinal}::${blk.questionNumber}`) ??
       (blk.sectionHintType
         ? keyBySectionAndNumber.get(`hint:${blk.sectionHintType}::${blk.questionNumber}`)
         : undefined);
-    const trailingAnswerRaw =
-      sectionScopedKey?.raw ??
-      (!hasSectionedKeys && !numRepeatsAcrossSections
-        ? keyByNumber.get(blk.questionNumber)?.raw ?? ''
+    const fallbackGlobalEntry =
+      !hasSectionedKeys && !numRepeatsAcrossSections
+        ? keyByNumber.get(blk.questionNumber)
         : !hasSectionedKeys && blk.sectionOrdinal === 1
-        ? keyByNumber.get(blk.questionNumber)?.raw ?? ''
-        : '');
-    const declaredAnswerRaw = inlineAnswerRaw || trailingAnswerRaw;
+        ? keyByNumber.get(blk.questionNumber)
+        : undefined;
+    const matchedTrailingEntry = sectionScopedEntry ?? fallbackGlobalEntry;
 
-    // A. Kiểm tra Đúng / Sai 4 ý: a) ... b) ... c) ... d) ...
-    const tfRegex = /(?:^|\n)\s*([a-dA-D])\s*[).]\s+/g;
+    const declaredAnswerRaw = inlineAnswerRaw || matchedTrailingEntry?.raw || '';
+    const hasKeyConflict = Boolean(matchedTrailingEntry?.conflictingEvidences?.length);
+    const keySourceKind: AnswerProvenance['sourceKind'] = inlineAnswerRaw
+      ? 'inline-key'
+      : matchedTrailingEntry?.sourceKind;
+    const keySourceLocation = inlineAnswerRaw
+      ? `Đáp án ngay trong khối Câu ${blk.questionNumber}`
+      : matchedTrailingEntry?.location;
+
+    const sectionTracker = sectionTrackers.get(blk.sectionOrdinal);
+    const baseSourceTrace = {
+      sourceFileHash: options?.sourceFileHash,
+      sourceFileName: options?.fileName,
+      sourcePart: 'word/document.xml',
+      paragraphLocation: blk.paragraphLocation,
+      sectionOrdinal: blk.sectionOrdinal,
+      originalQuestionNumberInSection: blk.questionNumber,
+      sectionDeclaredCount: sectionTracker?.declaredCount,
+      sectionActualCount: sectionTracker?.actualCount,
+      matchedKeyLocation: keySourceLocation,
+    };
+
+    // A. Kiểm tra Đúng / Sai 4 ý: a) ... b) ... c) ... d) ... (hỗ trợ cả đầu dòng, sau tab, hoặc dính liền $/[[ASSET:)
+    const tfRegex = /(?:^|\n|\t)\s*([a-d])\s*[).](?:\s+|(?=\$|\[\[ASSET:|[−\-0-9]))/g;
     const tfMatches: Array<{ label: TrueFalseLabel; index: number; contentStart: number }> = [];
     let tfm: RegExpExecArray | null;
-    while ((tfm = tfRegex.exec(bodyClean)) !== null) {
+    while ((tfm = tfRegex.exec(bodyWithMarkers)) !== null) {
       tfMatches.push({
         label: tfm[1].toLowerCase() as TrueFalseLabel,
         index: tfm.index,
@@ -761,8 +1362,9 @@ export function parseUniversalExamText(
       tfMatches[0].label === 'a' &&
       (blk.sectionHintType === 'true-false' || tfMatches.length === 4);
 
-    // B. Kiểm tra MCQ / Multi-Select A. B. C. D. (hoặc *A.)
-    const mcqRegex = /(?:^|\n|\s)(\*?)([ABCD])\.\s+/g;
+    // B. Kiểm tra MCQ / Multi-Select A. B. C. D. (hỗ trợ *A., sau tab/xuống dòng/khoảng trắng, và A. dính sát $/[[ASSET:/số)
+    const mcqRegex =
+      /(?:^|\n|\t|[ ]{1,})(\*?)([ABCD])\.(?:\s+|(?=\$|\[\[ASSET:|\\|[−\-+0-9(\[]))/g;
     const mcqMatches: Array<{
       starred: boolean;
       label: McqOptionLabel;
@@ -770,7 +1372,7 @@ export function parseUniversalExamText(
       contentStart: number;
     }> = [];
     let mcqm: RegExpExecArray | null;
-    while ((mcqm = mcqRegex.exec(bodyClean)) !== null) {
+    while ((mcqm = mcqRegex.exec(bodyWithMarkers)) !== null) {
       mcqMatches.push({
         starred: mcqm[1] === '*',
         label: mcqm[2].toUpperCase() as McqOptionLabel,
@@ -780,7 +1382,32 @@ export function parseUniversalExamText(
     }
     const lastFourMcq = mcqMatches.length >= 4 ? mcqMatches.slice(-4) : [];
     const hasFourMcq =
-      lastFourMcq.length === 4 && lastFourMcq.map((m) => m.label).join('') === 'ABCD';
+      !isTrueFalseBlock &&
+      lastFourMcq.length === 4 &&
+      lastFourMcq.map((m) => m.label).join('') === 'ABCD';
+
+    // B2. Kiểm tra dòng "A. <giá trị>" xuất hiện trong Phần III (Trả lời ngắn) — ứng viên đáp án ngắn chứ không phải MCQ!
+    let part3ShortAnswerCandidate: string | undefined;
+    let bodyCleanForNonMcq = bodyWithMarkers;
+    if (
+      !hasFourMcq &&
+      !isTrueFalseBlock &&
+      blk.sectionHintType === 'short-answer'
+    ) {
+      const part3AMatch = bodyWithMarkers.match(
+        /(?:^|\n)\s*A\.\s*([^\n]+?)\s*$/
+      );
+      if (part3AMatch && !/\bB\./.test(bodyWithMarkers)) {
+        part3ShortAnswerCandidate = part3AMatch[1].trim();
+        bodyCleanForNonMcq = bodyWithMarkers.slice(0, part3AMatch.index).trim();
+      }
+    }
+
+    // Extract assets for non-MCQ branches safely
+    const { cleanedText: bodyClean, assets: qAssets } = extractAssetMarkersAndClean(
+      bodyCleanForNonMcq,
+      assetLookup
+    );
 
     // C. Kiểm tra Matching ("Cột A" & "Cột B" hoặc cặp "1. ... | a. ...")
     const hasMatchingCue =
@@ -809,45 +1436,133 @@ export function parseUniversalExamText(
     };
 
     if (hasFourMcq) {
-      const stemText = bodyClean.slice(0, lastFourMcq[0].index).trim();
-      const optionTexts = lastFourMcq.map((m, oIdx) => {
-        const endIdx = oIdx < 3 ? lastFourMcq[oIdx + 1].index : bodyClean.length;
-        return bodyClean.slice(m.contentStart, endIdx).trim();
+      // Tách tài nguyên ĐỘC LẬP cho thân câu và từng phương án A/B/C/D!
+      const rawStemPart = bodyWithMarkers.slice(0, lastFourMcq[0].index).trim();
+      const { cleanedText: stemText, assets: stemAssets } = extractAssetMarkersAndClean(
+        rawStemPart,
+        assetLookup
+      );
+
+      const rawOptionSlices = lastFourMcq.map((m, oIdx) => {
+        const endIdx = oIdx < 3 ? lastFourMcq[oIdx + 1].index : bodyWithMarkers.length;
+        return bodyWithMarkers.slice(m.contentStart, endIdx).trim();
       });
 
+      const parsedOptions = rawOptionSlices.map((rawSlice) =>
+        extractAssetMarkersAndClean(rawSlice, assetLookup)
+      );
+
       const letterMatches = Array.from(
-        declaredAnswerRaw.toUpperCase().matchAll(/\b([ABCD])\b/g)
+        declaredAnswerRaw.toUpperCase().matchAll(/(?<![A-Z])([ABCD])(?![A-Z])/g)
       ).map((m) => m[1] as McqOptionLabel);
       const starredLabels = lastFourMcq.filter((m) => m.starred).map((m) => m.label);
-      const effectiveLetters =
+      const explicitLetters =
         letterMatches.length > 0 ? Array.from(new Set(letterMatches)) : starredLabels;
 
+      // Trong Phần I (trắc nghiệm 1 đáp án đúng), KHÔNG tự chuyển thành multi-select nếu đề không yêu cầu chọn nhiều!
+      const explicitlyAsksMultiSelect =
+        /chọn\s+(?:nhiều|các|tất\s+cả)\s+(?:đáp\s+án|phương\s+án)|multiple\s+answers/i.test(
+          stemText
+        );
+      const isSingleChoiceSection = blk.sectionHintType === 'mcq';
       const isMultiSelect =
-        effectiveLetters.length > 1 ||
-        /chọn\s+(?:nhiều|các)\s+(?:đáp\s+án|phương\s+án)|multiple\s+answers/i.test(stemText);
+        explicitlyAsksMultiSelect ||
+        (!isSingleChoiceSection && explicitLetters.length > 1);
 
-      const primaryCorrectIdx =
-        effectiveLetters.length > 0 ? MCQ_LABELS.indexOf(effectiveLetters[0]) : 0;
-      const safePrimaryIdx = primaryCorrectIdx >= 0 ? primaryCorrectIdx : 0;
-      const answerConfirmed = effectiveLetters.length > 0;
+      const effectiveLetters =
+        isSingleChoiceSection && explicitLetters.length > 1
+          ? [] // Mâu thuẫn: nhiều chữ cái trong phần 1 đáp án -> chặn và yêu cầu duyệt!
+          : explicitLetters;
+
+      const hasValidKey = effectiveLetters.length > 0 && !hasKeyConflict;
+      const answerConfirmed = hasValidKey;
+
+      let answerProvenance: AnswerProvenance;
+      if (hasKeyConflict) {
+        answerProvenance = {
+          status: 'conflict',
+          sourceKind: keySourceKind,
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: declaredAnswerRaw,
+          conflictingEvidence: matchedTrailingEntry?.conflictingEvidences,
+          note: 'Bảng đáp án và lời giải chi tiết đưa ra đáp án khác nhau — bắt buộc giáo viên đối chiếu và chọn đáp án đúng.',
+        };
+      } else if (isSingleChoiceSection && explicitLetters.length > 1) {
+        answerProvenance = {
+          status: 'conflict',
+          sourceKind: keySourceKind,
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: declaredAnswerRaw,
+          conflictingEvidence: explicitLetters,
+          note: `Phần trắc nghiệm 1 đáp án nhưng khóa đọc được nhiều chữ cái (${explicitLetters.join(', ')}) — cần giáo viên xác nhận.`,
+        };
+      } else if (answerConfirmed) {
+        answerProvenance = {
+          status: 'source-matched',
+          sourceKind: starredLabels.length > 0 && letterMatches.length === 0 ? 'inline-key' : keySourceKind ?? 'inline-key',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation ?? `Đánh dấu * trong đề gốc`,
+          rawEvidence: declaredAnswerRaw || starredLabels.join(', '),
+        };
+      } else if (qUnderlinedOptionLabels.length > 0) {
+        answerProvenance = {
+          status: 'needs-review',
+          sourceKind: 'underline-candidate',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          candidateConvention: 'underlined-option',
+          rawEvidence: `Gạch chân nhãn phương án: ${qUnderlinedOptionLabels.join(', ')}`,
+          note:
+            qUnderlinedOptionLabels.length === 1
+              ? `Phát hiện gạch chân tại phương án ${qUnderlinedOptionLabels[0]} (chưa có bảng đáp án đối chiếu). Giáo viên cần xác nhận quy ước gạch chân.`
+              : `Phát hiện nhiều nhãn phương án được gạch chân (${qUnderlinedOptionLabels.join(', ')}) — cần giáo viên chọn chính xác 1 đáp án.`,
+        };
+      } else {
+        answerProvenance = {
+          status: 'missing',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          note: 'Không có khóa đáp án A/B/C/D trong tài liệu gốc — tuyệt đối không tự gán mặc định A.',
+        };
+      }
 
       if (!answerConfirmed) {
         warnings.push(
-          `Câu ${blk.questionNumber} (${code}) chưa có đáp án A/B/C/D trong tệp nhập — tạm đánh dấu cần giáo viên xác nhận ở Bước 2.`
+          `Câu ${blk.questionNumber} (${code}): ${answerProvenance.note ?? 'Chưa có khóa đáp án được xác nhận.'}`
         );
       }
 
-      const builtOptions: McqOption[] = optionTexts.map((txt, oIdx) => ({
-        id: `${qId}-opt-${oIdx + 1}`,
-        originalLabel: MCQ_LABELS[oIdx],
-        content: createImmutableContentPayload(txt, `${qId}-o${oIdx + 1}`, {
-          rawXmlFragments: collectOmmlForText(txt, ommlFragments),
-          preserveExactWhitespace: preserveWhitespace,
-        }),
-        isCorrect: isMultiSelect
-          ? effectiveLetters.includes(MCQ_LABELS[oIdx])
-          : oIdx === safePrimaryIdx,
-      }));
+      const builtOptions: McqOption[] = parsedOptions.map((po, oIdx) => {
+        const lbl = MCQ_LABELS[oIdx];
+        const isCorrect = answerConfirmed
+          ? isMultiSelect
+            ? effectiveLetters.includes(lbl)
+            : lbl === effectiveLetters[0]
+          : false;
+        return {
+          id: `${qId}-opt-${oIdx + 1}`,
+          originalLabel: lbl,
+          content: createImmutableContentPayload(po.cleanedText, `${qId}-o${oIdx + 1}`, {
+            rawXmlFragments: collectOmmlForText(po.cleanedText, ommlFragments),
+            preserveExactWhitespace: preserveWhitespace,
+          }),
+          isCorrect,
+          ...(po.assets[0] ? { visualAsset: po.assets[0] } : {}),
+        };
+      });
+
+      const primaryCorrectOption = answerConfirmed
+        ? builtOptions.find((o) => o.isCorrect)
+        : undefined;
+
+      const extraOptionAssets = parsedOptions.flatMap((po) => po.assets.slice(1));
+      const allQuestionAssets = [...stemAssets, ...extraOptionAssets];
+      const allAttachedIncludingOptions = [
+        ...allQuestionAssets,
+        ...builtOptions.map((o) => o.visualAsset).filter((a): a is MathVisualAsset => Boolean(a)),
+      ];
 
       const multiSelectOptions: MultiSelectOption[] | undefined = isMultiSelect
         ? builtOptions.map((o) => ({
@@ -865,6 +1580,11 @@ export function parseUniversalExamText(
         ? 'reading-comprehension'
         : 'mcq';
 
+      const formulaStatus = computeFormulaStatusForQuestion(
+        [stemText, ...builtOptions.map((o) => o.content.rawSource)],
+        allAttachedIncludingOptions
+      );
+
       const q: MathQuestion = {
         id: qId,
         code,
@@ -881,7 +1601,7 @@ export function parseUniversalExamText(
           preserveExactWhitespace: preserveWhitespace,
         }),
         options: builtOptions,
-        correctOptionId: builtOptions[safePrimaryIdx].id,
+        correctOptionId: primaryCorrectOption?.id,
         ...(multiSelectOptions
           ? {
               multiSelectOptions,
@@ -891,14 +1611,17 @@ export function parseUniversalExamText(
             }
           : {}),
         solutionGuide: createImmutableContentPayload('', `${qId}-sol`),
-        visualAssets: qAssets,
-        hasVisualAsset: qAssets.length > 0,
+        visualAssets: allQuestionAssets,
+        hasVisualAsset: allAttachedIncludingOptions.length > 0,
         groupId: blk.passageGroupKey,
         lockQuestionPosition: false,
         lockOptionShuffle: depFlags.length > 0,
         allowStatementShuffle: false,
         dependencyFlags: depFlags,
         answerConfirmed,
+        answerProvenance,
+        formulaStatus,
+        sourceTrace: baseSourceTrace,
         createdAt: now,
         updatedAt: now,
       };
@@ -911,43 +1634,136 @@ export function parseUniversalExamText(
     }
 
     if (isTrueFalseBlock) {
-      const stemText = bodyClean.slice(0, tfMatches[0].index).trim();
-      const stmtTexts = tfMatches.slice(0, 4).map((m, sIdx) => {
+      const rawStemPart = bodyWithMarkers.slice(0, tfMatches[0].index).trim();
+      const { cleanedText: stemText, assets: stemAssets } = extractAssetMarkersAndClean(
+        rawStemPart,
+        assetLookup
+      );
+      const stmtSlices = tfMatches.slice(0, 4).map((m, sIdx) => {
         const endIdx =
           sIdx + 1 < Math.min(4, tfMatches.length)
             ? tfMatches[sIdx + 1].index
-            : bodyClean.length;
-        return bodyClean.slice(m.contentStart, endIdx).trim();
+            : bodyWithMarkers.length;
+        return bodyWithMarkers.slice(m.contentStart, endIdx).trim();
       });
+      const parsedStmts = stmtSlices.map((s) => extractAssetMarkersAndClean(s, assetLookup));
+      const stmtAssets = parsedStmts.flatMap((ps) => ps.assets);
+      const combinedTfAssets = [...stemAssets, ...stmtAssets];
 
-      const tfTokens = Array.from(
-        declaredAnswerRaw
-          .toUpperCase()
-          .matchAll(/(?<![\p{L}\p{N}])(ĐÚNG|SAI|TRUE|FALSE|[ĐTFS])(?![\p{L}\p{N}])/giu)
-      ).map((m) => /^(Đ|ĐÚNG|T|TRUE)$/i.test(m[1]));
-
-      const answerConfirmed = tfTokens.length >= stmtTexts.length;
-      if (!answerConfirmed) {
-        warnings.push(
-          `Câu Đúng/Sai #${blk.questionNumber} (${code}) chưa đủ đáp án từng ý — yêu cầu giáo viên xác nhận ở Bước 2.`
-        );
+      // Parse per-statement labeled keys first ("a) Đ, b) S, c) Đ, d) S"), fallback to ordered tokens ("Đ-S-Đ-S")
+      const labeledTf = new Map<TrueFalseLabel, boolean>();
+      const labeledRe = /([a-d])\s*[).:\-]?\s*(ĐÚNG|SAI|TRUE|FALSE|[ĐTFS])(?![\p{L}\p{N}])/giu;
+      let lm: RegExpExecArray | null;
+      while ((lm = labeledRe.exec(declaredAnswerRaw)) !== null) {
+        const lbl = lm[1].toLowerCase() as TrueFalseLabel;
+        labeledTf.set(lbl, /^(Đ|ĐÚNG|T|TRUE)$/i.test(lm[2]));
       }
 
-      const statements: TrueFalseStatement[] = stmtTexts.map((txt, sIdx) => {
-        const inlineTrue = /\[(Đ|Đúng|T|True)\]\s*$/i.test(txt);
+      const orderedTfTokens =
+        labeledTf.size > 0
+          ? []
+          : Array.from(
+              declaredAnswerRaw
+                .toUpperCase()
+                .matchAll(/(?<![\p{L}\p{N}])(ĐÚNG|SAI|TRUE|FALSE|[ĐTFS])(?![\p{L}\p{N}])/giu)
+            ).map((m) => /^(Đ|ĐÚNG|T|TRUE)$/i.test(m[1]));
+
+      const statements: TrueFalseStatement[] = parsedStmts.map((ps, sIdx) => {
+        const lbl = TF_LABELS[sIdx] ?? (String(sIdx + 1) as TrueFalseLabel);
+        const txt = ps.cleanedText;
+        const inlineMatch = txt.match(/\[(Đ|S|Đúng|Sai|T|F|True|False)\]\s*$/i);
         const cleanSt = txt.replace(/\[(Đ|S|Đúng|Sai|T|F|True|False)\]\s*$/i, '').trim();
+        const isUnderlined = qUnderlinedStmtLabels.includes(lbl);
+
+        let resolvedBool: boolean | undefined;
+        if (labeledTf.has(lbl)) {
+          resolvedBool = labeledTf.get(lbl);
+        } else if (orderedTfTokens[sIdx] !== undefined) {
+          resolvedBool = orderedTfTokens[sIdx];
+        } else if (inlineMatch) {
+          resolvedBool = /^(Đ|Đúng|T|True)$/i.test(inlineMatch[1]);
+        }
+
+        const answerState: TrueFalseStatement['answerState'] =
+          resolvedBool !== undefined
+            ? 'confirmed'
+            : isUnderlined
+            ? 'candidate'
+            : 'missing';
+
         return {
           id: `${qId}-st-${sIdx + 1}`,
-          originalLabel: TF_LABELS[sIdx] ?? (String(sIdx + 1) as TrueFalseLabel),
+          originalLabel: lbl,
           content: createImmutableContentPayload(cleanSt, `${qId}-s${sIdx + 1}`, {
             rawXmlFragments: collectOmmlForText(cleanSt, ommlFragments),
             preserveExactWhitespace: preserveWhitespace,
           }),
-          isTrue: tfTokens[sIdx] ?? inlineTrue,
+          isTrue: resolvedBool ?? false,
+          answerState,
+          underlinedInSource: isUnderlined || undefined,
         };
       });
 
+      const allStatementsConfirmed =
+        statements.length > 0 &&
+        statements.every((st) => st.answerState === 'confirmed') &&
+        !hasKeyConflict;
+
+      let answerProvenance: AnswerProvenance;
+      if (hasKeyConflict) {
+        answerProvenance = {
+          status: 'conflict',
+          sourceKind: keySourceKind,
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: declaredAnswerRaw,
+          conflictingEvidence: matchedTrailingEntry?.conflictingEvidences,
+          note: 'Các nguồn đáp án Đúng/Sai trong tài liệu mâu thuẫn nhau — cần giáo viên đối chiếu.',
+        };
+      } else if (allStatementsConfirmed) {
+        answerProvenance = {
+          status: 'source-matched',
+          sourceKind: keySourceKind ?? 'inline-key',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation ?? 'Đánh dấu [Đ]/[S] trong câu hỏi',
+          rawEvidence:
+            declaredAnswerRaw ||
+            statements.map((st) => `${st.originalLabel})${st.isTrue ? 'Đ' : 'S'}`).join(' '),
+        };
+      } else if (qUnderlinedStmtLabels.length > 0) {
+        answerProvenance = {
+          status: 'needs-review',
+          sourceKind: 'underline-candidate',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          candidateConvention: 'underlined-statements-only',
+          rawEvidence: `Gạch chân ý: ${qUnderlinedStmtLabels.join(', ')}`,
+          note: `Phát hiện gạch chân tại ý ${qUnderlinedStmtLabels.join(', ')} nhưng không có bảng Đ/S. Hệ thống KHÔNG tự suy các ý còn lại là Sai — giáo viên cần xác nhận rõ cả 4 ý.`,
+        };
+      } else {
+        const missingLabels = statements
+          .filter((st) => st.answerState !== 'confirmed')
+          .map((st) => st.originalLabel);
+        answerProvenance = {
+          status: 'missing',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          note: `Thiếu khóa Đúng/Sai cho ý ${missingLabels.join(', ')} — cần giáo viên xác nhận ở Bước 2.`,
+        };
+      }
+
+      if (!allStatementsConfirmed) {
+        warnings.push(
+          `Câu Đúng/Sai #${blk.questionNumber} (${code}): ${answerProvenance.note}`
+        );
+      }
+
       const depStFlags = detectDependentStatements(statements);
+      const formulaStatus = computeFormulaStatusForQuestion(
+        [stemText, ...statements.map((s) => s.content.rawSource)],
+        combinedTfAssets
+      );
+
       const q: MathQuestion = {
         id: qId,
         code,
@@ -965,14 +1781,17 @@ export function parseUniversalExamText(
         }),
         statements,
         solutionGuide: createImmutableContentPayload('', `${qId}-sol`),
-        visualAssets: qAssets,
-        hasVisualAsset: qAssets.length > 0,
+        visualAssets: combinedTfAssets,
+        hasVisualAsset: combinedTfAssets.length > 0,
         groupId: blk.passageGroupKey,
         lockQuestionPosition: false,
         lockOptionShuffle: depStFlags.length > 0,
         allowStatementShuffle: depStFlags.length === 0,
         dependencyFlags: depStFlags,
-        answerConfirmed,
+        answerConfirmed: allStatementsConfirmed,
+        answerProvenance,
+        formulaStatus,
+        sourceTrace: baseSourceTrace,
         createdAt: now,
         updatedAt: now,
       };
@@ -1196,11 +2015,32 @@ export function parseUniversalExamText(
     // F. Tự luận vs Trả lời ngắn
     const isEssay =
       blk.sectionHintType === 'essay' ||
-      /tự luận|làm văn|viết đoạn|viết bài|nghị luận|chứng minh|phân tích|cảm nhận|write an essay|write a paragraph/i.test(
-        `${blk.sectionTitle} ${bodyClean}`
-      );
+      (blk.sectionHintType !== 'short-answer' &&
+        /tự luận|làm văn|viết đoạn|viết bài|nghị luận|chứng minh|phân tích|cảm nhận|write an essay|write a paragraph/i.test(
+          `${blk.sectionTitle} ${bodyClean}`
+        ));
 
     if (isEssay) {
+      const hasEssayAnswer = declaredAnswerRaw.trim().length > 0;
+      const essayFormulaStatus = computeFormulaStatusForQuestion(
+        [bodyClean, declaredAnswerRaw],
+        qAssets
+      );
+      const essayProvenance: AnswerProvenance = hasEssayAnswer
+        ? {
+            status: 'source-matched',
+            sourceKind: keySourceKind ?? 'solution-line',
+            sourceFileHash: options?.sourceFileHash,
+            sourceLocation: keySourceLocation,
+            rawEvidence: declaredAnswerRaw,
+          }
+        : {
+            status: 'missing',
+            sourceFileHash: options?.sourceFileHash,
+            sourceLocation: blk.paragraphLocation,
+            note: 'Câu Tự luận chưa có đáp số (ĐS:) hoặc hướng dẫn chấm trong tệp gốc.',
+          };
+
       const q: MathQuestion = {
         id: qId,
         code,
@@ -1238,7 +2078,10 @@ export function parseUniversalExamText(
         lockOptionShuffle: true,
         allowStatementShuffle: false,
         dependencyFlags: [],
-        answerConfirmed: true,
+        answerConfirmed: hasEssayAnswer,
+        answerProvenance: essayProvenance,
+        formulaStatus: essayFormulaStatus,
+        sourceTrace: baseSourceTrace,
         createdAt: now,
         updatedAt: now,
       };
@@ -1248,12 +2091,59 @@ export function parseUniversalExamText(
       registerInGroup();
       emptyCounts.essay += 1;
     } else {
-      const answerConfirmed = Boolean(declaredAnswerRaw);
-      if (!answerConfirmed) {
+      const effectiveRawShort = declaredAnswerRaw || part3ShortAnswerCandidate || '';
+      const hasExplicitShort = declaredAnswerRaw.trim().length > 0 && !hasKeyConflict;
+      const isPart3CandidateOnly = !hasExplicitShort && Boolean(part3ShortAnswerCandidate);
+      const normShort = normalizeShortAnswerValue(effectiveRawShort);
+
+      let shortProvenance: AnswerProvenance;
+      if (hasKeyConflict) {
+        shortProvenance = {
+          status: 'conflict',
+          sourceKind: keySourceKind,
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: declaredAnswerRaw,
+          conflictingEvidence: matchedTrailingEntry?.conflictingEvidences,
+          note: 'Các nguồn đáp án Trả lời ngắn mâu thuẫn nhau — cần giáo viên kiểm tra.',
+        };
+      } else if (hasExplicitShort) {
+        shortProvenance = {
+          status: 'source-matched',
+          sourceKind: keySourceKind ?? 'inline-key',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: keySourceLocation,
+          rawEvidence: normShort.rawAnswer,
+        };
+      } else if (isPart3CandidateOnly) {
+        shortProvenance = {
+          status: 'needs-review',
+          sourceKind: 'short-answer-candidate',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          candidateConvention: 'part3-prefix-A-answer',
+          rawEvidence: `A. ${part3ShortAnswerCandidate}`,
+          note: `Phát hiện dòng "A. ${part3ShortAnswerCandidate}" trong Phần Trả lời ngắn — giữ làm ứng viên đáp án ngắn, cần giáo viên xác nhận.`,
+        };
+      } else {
+        shortProvenance = {
+          status: 'missing',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          note: 'Chưa có đáp án Trả lời ngắn trong tài liệu gốc — cần giáo viên điền/xác nhận ở Bước 2.',
+        };
+      }
+
+      if (!hasExplicitShort) {
         warnings.push(
-          `Câu Trả lời ngắn #${blk.questionNumber} (${code}) chưa có đáp án gốc — cần giáo viên điền/xác nhận ở Bước 2.`
+          `Câu Trả lời ngắn #${blk.questionNumber} (${code}): ${shortProvenance.note}`
         );
       }
+
+      const shortFormulaStatus = computeFormulaStatusForQuestion(
+        [bodyClean, normShort.rawAnswer],
+        qAssets
+      );
 
       const q: MathQuestion = {
         id: qId,
@@ -1271,8 +2161,10 @@ export function parseUniversalExamText(
           preserveExactWhitespace: preserveWhitespace,
         }),
         shortAnswer: {
-          answerValue: declaredAnswerRaw,
-          acceptedFormats: declaredAnswerRaw ? [declaredAnswerRaw] : [],
+          answerValue: normShort.canonicalAnswer,
+          rawAnswer: normShort.rawAnswer,
+          normalizedAnswer: normShort.normalizedAnswer,
+          acceptedFormats: normShort.acceptedFormats,
           unit: '',
           domainCondition: '',
         },
@@ -1284,7 +2176,10 @@ export function parseUniversalExamText(
         lockOptionShuffle: true,
         allowStatementShuffle: false,
         dependencyFlags: [],
-        answerConfirmed,
+        answerConfirmed: hasExplicitShort,
+        answerProvenance: shortProvenance,
+        formulaStatus: shortFormulaStatus,
+        sourceTrace: baseSourceTrace,
         createdAt: now,
         updatedAt: now,
       };
@@ -1331,7 +2226,13 @@ export function parseUniversalExamText(
   }
 
   const assetsAttached =
-    questions.reduce((acc, q) => acc + (q.visualAssets?.length ?? 0), 0) +
+    questions.reduce(
+      (acc, q) =>
+        acc +
+        (q.visualAssets?.length ?? 0) +
+        (q.options?.filter((o) => Boolean(o.visualAsset)).length ?? 0),
+      0
+    ) +
     questionGroups.reduce((acc, g) => acc + g.sharedAssets.length, 0);
   const confirmedAnswerCount = questions.filter((q) => q.answerConfirmed).length;
   const unconfirmedAnswerCount = questions.length - confirmedAnswerCount;
@@ -1342,6 +2243,7 @@ export function parseUniversalExamText(
     report: {
       sourceFormat,
       fileName: options?.fileName,
+      sourceFileHash: options?.sourceFileHash,
       suggestedSubject,
       totalParsed: questions.length,
       countsByType: emptyCounts,
@@ -1349,11 +2251,21 @@ export function parseUniversalExamText(
       assetsAttached,
       ommlCount: ommlFragments.length,
       ...(options?.legacyOleCount !== undefined ? { legacyOleCount: options.legacyOleCount } : {}),
+      ...(options?.legacyOleDecodedLatexCount !== undefined
+        ? { legacyOleDecodedLatexCount: options.legacyOleDecodedLatexCount }
+        : {}),
+      ...(options?.legacyOleWmfPreviewCount !== undefined
+        ? { legacyOleWmfPreviewCount: options.legacyOleWmfPreviewCount }
+        : {}),
+      ...(options?.unresolvedOleCount !== undefined
+        ? { unresolvedOleCount: options.unresolvedOleCount }
+        : {}),
       ...(options?.unsupportedMediaCount !== undefined
         ? { unsupportedMediaCount: options.unsupportedMediaCount }
         : {}),
       confirmedAnswerCount,
       unconfirmedAnswerCount,
+      sectionCountAudits,
       warnings: Array.from(new Set(warnings)),
       unparsedSegments,
       canImport: questions.length > 0,
@@ -1395,7 +2307,12 @@ export async function importUniversalExamFile(
       fileName: input.fileName,
       assets: [...(options?.assets ?? []), ...extracted.assets],
       ommlFragments: extracted.ommlFragments,
+      docxParagraphs: extracted.paragraphs,
+      sourceFileHash: extracted.sourceFileHash,
       legacyOleCount: extracted.legacyOleCount,
+      legacyOleDecodedLatexCount: extracted.legacyOleDecodedLatexCount,
+      legacyOleWmfPreviewCount: extracted.legacyOleWmfPreviewCount,
+      unresolvedOleCount: extracted.unresolvedOleCount,
       unsupportedMediaCount: extracted.unsupportedMediaCount,
       preWarnings: [...(options?.preWarnings ?? []), ...extracted.warnings],
     });
@@ -1444,6 +2361,7 @@ export function mergeImportedExamIntoProject(
     questionGroups: options?.replaceExisting
       ? imported.questionGroups
       : [...(exam.questionGroups ?? []), ...imported.questionGroups],
+    sectionCountAudits: imported.report.sectionCountAudits,
     confirmedOriginalAnswers: false,
     generatedVersions: [],
     updatedAt: new Date().toISOString(),

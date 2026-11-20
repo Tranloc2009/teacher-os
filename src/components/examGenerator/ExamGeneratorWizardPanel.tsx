@@ -37,6 +37,7 @@ import {
   canExportOfficialAnswerKey,
   convertDraftToMathExamProject,
   generateExamsFromBlueprintAsync,
+  verifyDraftDynamicGraphBindings,
 } from '../../core/examGenerator/examBuilderEngine';
 import { generateVerifiedVariant } from '../../core/examGenerator/verifiedVariantEngine';
 import { generateMixedExams } from '../../core/mathShuffleEngine';
@@ -449,6 +450,11 @@ export function ExamGeneratorWizardPanel({
 
   const handleExportDocx = async (includeAnswerKey: boolean) => {
     if (!activeDraft) return;
+    const graphBindingCheck = verifyDraftDynamicGraphBindings(activeDraft);
+    if (!graphBindingCheck.valid) {
+      onNotify('error', graphBindingCheck.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA');
+      return;
+    }
     if (includeAnswerKey) {
       const gate = canExportOfficialAnswerKey(activeDraft);
       if (!gate.allowed) {
@@ -692,7 +698,7 @@ export function ExamGeneratorWizardPanel({
               </p>
               <p className="text-indigo-800 dark:text-indigo-300">
                 <span className="font-mono-num font-bold">{matchingSourceStats.bankCount}</span> câu hỏi gốc trong ngân hàng ·{' '}
-                <span className="font-mono-num font-bold">{matchingSourceStats.tplCount}</span> mẫu đổi số Level 1 &amp; Level 2 đã kiểm chứng.
+                <span className="font-mono-num font-bold">{matchingSourceStats.tplCount}</span> mẫu đổi số Level 1, Level 2 &amp; Level 3 (Đồ thị) đã kiểm chứng.
               </p>
             </div>
             <button
@@ -934,7 +940,7 @@ export function ExamGeneratorWizardPanel({
                 {
                   id: 'verified-variants',
                   title: 'MODE B — Biến thể kiểm chứng',
-                  desc: 'Chỉ sinh biến thể đổi số từ các mẫu Level 1 & Level 2 có bộ giải & kiểm chứng độc lập. Thiếu mẫu sẽ báo rõ.',
+                  desc: 'Chỉ sinh biến thể đổi số từ các mẫu Level 1, Level 2 & Level 3 Đồ thị có bộ giải & kiểm chứng độc lập. Thiếu mẫu sẽ báo rõ.',
                 },
                 {
                   id: 'hybrid',

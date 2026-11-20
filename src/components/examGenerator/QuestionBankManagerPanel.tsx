@@ -1,7 +1,8 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  FileSearch,
   Lock,
   Plus,
   Search,
@@ -9,6 +10,9 @@ import {
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
+import type { ResourceItem } from '../../types/lesson';
+import type { QuestionSourceProvenance } from '../../types/resourceIntelligence';
+import { SourceProvenanceModal } from './SourceProvenanceModal';
 import {
   COGNITIVE_LEVEL_LABELS,
   MATH_QUESTION_TYPE_LABELS,
@@ -25,14 +29,20 @@ import type {
 } from '../../types/examGenerator';
 import { parseMathContent } from '../../core/mathIntegrity';
 import { evaluateBankQuestionVariantSafety } from '../../core/examGenerator/verifiedVariantEngine';
-import { MathContentRenderer } from '../math/MathContentRenderer';
+import {
+  MathContentRenderer,
+  MathVisualAssetRenderer,
+} from '../math/MathContentRenderer';
 
 interface QuestionBankManagerPanelProps {
   unifiedBank: BankQuestionRecord[];
   templates: QuestionTemplateDefinition[];
+  resources?: ResourceItem[];
+  initialSearchQuery?: string | null;
   onAddBankQuestion: (item: BankQuestionRecord) => void;
   onDeleteBankQuestion: (id: string) => void;
   onCreateTemplateFromQuestion: (item: BankQuestionRecord) => void;
+  onNotify?: (tone: 'success' | 'info' | 'error', text: string) => void;
 }
 
 const STATUS_STYLE: Record<
@@ -69,11 +79,28 @@ const STATUS_STYLE: Record<
 export function QuestionBankManagerPanel({
   unifiedBank,
   templates,
+  resources = [],
+  initialSearchQuery,
   onAddBankQuestion,
   onDeleteBankQuestion,
   onCreateTemplateFromQuestion,
+  onNotify,
 }: QuestionBankManagerPanelProps) {
-  const [searchQuery, setSearchQuery] = useState('');
+  const [activeProvenance, setActiveProvenance] = useState<{
+    provenance: QuestionSourceProvenance;
+    resource?: ResourceItem;
+  } | null>(null);
+  const resourceById = useMemo(
+    () => new Map(resources.map((r) => [r.id, r])),
+    [resources]
+  );
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery ?? '');
+
+  useEffect(() => {
+    if (typeof initialSearchQuery === 'string' && initialSearchQuery.trim()) {
+      setSearchQuery(initialSearchQuery.trim());
+    }
+  }, [initialSearchQuery]);
   const [filterSubject, setFilterSubject] = useState<string>('all');
   const [filterLevel, setFilterLevel] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -550,6 +577,19 @@ export function QuestionBankManagerPanel({
                     <span className="rounded-md bg-indigo-50 dark:bg-indigo-950/50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 dark:text-indigo-300">
                       {COGNITIVE_LEVEL_LABELS[item.cognitiveLevel]} · {MATH_QUESTION_TYPE_LABELS[item.type]}
                     </span>
+                    {item.question.variantMeta?.graphFingerprint && (
+                      <span className="font-mono-num rounded-md bg-sky-50 dark:bg-sky-950/60 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:text-sky-300">
+                        Graph FP: {item.question.variantMeta.graphFingerprint}
+                      </span>
+                    )}
+                    {item.sourceKind === 'resource-vault' && item.sourceProvenance && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:text-emerald-300">
+                        Resource Vault · {item.sourceProvenance.fileName}
+                        {item.sourceProvenance.sourcePage
+                          ? ` (Tr.${item.sourceProvenance.sourcePage})`
+                          : ''}
+                      </span>
+                    )}
                     {item.sourceKind === 'exam-project' && (
                       <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] text-slate-500">
                         <Lock className="h-2.5 w-2.5" aria-hidden="true" />
@@ -559,6 +599,21 @@ export function QuestionBankManagerPanel({
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    {item.sourceProvenance && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setActiveProvenance({
+                            provenance: item.sourceProvenance!,
+                            resource: resourceById.get(item.sourceProvenance!.resourceId),
+                          })
+                        }
+                        className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/70 dark:bg-indigo-950/50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100"
+                      >
+                        <FileSearch className="h-3 w-3" aria-hidden="true" />
+                        <span>Xem nguồn gốc</span>
+                      </button>
+                    )}
                     {safety.status !== 'BLOCKED' &&
                       (item.type === 'mcq' || item.type === 'short-answer') && (
                         <button
@@ -570,7 +625,8 @@ export function QuestionBankManagerPanel({
                           <span>{item.templateId ? 'Mở mẫu đổi số' : 'Tạo mẫu đổi số'}</span>
                         </button>
                       )}
-                    {item.sourceKind === 'generator-bank' && (
+                    {(item.sourceKind === 'generator-bank' ||
+                      item.sourceKind === 'resource-vault') && (
                       <button
                         type="button"
                         onClick={() => onDeleteBankQuestion(item.id)}
@@ -587,19 +643,38 @@ export function QuestionBankManagerPanel({
                   <MathContentRenderer payload={item.question.stem} />
                 </div>
 
+                {item.question.visualAssets && item.question.visualAssets.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                    {item.question.visualAssets.map((asset) => (
+                      <MathVisualAssetRenderer key={asset.id} asset={asset} compact />
+                    ))}
+                  </div>
+                )}
+
                 {item.question.options && item.question.options.length > 0 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+                  <div
+                    className={`grid grid-cols-1 gap-2 text-xs ${
+                      item.question.options.some((o) => Boolean(o.visualAsset))
+                        ? 'sm:grid-cols-2'
+                        : 'sm:grid-cols-2 lg:grid-cols-4'
+                    }`}
+                  >
                     {item.question.options.map((opt) => (
                       <div
                         key={opt.id}
-                        className={`rounded-xl border px-2.5 py-1.5 ${
+                        className={`rounded-xl border px-2.5 py-1.5 space-y-2 ${
                           opt.isCorrect
                             ? 'border-emerald-300 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/40 font-semibold text-emerald-900 dark:text-emerald-200'
                             : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300'
                         }`}
                       >
-                        <span className="font-bold mr-1.5">{opt.originalLabel}.</span>
-                        <MathContentRenderer payload={opt.content} />
+                        <div>
+                          <span className="font-bold mr-1.5">{opt.originalLabel}.</span>
+                          <MathContentRenderer payload={opt.content} />
+                        </div>
+                        {opt.visualAsset && (
+                          <MathVisualAssetRenderer asset={opt.visualAsset} compact />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -615,6 +690,15 @@ export function QuestionBankManagerPanel({
           })
         )}
       </div>
+
+      {activeProvenance && (
+        <SourceProvenanceModal
+          provenance={activeProvenance.provenance}
+          resource={activeProvenance.resource}
+          onClose={() => setActiveProvenance(null)}
+          onNotify={onNotify}
+        />
+      )}
     </div>
   );
 }

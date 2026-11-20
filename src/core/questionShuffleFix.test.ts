@@ -747,7 +747,8 @@ test('TEST 13: DOCX with Word Auto Numbering (w:numPr + word/numbering.xml) pars
     <w:p>
       <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="10"/></w:numPr></w:pPr>
       <w:r><w:t>${n + 13}</w:t></w:r>
-    </w:p>`;
+    </w:p>
+    <w:p><w:r><w:t>Đáp án: A</w:t></w:r></w:p>`;
   }).join('\n');
 
   // Also add one paragraph that already has literal "Câu 7:" + numPr to ensure NO double prefix

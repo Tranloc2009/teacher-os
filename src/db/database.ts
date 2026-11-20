@@ -19,6 +19,23 @@ import type {
   GeneratorBackupBundle,
   QuestionTemplateDefinition,
 } from '../types/examGenerator';
+import type { ConnectedWorkflowContext } from '../types/connectedWorkflow';
+import {
+  CONNECTED_WORKFLOW_META_KEY,
+  createInitialWorkflowContext,
+  normalizeStoredWorkflowContext,
+} from '../core/connectedWorkflowEngine';
+import type { ExamFormTemplate } from '../types/examForm';
+import {
+  BUILT_IN_EXAM_FORM_PRESETS,
+  EXAM_FORM_TEMPLATES_META_KEY,
+  mergeStoredExamFormTemplates,
+} from '../core/examFormEngine';
+import type { ExternalIntegrationConfig } from '../types/azota';
+import {
+  createDefaultExternalIntegrationConfig,
+  sanitizeExternalIntegrationConfig,
+} from '../core/azotaIntegrationEngine';
 import {
   DEMO_GENERATOR_BANK,
   DEMO_GENERATOR_TEMPLATES,
@@ -59,6 +76,7 @@ import {
   DEFAULT_JOURNALS,
   DEFAULT_RESOURCES,
   DEFAULT_WORKFLOWS,
+  PHASE_A_VAULT_EXAM_RESOURCES,
 } from '../core/workspaceModules';
 import {
   createDefaultWorksheetVariants,
@@ -336,9 +354,60 @@ export function normalizeLegacyLessonPack(raw: LessonPack): LessonPack {
 }
 
 /**
+ * Phát hiện dữ liệu lỗi từ phiên bản nhập cũ trong IndexedDB (VD: câu Đúng/Sai bị chấm
+ * bằng chuỗi lỗi 666/6666, thiếu mệnh đề, hoặc MCQ thiếu/lệch đáp án đúng).
+ */
+function detectLegacyQuestionAnomalies(q: MathExamProject['questions'][number]): string[] {
+  const reasons: string[] = [...(q.legacyAnomalyReasons ?? [])];
+  const pushUnique = (msg: string) => {
+    if (!reasons.includes(msg)) reasons.push(msg);
+  };
+
+  if (q.type === 'true-false') {
+    const saVal = q.shortAnswer?.answerValue?.trim() ?? '';
+    const solVal = q.solutionGuide?.rawSource?.trim() ?? '';
+    if (/^6{3,}$/.test(saVal) || /\b6666?\b/.test(solVal)) {
+      pushUnique(
+        'Phát hiện dấu hiệu đáp án lỗi legacy (chuỗi 666/6666) trong câu Đúng–Sai — bắt buộc rà soát lại 4 mệnh đề a/b/c/d.'
+      );
+    }
+    const sts = q.statements ?? [];
+    if (sts.length !== 4) {
+      pushUnique(`Câu Đúng–Sai dữ liệu cũ có ${sts.length}/4 mệnh đề — cần rà soát lại cấu trúc.`);
+    }
+    if (sts.some((s) => /^6{3,}$/.test(s.content?.rawSource?.trim() ?? ''))) {
+      pushUnique('Phát hiện nội dung mệnh đề Đúng–Sai bị hỏng (666/6666) từ bản lưu cũ.');
+    }
+  }
+
+  if (q.type === 'short-answer') {
+    const saVal = q.shortAnswer?.answerValue?.trim() ?? '';
+    const isPartII = /PHẦN\s*II\b|ĐÚNG\s*[-–/]\s*SAI/i.test(q.sectionTitle || '');
+    if (isPartII || /^6{3,}$/.test(saVal)) {
+      pushUnique(
+        `Câu Trả lời ngắn mang dấu hiệu sai kiểu/đáp án legacy (${saVal || 'thuộc Phần II Đúng–Sai'}) — cần kiểm tra lại.`
+      );
+    }
+  }
+
+  if (q.type === 'mcq') {
+    const opts = q.options ?? [];
+    const correctOpts = opts.filter((o) => o.isCorrect);
+    if (q.correctOptionId && !opts.some((o) => o.id === q.correctOptionId)) {
+      pushUnique('Mã correctOptionId của câu MCQ cũ không khớp phương án nào.');
+    }
+    if (correctOpts.length > 1) {
+      pushUnique(`Câu MCQ cũ có ${correctOpts.length} phương án cùng đánh dấu đúng.`);
+    }
+  }
+
+  return reasons;
+}
+
+/**
  * Chuẩn hóa đề Toán/đa môn trong IndexedDB (v4/v5/v6) để bổ sung Subject Profile,
- * Universal Question Type, Universal Lock 5 lớp, Visual Asset & Question Group
- * mà không làm mất dữ liệu câu hỏi hoặc mã đề đã tạo trước đó.
+ * Universal Question Type, Universal Lock 5 lớp, Visual Asset, Question Group
+ * và vệ sinh các bản ghi lỗi từ phiên bản cũ (legacy hygiene) mà không xóa dữ liệu giáo viên.
  */
 export function normalizeMathExamProject(raw: MathExamProject): MathExamProject {
   const resolvedSubjectId = resolveSubjectId(raw.subjectId || raw.subject || 'Toán học');
@@ -348,29 +417,72 @@ export function normalizeMathExamProject(raw: MathExamProject): MathExamProject 
       ? raw.subject
       : subjectProfile.name;
 
+  let detectedCorruptLegacy = false;
+
+  const normalizedQuestions = (raw.questions || []).map((q) => {
+    const normalizedOptions = q.options?.map((o) => ({
+      ...o,
+      lockPosition: Boolean(o.lockPosition),
+    }));
+    const legacyAnomalies = detectLegacyQuestionAnomalies(q);
+    if (legacyAnomalies.length > 0) {
+      detectedCorruptLegacy = true;
+    }
+
+    let answerProvenance = q.answerProvenance;
+    let answerConfirmed = q.answerConfirmed;
+
+    if (legacyAnomalies.length > 0) {
+      answerConfirmed = false;
+      answerProvenance = {
+        status: 'needs-review',
+        sourceKind: 'legacy-unverified',
+        rawEvidence: answerProvenance?.rawEvidence,
+        note: legacyAnomalies.join(' '),
+      };
+    } else if (!answerProvenance && raw.isDemo && q.answerConfirmed) {
+      answerProvenance = {
+        status: 'teacher-confirmed',
+        sourceKind: 'seed-demo',
+        note: 'Dữ liệu đề mẫu chuẩn của hệ thống.',
+      };
+    }
+
+    const normalizedQuestion = {
+      ...q,
+      subjectId: q.subjectId ?? resolvedSubjectId,
+      universalType: getUniversalQuestionType(q),
+      visualAssets: Array.isArray(q.visualAssets) ? q.visualAssets : [],
+      options: normalizedOptions,
+      answerConfirmed,
+      answerProvenance,
+      legacyAnomalyReasons: legacyAnomalies.length > 0 ? legacyAnomalies : undefined,
+    };
+    return {
+      ...normalizedQuestion,
+      universalLock: buildUniversalLockState(normalizedQuestion, subjectProfile),
+    };
+  });
+
+  // Kiểm tra thêm bản mã đề cũ có chứa khóa lỗi 666/6666 ở câu Đúng/Sai không
+  const existingVersions = Array.isArray(raw.generatedVersions) ? raw.generatedVersions : [];
+  const hasCorruptGeneratedVersions = existingVersions.some((ver) =>
+    (ver.answerKeyRows ?? []).some(
+      (row) => row.type === 'true-false' && /\b6{3,}\b/.test(row.answer ?? '')
+    )
+  );
+  if (hasCorruptGeneratedVersions) {
+    detectedCorruptLegacy = true;
+  }
+
   return {
     ...raw,
     subject: resolvedSubjectName,
     subjectId: resolvedSubjectId,
     schemaVersion: raw.schemaVersion ?? '5.0',
     questionGroups: Array.isArray(raw.questionGroups) ? raw.questionGroups : [],
-    questions: (raw.questions || []).map((q) => {
-      const normalizedOptions = q.options?.map((o) => ({
-        ...o,
-        lockPosition: Boolean(o.lockPosition),
-      }));
-      const normalizedQuestion = {
-        ...q,
-        subjectId: q.subjectId ?? resolvedSubjectId,
-        universalType: getUniversalQuestionType(q),
-        visualAssets: Array.isArray(q.visualAssets) ? q.visualAssets : [],
-        options: normalizedOptions,
-      };
-      return {
-        ...normalizedQuestion,
-        universalLock: buildUniversalLockState(normalizedQuestion, subjectProfile),
-      };
-    }),
+    questions: normalizedQuestions,
+    confirmedOriginalAnswers: detectedCorruptLegacy ? false : raw.confirmedOriginalAnswers,
     mixConfig: {
       ...raw.mixConfig,
       keepDependentGroups: raw.mixConfig?.keepDependentGroups ?? true,
@@ -384,7 +496,7 @@ export function normalizeMathExamProject(raw: MathExamProject): MathExamProject 
         ? raw.mixConfig.matrixRules
         : [],
     },
-    generatedVersions: Array.isArray(raw.generatedVersions) ? raw.generatedVersions : [],
+    generatedVersions: detectedCorruptLegacy ? [] : existingVersions,
   };
 }
 
@@ -467,6 +579,18 @@ export async function initializeDatabase(): Promise<{
             await db.journals.bulkPut(DEFAULT_JOURNALS);
           }
           await db.meta.put({ key: 'modules_seeded_v4', value: 'true' });
+        }
+
+        // Bổ sung tài liệu đề Toán 12 cho Resource Vault Intelligence (chỉ thêm nếu chưa có, không ghi đè dữ liệu người dùng)
+        const phaseAVaultSeeded = await db.meta.get('resource_vault_phase_a_v1');
+        if (!phaseAVaultSeeded) {
+          for (const resItem of PHASE_A_VAULT_EXAM_RESOURCES) {
+            const exists = await db.resources.get(resItem.id);
+            if (!exists) {
+              await db.resources.put(structuredClone(resItem));
+            }
+          }
+          await db.meta.put({ key: 'resource_vault_phase_a_v1', value: 'true' });
         }
 
         // Khởi tạo đề Toán mẫu GDPT 2018 cho Math Exam Mixer Pro (1 lần duy nhất)
@@ -1525,6 +1649,23 @@ export async function saveGeneratorBankItem(
   });
 }
 
+export async function bulkSaveGeneratorBankItems(
+  items: BankQuestionRecord[]
+): Promise<BankQuestionRecord[]> {
+  if (items.length === 0) return [];
+  return executeStorageOperation(async () => {
+    const now = new Date().toISOString();
+    const updated = items.map((item) => ({
+      ...item,
+      updatedAt: item.updatedAt || now,
+    }));
+    await db.transaction('rw', db.examGeneratorBank, async () => {
+      await db.examGeneratorBank.bulkPut(updated);
+    });
+    return updated;
+  });
+}
+
 export async function deleteGeneratorBankItem(id: string): Promise<void> {
   return executeStorageOperation(async () => {
     await db.examGeneratorBank.delete(id);
@@ -1610,5 +1751,146 @@ export async function restoreGeneratorBackupBundle(
     return initializeExamGeneratorStore();
   });
 }
+
+// ============================================================================
+// Connected Workflow Context Persistence (reuses existing Dexie meta table)
+// ============================================================================
+
+export async function loadConnectedWorkflowContext(): Promise<ConnectedWorkflowContext> {
+  try {
+    const rec = await db.meta.get(CONNECTED_WORKFLOW_META_KEY);
+    if (rec?.value) {
+      return normalizeStoredWorkflowContext(JSON.parse(rec.value));
+    }
+  } catch {
+    // Fall back to localStorage below if IndexedDB read is unavailable
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(CONNECTED_WORKFLOW_META_KEY);
+      if (raw) {
+        return normalizeStoredWorkflowContext(JSON.parse(raw));
+      }
+    } catch {
+      // Ignore malformed localStorage
+    }
+  }
+  return createInitialWorkflowContext();
+}
+
+export async function saveConnectedWorkflowContext(
+  ctx: ConnectedWorkflowContext
+): Promise<ConnectedWorkflowContext> {
+  const serialized = JSON.stringify(ctx);
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(CONNECTED_WORKFLOW_META_KEY, serialized);
+    } catch {
+      // Ignore quota errors on localStorage fallback
+    }
+  }
+  try {
+    await db.meta.put({ key: CONNECTED_WORKFLOW_META_KEY, value: serialized });
+  } catch {
+    // Keep in-memory & localStorage fallback if IndexedDB is temporarily unavailable
+  }
+  return ctx;
+}
+
+// ============================================================================
+// Exam Form Designer Templates Persistence (reuses existing Dexie meta table)
+// ============================================================================
+
+export async function loadExamFormTemplates(): Promise<ExamFormTemplate[]> {
+  try {
+    const rec = await db.meta.get(EXAM_FORM_TEMPLATES_META_KEY);
+    if (rec?.value) {
+      return mergeStoredExamFormTemplates(JSON.parse(rec.value));
+    }
+  } catch {
+    // Fall back to localStorage below if IndexedDB read is unavailable
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(EXAM_FORM_TEMPLATES_META_KEY);
+      if (raw) {
+        return mergeStoredExamFormTemplates(JSON.parse(raw));
+      }
+    } catch {
+      // Ignore malformed localStorage
+    }
+  }
+  return structuredClone(BUILT_IN_EXAM_FORM_PRESETS);
+}
+
+export async function saveExamFormTemplates(
+  templates: ExamFormTemplate[]
+): Promise<ExamFormTemplate[]> {
+  const merged = mergeStoredExamFormTemplates(templates);
+  const serialized = JSON.stringify(merged);
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(EXAM_FORM_TEMPLATES_META_KEY, serialized);
+    } catch {
+      // Ignore quota errors on localStorage fallback
+    }
+  }
+  try {
+    await db.meta.put({ key: EXAM_FORM_TEMPLATES_META_KEY, value: serialized });
+  } catch {
+    // Keep in-memory & localStorage fallback if IndexedDB is temporarily unavailable
+  }
+  return merged;
+}
+
+// ============================================================================
+// External Integration Config Persistence (Section 14 — zero credentials stored)
+// ============================================================================
+
+export const EXTERNAL_INTEGRATION_META_KEY = 'external_integrations_v1';
+
+export async function loadExternalIntegrationConfig(): Promise<ExternalIntegrationConfig> {
+  try {
+    const rec = await db.meta.get(EXTERNAL_INTEGRATION_META_KEY);
+    if (rec?.value) {
+      return sanitizeExternalIntegrationConfig(JSON.parse(rec.value));
+    }
+  } catch {
+    // Fall back to localStorage below
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(EXTERNAL_INTEGRATION_META_KEY);
+      if (raw) {
+        return sanitizeExternalIntegrationConfig(JSON.parse(raw));
+      }
+    } catch {
+      // Ignore malformed localStorage
+    }
+  }
+  return createDefaultExternalIntegrationConfig();
+}
+
+export async function saveExternalIntegrationConfig(
+  config: ExternalIntegrationConfig
+): Promise<ExternalIntegrationConfig> {
+  const sanitized = sanitizeExternalIntegrationConfig(config);
+  const serialized = JSON.stringify(sanitized);
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(EXTERNAL_INTEGRATION_META_KEY, serialized);
+    } catch {
+      // Ignore quota errors
+    }
+  }
+  try {
+    await db.meta.put({ key: EXTERNAL_INTEGRATION_META_KEY, value: serialized });
+  } catch {
+    // Keep in-memory & localStorage fallback
+  }
+  return sanitized;
+}
+
+
 
 
