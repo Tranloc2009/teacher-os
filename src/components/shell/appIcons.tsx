@@ -9,6 +9,7 @@ import {
   ScanLine,
   Settings,
   Sigma,
+  Wand2,
 } from 'lucide-react';
 import { AppId } from '../../core/appRegistry';
 
@@ -34,6 +35,8 @@ export function AppIcon({
       return <Printer className={className} aria-hidden="true" />;
     case 'math-mixer':
       return <Sigma className={className} aria-hidden="true" />;
+    case 'exam-generator':
+      return <Wand2 className={className} aria-hidden="true" />;
     case 'grading-studio':
       return <ScanLine className={className} aria-hidden="true" />;
     case 'teaching-journal':

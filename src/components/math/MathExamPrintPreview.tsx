@@ -156,11 +156,16 @@ function StudentExamA4Sheet({
                 )}
 
                 {uType !== 'multi-select' && q.type === 'mcq' && q.options && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 pl-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 pl-4">
                     {q.options.map((opt, oIdx) => (
-                      <div key={opt.id}>
-                        <span className="font-bold mr-1">{MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx)}.</span>
-                        <MathContentRenderer payload={opt.content} />
+                      <div key={opt.id} className="space-y-1">
+                        <div>
+                          <span className="font-bold mr-1">{MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx)}.</span>
+                          <MathContentRenderer payload={opt.content} />
+                        </div>
+                        {opt.visualAsset && (
+                          <MathVisualAssetRenderer asset={opt.visualAsset} compact />
+                        )}
                       </div>
                     ))}
                   </div>

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
   BarChart3,
   Camera,
   CheckCircle2,
+  ClipboardCheck,
   Eye,
   Layers,
   Plus,
@@ -16,6 +17,9 @@ import type { MathExamProject } from '../../types/mathExam';
 import {
   DEFAULT_GRADING_RULE,
   DEFAULT_OMR_THRESHOLDS,
+  type BatchQueueItem,
+  type DuplicateGroup,
+  type DuplicateResolutionAction,
   type GradedSheetRecord,
   type GradingRuleConfig,
   type GradingSession,
@@ -27,12 +31,37 @@ import {
   buildExamAnswerKeyMap,
   listGradableExams,
 } from '../../core/grading/examMixerBridge';
+import { generateMixedExams } from '../../core/mathShuffleEngine';
 import {
   annotateDuplicateStudentWarnings,
+  gradeRecognizedSheet,
   overrideSheetQuestion,
   recalculateSheetRecord,
 } from '../../core/grading/gradingEngine';
-import { renderAnnotatedEvidencePngBlob } from '../../core/grading/omrBrowserBridge';
+import {
+  decodeImageBlobForOmr,
+  renderAnnotatedEvidencePngBlob,
+} from '../../core/grading/omrBrowserBridge';
+import { runOmrVisionInWorkerOrFallback } from '../../core/grading/omrWorkerClient';
+import {
+  confirmOrOverrideGradebookEntry,
+  reconcileIntelligentGradebook,
+  undoLastOfficialGradeChange,
+} from '../../core/grading/gradebookReconciliationEngine';
+import {
+  applyDuplicateResolution,
+  detectDuplicateGroups,
+} from '../../core/grading/duplicateDetection';
+import {
+  cancelWaitingQueueItems,
+  enqueueBatchItem,
+  evaluateStorageQuota,
+  markQueueItemCompleted,
+  markQueueItemFailed,
+  markQueueItemProcessing,
+  retryFailedQueueItem,
+  summarizeBatchQueue,
+} from '../../core/grading/batchQueueEngine';
 import {
   createId,
   deleteGradingSession,
@@ -47,7 +76,10 @@ import { StudentRosterPanel } from '../grading/StudentRosterPanel';
 import { AnswerSheetGeneratorPanel } from '../grading/AnswerSheetGeneratorPanel';
 import { OmrBatchUploadPanel } from '../grading/OmrBatchUploadPanel';
 import { ManualReviewPanel } from '../grading/ManualReviewPanel';
+import { GradebookReconciliationPanel } from '../grading/GradebookReconciliationPanel';
 import { GradingExportPanel } from '../grading/GradingExportPanel';
+import { MobileCameraScannerModal } from '../grading/MobileCameraScannerModal';
+import { DuplicateResolutionModal } from '../grading/DuplicateResolutionModal';
 
 type GradingTabId =
   | 'dashboard'
@@ -55,12 +87,14 @@ type GradingTabId =
   | 'sheet-gen'
   | 'upload'
   | 'review'
+  | 'gradebook'
   | 'export';
 
 interface SmartGradingStudioAppProps {
   mathExams: MathExamProject[];
   preferredExamId?: string | null;
   onOpenExamMixer: () => void;
+  onSaveMathExam?: (exam: MathExamProject) => Promise<unknown> | void;
   onNotify: (tone: 'success' | 'info' | 'error', message: string) => void;
 }
 
@@ -68,6 +102,7 @@ export function SmartGradingStudioApp({
   mathExams,
   preferredExamId,
   onOpenExamMixer,
+  onSaveMathExam,
   onNotify,
 }: SmartGradingStudioAppProps) {
   const [sessions, setSessions] = useState<GradingSession[]>([]);
@@ -84,6 +119,19 @@ export function SmartGradingStudioApp({
   const [draftClassName, setDraftClassName] = useState<string>('12A1');
   const [draftTitle, setDraftTitle] = useState<string>('');
   const [draftSelectedCodes, setDraftSelectedCodes] = useState<string[]>([]);
+
+  // Phase 3: Mobile Camera Scanner, Non-blocking Batch Queue & Duplicate Resolver
+  const [cameraModalOpen, setCameraModalOpen] = useState(false);
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
+  const [reviewOnlyFlagged, setReviewOnlyFlagged] = useState(false);
+  const [cameraFallbackExamCode, setCameraFallbackExamCode] = useState<string>('');
+  const [retakeTargetSheet, setRetakeTargetSheet] = useState<GradedSheetRecord | null>(null);
+  const [batchQueue, setBatchQueue] = useState<BatchQueueItem[]>([]);
+  const [lowStorageWarning, setLowStorageWarning] = useState<string | undefined>(undefined);
+  const queueFilesRef = useRef<Map<string, File>>(new Map());
+  const queueProcessingRef = useRef(false);
+  const activeSessionRef = useRef<GradingSession | null>(null);
+  const answerKeysRef = useRef<Record<string, ReturnType<typeof buildExamAnswerKeyMap>[string]>>({});
 
   const gradableExams = useMemo(() => listGradableExams(mathExams), [mathExams]);
 
@@ -176,11 +224,237 @@ export function SmartGradingStudioApp({
     return buildExamAnswerKeyMap(linkedExam, activeSession.selectedExamCodes);
   }, [activeSession, linkedExam]);
 
-  const persistSession = async (nextSession: GradingSession) => {
-    const stamped: GradingSession = {
+  activeSessionRef.current = activeSession;
+  answerKeysRef.current = answerKeysByCode;
+
+  useEffect(() => {
+    if (activeSession && !cameraFallbackExamCode && activeSession.selectedExamCodes[0]) {
+      setCameraFallbackExamCode(activeSession.selectedExamCodes[0]);
+    }
+  }, [activeSession?.id, activeSession?.selectedExamCodes, cameraFallbackExamCode]);
+
+  const checkStorageQuota = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.storage?.estimate) return;
+    try {
+      const est = await navigator.storage.estimate();
+      if (est.usage !== undefined && est.quota !== undefined) {
+        const evalRes = evaluateStorageQuota(est.usage, est.quota);
+        setLowStorageWarning(evalRes.warning);
+      }
+    } catch {
+      // Ignore storage estimate errors on restricted browsers
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkStorageQuota();
+  }, [checkStorageQuota, activeSession?.sheets.length]);
+
+  const duplicateGroups = useMemo(
+    () => (activeSession ? detectDuplicateGroups(activeSession.sheets) : []),
+    [activeSession]
+  );
+
+  const queueSummary = useMemo(() => summarizeBatchQueue(batchQueue), [batchQueue]);
+
+  // Background sequential worker over batchQueue — keeps UI responsive during continuous mobile capture
+  useEffect(() => {
+    if (queueProcessingRef.current) return;
+    const nextItem = batchQueue.find((q) => q.status === 'waiting');
+    if (!nextItem) return;
+
+    const currentSess = activeSessionRef.current;
+    if (!currentSess) return;
+
+    const file = queueFilesRef.current.get(nextItem.id);
+    if (!file) {
+      setBatchQueue((prev) =>
+        markQueueItemFailed(prev, nextItem.id, 'Không còn tệp tạm trong bộ nhớ.')
+      );
+      return;
+    }
+
+    queueProcessingRef.current = true;
+    setBatchQueue((prev) => markQueueItemProcessing(prev, nextItem.id));
+
+    void (async () => {
+      try {
+        // Nhường main thread 16ms để preview camera và nút chụp luôn mượt
+        await new Promise((r) => window.setTimeout(r, 16));
+
+        const sessNow = activeSessionRef.current;
+        if (!sessNow) throw new Error('Không tìm thấy phiên chấm đang mở.');
+
+        const sheetId = createId('sheet');
+        const origBlobId = createId('ev-orig');
+        const annotBlobId = createId('ev-annot');
+
+        // Lưu ảnh gốc vào IndexedDB ngay lập tức (không giữ toàn bộ ảnh lớn trong React state)
+        await saveEvidenceBlob({
+          id: origBlobId,
+          sessionId: sessNow.id,
+          sheetId,
+          kind: 'original',
+          mimeType: file.type || 'image/jpeg',
+          byteSize: file.size,
+          blob: file,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const decoded = await decodeImageBlobForOmr(file);
+
+        // Chạy CHÍNH XÁC OMR Vision Engine & dHash của Giai đoạn 1 trên Web Worker (fallback main thread nếu cần)
+        const { recognition, imageDHash } = await runOmrVisionInWorkerOrFallback(
+          decoded.rgba,
+          sessNow.omrQuestionCount,
+          sessNow.omrThresholds
+        );
+
+        const graded = gradeRecognizedSheet({
+          sheetId,
+          sessionId: sessNow.id,
+          fileName: file.name,
+          originalBlobId: origBlobId,
+          thumbnailDataUrl: decoded.thumbnailDataUrl,
+          recognition,
+          answerKeysByCode: answerKeysRef.current,
+          students: sessNow.students,
+          gradingRule: sessNow.gradingRule,
+          fallbackExamCode: cameraFallbackExamCode || undefined,
+        });
+        graded.imageDHash = imageDHash;
+        graded.captureSource = nextItem.captureSource;
+
+        try {
+          const annotatedBlob = await renderAnnotatedEvidencePngBlob(
+            file,
+            graded,
+            sessNow.omrQuestionCount
+          );
+          await saveEvidenceBlob({
+            id: annotBlobId,
+            sessionId: sessNow.id,
+            sheetId,
+            kind: 'annotated',
+            mimeType: 'image/png',
+            byteSize: annotatedBlob.size,
+            blob: annotatedBlob,
+            updatedAt: new Date().toISOString(),
+          });
+          graded.annotatedBlobId = annotBlobId;
+        } catch {
+          // Không chặn kết quả chấm nếu chỉ vẽ overlay lỗi
+        }
+
+        // Giải phóng File khỏi bộ nhớ RAM sau khi đã lưu IndexedDB thành công
+        queueFilesRef.current.delete(nextItem.id);
+
+        setSessions((prev) =>
+          prev.map((sess) => {
+            if (sess.id !== sessNow.id) return sess;
+            const merged = annotateDuplicateStudentWarnings([...sess.sheets, graded]);
+            const updatedBase: GradingSession = {
+              ...sess,
+              sheets: merged,
+              updatedAt: new Date().toISOString(),
+            };
+            const nextSess: GradingSession = {
+              ...updatedBase,
+              gradebookEntries: reconcileIntelligentGradebook(updatedBase),
+            };
+            void saveGradingSession(nextSess);
+            return nextSess;
+          })
+        );
+
+        setBatchQueue((prev) => markQueueItemCompleted(prev, nextItem.id, graded));
+        void checkStorageQuota();
+      } catch (err) {
+        setBatchQueue((prev) =>
+          markQueueItemFailed(
+            prev,
+            nextItem.id,
+            err instanceof Error ? err.message : 'Lỗi không xác định khi xử lý ảnh.'
+          )
+        );
+      } finally {
+        queueProcessingRef.current = false;
+      }
+    })();
+  }, [batchQueue, cameraFallbackExamCode, checkStorageQuota]);
+
+  const handleEnqueueCameraFile = useCallback(
+    (file: File, source: 'camera' | 'upload') => {
+      const itemId = createId('bq');
+      queueFilesRef.current.set(itemId, file);
+      setBatchQueue((prev) => {
+        const res = enqueueBatchItem(prev, {
+          id: itemId,
+          fileName: file.name,
+          createdAt: new Date().toISOString(),
+          captureSource: source,
+          retakeForSheetId: retakeTargetSheet?.id,
+        });
+        if (res.warning) {
+          onNotify('info', res.warning);
+        }
+        return res.queue;
+      });
+    },
+    [onNotify, retakeTargetSheet?.id]
+  );
+
+  const handleRetryQueueItem = useCallback((itemId: string) => {
+    setBatchQueue((prev) => retryFailedQueueItem(prev, itemId));
+  }, []);
+
+  const handleCancelWaitingQueue = useCallback(() => {
+    setBatchQueue((prev) => {
+      prev
+        .filter((i) => i.status === 'waiting')
+        .forEach((i) => queueFilesRef.current.delete(i.id));
+      return cancelWaitingQueueItems(prev);
+    });
+    onNotify('info', 'Đã hủy các phiếu đang chờ trong hàng đợi (các phiếu đã chấm vẫn được giữ nguyên).');
+  }, [onNotify]);
+
+  const handleResolveDuplicateGroup = async (
+    group: DuplicateGroup,
+    action: DuplicateResolutionAction
+  ) => {
+    if (!activeSession) return;
+    const { sheets: resolvedSheets, historyEntry } = applyDuplicateResolution(
+      activeSession.sheets,
+      group,
+      action
+    );
+    const annotated = annotateDuplicateStudentWarnings(resolvedSheets);
+    await persistSession({
+      ...activeSession,
+      sheets: annotated,
+      duplicateResolutionHistory: [
+        ...(activeSession.duplicateResolutionHistory ?? []),
+        historyEntry,
+      ],
+    });
+    onNotify('success', 'Đã lưu quyết định xử lý phiếu trùng vào lịch sử phiên chấm.');
+  };
+
+  const persistSession = async (
+    nextSession: GradingSession,
+    options?: { skipReconcile?: boolean }
+  ) => {
+    const now = new Date().toISOString();
+    const baseSession: GradingSession = {
       ...nextSession,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     };
+    const stamped: GradingSession = options?.skipReconcile
+      ? baseSession
+      : {
+          ...baseSession,
+          gradebookEntries: reconcileIntelligentGradebook(baseSession),
+        };
     setSessions((prev) => {
       const exists = prev.some((s) => s.id === stamped.id);
       const next = exists
@@ -198,6 +472,76 @@ export function SmartGradingStudioApp({
           : 'Không thể lưu phiên chấm vào IndexedDB.'
       );
     }
+  };
+
+  const handleConfirmGradebookScore = async (params: {
+    studentId: string;
+    chosenScore: number | null;
+    source: 'omr' | 'photo-ocr' | 'manual';
+    reason: string;
+  }) => {
+    if (!activeSession) return;
+    try {
+      const updated = confirmOrOverrideGradebookEntry({
+        session: activeSession,
+        ...params,
+      });
+      await persistSession(updated, { skipReconcile: true });
+      onNotify(
+        'success',
+        `Đã xác nhận điểm chính thức cho ${params.studentId} (${params.chosenScore ?? 'Trống'}).`
+      );
+    } catch (err) {
+      onNotify(
+        'error',
+        err instanceof Error ? err.message : 'Không thể xác nhận điểm sổ điểm.'
+      );
+    }
+  };
+
+  const handleConfirmAllMatchedGradebook = async () => {
+    if (!activeSession) return;
+    const entries =
+      activeSession.gradebookEntries && activeSession.gradebookEntries.length > 0
+        ? activeSession.gradebookEntries
+        : reconcileIntelligentGradebook(activeSession);
+    const eligible = entries.filter(
+      (e) =>
+        !e.confirmedByTeacher &&
+        e.omrScore !== null &&
+        e.reconciliationStatus !== 'MISMATCH' &&
+        e.reconciliationStatus !== 'REVIEW_REQUIRED'
+    );
+    if (eligible.length === 0) return;
+
+    let current: GradingSession = {
+      ...activeSession,
+      gradebookEntries: entries,
+    };
+    for (const entry of eligible) {
+      current = confirmOrOverrideGradebookEntry({
+        session: current,
+        studentId: entry.studentId,
+        chosenScore: entry.omrScore,
+        source: 'omr',
+        reason: 'Xác nhận hàng loạt các phiếu OMR hợp lệ',
+      });
+    }
+    await persistSession(current, { skipReconcile: true });
+    onNotify(
+      'success',
+      `Đã xác nhận điểm chính thức cho ${eligible.length} học sinh trong Sổ điểm.`
+    );
+  };
+
+  const handleUndoGradebookChange = async (studentId: string) => {
+    if (!activeSession) return;
+    const updated = undoLastOfficialGradeChange({
+      session: activeSession,
+      studentId,
+    });
+    await persistSession(updated, { skipReconcile: true });
+    onNotify('info', `Đã hoàn tác thao tác điểm gần nhất của ${studentId}.`);
   };
 
   const regenerateAnnotatedEvidenceForSheet = async (
@@ -358,14 +702,42 @@ export function SmartGradingStudioApp({
       activeSession.students,
       activeSession.gradingRule
     );
+    const immediateSheets = annotateDuplicateStudentWarnings(
+      activeSession.sheets.map((s) => (s.id === sheetId ? overridden : s))
+    );
+    const immediateSession: GradingSession = {
+      ...activeSession,
+      sheets: immediateSheets,
+    };
+    await persistSession(immediateSession);
+
+    // Kết xuất lại ảnh minh chứng (annotated.png) sau khi đã phản hồi UI tức thì
     const refreshed = await regenerateAnnotatedEvidenceForSheet(
-      activeSession,
+      immediateSession,
       overridden
     );
-    const nextSheets = annotateDuplicateStudentWarnings(
-      activeSession.sheets.map((s) => (s.id === sheetId ? refreshed : s))
-    );
-    await persistSession({ ...activeSession, sheets: nextSheets });
+    if (refreshed.annotatedBlobId !== overridden.annotatedBlobId) {
+      setSessions((prev) =>
+        prev.map((sess) => {
+          if (sess.id !== immediateSession.id) return sess;
+          const updatedSess: GradingSession = {
+            ...sess,
+            sheets: sess.sheets.map((sh) =>
+              sh.id === sheetId
+                ? {
+                    ...sh,
+                    annotatedBlobId: refreshed.annotatedBlobId,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : sh
+            ),
+            updatedAt: new Date().toISOString(),
+          };
+          void saveGradingSession(updatedSess);
+          return updatedSess;
+        })
+      );
+    }
   };
 
   const handleUpdateSheetMeta = async (
@@ -450,7 +822,9 @@ export function SmartGradingStudioApp({
 
   const reviewBadgeCount = activeSession
     ? activeSession.sheets.filter(
-        (s) => s.status === 'review-required' || s.status === 'error'
+        (s) =>
+          !s.archivedByDuplicateResolution &&
+          (s.status === 'review-required' || s.status === 'error' || s.retakeRequested)
       ).length
     : 0;
 
@@ -479,6 +853,12 @@ export function SmartGradingStudioApp({
       label: 'Duyệt thủ công',
       icon: Eye,
       count: reviewBadgeCount > 0 ? reviewBadgeCount : undefined,
+    },
+    {
+      id: 'gradebook',
+      label: 'Sổ điểm',
+      icon: ClipboardCheck,
+      count: activeSession?.gradebookEntries?.length,
     },
     { id: 'export', label: 'Xuất Excel & ZIP', icon: Archive },
   ];
@@ -564,16 +944,44 @@ export function SmartGradingStudioApp({
                 Chưa có đề kiểm tra nào được sinh mã đề trong Exam Mixer Pro
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                Hãy mở Exam Mixer Pro, trộn và tạo ít nhất 1 mã đề (ví dụ Mã 101, 102) rồi quay lại Smart Grading Studio để tạo phiếu trả lời và chấm tự động.
+                Hãy mở Exam Mixer Pro để trộn mã đề hoặc bấm nút bên dưới để chạy bộ trộn Exam Mixer Pro tự động sinh các mã đề (101–104) cho đề kiểm tra hiện có.
               </p>
-              <button
-                type="button"
-                onClick={onOpenExamMixer}
-                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-semibold text-white"
-              >
-                <Layers className="h-4 w-4" aria-hidden="true" />
-                <span>Mở Exam Mixer Pro</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                {mathExams.length > 0 && onSaveMathExam && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const target = mathExams[0];
+                      const generated = generateMixedExams({
+                        ...target,
+                        confirmedOriginalAnswers: true,
+                      });
+                      await onSaveMathExam({
+                        ...target,
+                        confirmedOriginalAnswers: true,
+                        generatedVersions: generated.versions,
+                        status: 'ready',
+                      });
+                      onNotify(
+                        'success',
+                        `Đã trộn ${generated.versions.length} mã đề (${generated.versions.map((v) => v.code).join(', ')}) từ đề "${target.title}".`
+                      );
+                    }}
+                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-semibold text-white transition-colors"
+                  >
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                    <span>Trộn ngay {mathExams[0].mixConfig.examCount} mã đề cho "{mathExams[0].title}"</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onOpenExamMixer}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+                >
+                  <Layers className="h-4 w-4" aria-hidden="true" />
+                  <span>Mở Exam Mixer Pro</span>
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-4">
@@ -777,7 +1185,26 @@ export function SmartGradingStudioApp({
           {activeTab === 'dashboard' && (
             <GradingDashboardPanel
               session={activeSession}
+              duplicateGroupCount={duplicateGroups.length}
+              queueInFlightCount={queueSummary.inFlight}
+              lowStorageWarning={lowStorageWarning}
+              onStartCameraScan={() => {
+                setRetakeTargetSheet(null);
+                setCameraModalOpen(true);
+              }}
+              onReviewFlaggedSheets={() => {
+                const firstFlagged = activeSession.sheets.find(
+                  (s) =>
+                    !s.archivedByDuplicateResolution &&
+                    (s.status === 'review-required' || s.status === 'error')
+                );
+                if (firstFlagged) setSelectedReviewSheetId(firstFlagged.id);
+                setReviewOnlyFlagged(true);
+                setActiveTab('review');
+              }}
+              onOpenDuplicateResolver={() => setDuplicateModalOpen(true)}
               onReviewSheet={(sheetId) => {
+                setReviewOnlyFlagged(false);
                 setSelectedReviewSheetId(sheetId);
                 setActiveTab('review');
               }}
@@ -811,6 +1238,10 @@ export function SmartGradingStudioApp({
               answerKeysByCode={answerKeysByCode}
               onBatchCompleted={(newSheets) => void handleBatchCompleted(newSheets)}
               onUpdateThresholds={(t) => void handleUpdateThresholds(t)}
+              onOpenCameraScanner={() => {
+                setRetakeTargetSheet(null);
+                setCameraModalOpen(true);
+              }}
               onNotify={onNotify}
             />
           )}
@@ -820,13 +1251,36 @@ export function SmartGradingStudioApp({
               session={activeSession}
               answerKeysByCode={answerKeysByCode}
               selectedSheetId={selectedReviewSheetId}
+              onlyReviewInitially={reviewOnlyFlagged}
               onSelectSheet={setSelectedReviewSheetId}
+              onRetakeSheet={(sheet) => {
+                setRetakeTargetSheet(sheet);
+                setCameraModalOpen(true);
+              }}
               onOverrideQuestion={(sheetId, qNum, val, reason) =>
                 void handleOverrideQuestion(sheetId, qNum, val, reason)
               }
               onUpdateSheetMeta={(sheetId, patch) =>
                 void handleUpdateSheetMeta(sheetId, patch)
               }
+            />
+          )}
+
+          {activeTab === 'gradebook' && (
+            <GradebookReconciliationPanel
+              session={activeSession}
+              onConfirmScore={(params) => void handleConfirmGradebookScore(params)}
+              onConfirmAllMatched={() => void handleConfirmAllMatchedGradebook()}
+              onUndoLastChange={(sid) => void handleUndoGradebookChange(sid)}
+              onInspectOmrSheet={(sheetId) => {
+                setReviewOnlyFlagged(false);
+                setSelectedReviewSheetId(sheetId);
+                setActiveTab('review');
+              }}
+              onScanMissingStudent={() => {
+                setRetakeTargetSheet(null);
+                setCameraModalOpen(true);
+              }}
             />
           )}
 
@@ -837,6 +1291,66 @@ export function SmartGradingStudioApp({
               onNotify={onNotify}
             />
           )}
+
+          {/* Phase 3 Fullscreen Mobile Camera Scanner Modal */}
+          <MobileCameraScannerModal
+            open={cameraModalOpen}
+            sessionTitle={activeSession.title}
+            classNameLabel={activeSession.className}
+            selectedExamCodes={activeSession.selectedExamCodes}
+            fallbackExamCode={cameraFallbackExamCode}
+            onChangeFallbackExamCode={setCameraFallbackExamCode}
+            queue={batchQueue}
+            retakeTargetLabel={
+              retakeTargetSheet
+                ? `${retakeTargetSheet.studentId || retakeTargetSheet.fileName} (Mã ${retakeTargetSheet.examCode || '—'})`
+                : null
+            }
+            lowStorageWarning={lowStorageWarning}
+            onCaptureFile={handleEnqueueCameraFile}
+            onRetryQueueItem={handleRetryQueueItem}
+            onCancelWaitingQueue={handleCancelWaitingQueue}
+            onReviewLatestFlagged={() => {
+              setCameraModalOpen(false);
+              const firstFlagged = activeSession.sheets.find(
+                (s) =>
+                  !s.archivedByDuplicateResolution &&
+                  (s.status === 'review-required' || s.status === 'error')
+              );
+              if (firstFlagged) setSelectedReviewSheetId(firstFlagged.id);
+              setReviewOnlyFlagged(true);
+              setActiveTab('review');
+            }}
+            onClose={() => {
+              setCameraModalOpen(false);
+              setRetakeTargetSheet(null);
+            }}
+          />
+
+          {/* Phase 3 Duplicate Detection & Non-Destructive Resolution Modal */}
+          <DuplicateResolutionModal
+            open={duplicateModalOpen}
+            groups={duplicateGroups}
+            sheets={activeSession.sheets}
+            history={activeSession.duplicateResolutionHistory ?? []}
+            onResolveGroup={(g, action) =>
+              void handleResolveDuplicateGroup(g, action)
+            }
+            onInspectSheet={(sheetId) => {
+              setReviewOnlyFlagged(false);
+              setSelectedReviewSheetId(sheetId);
+              setActiveTab('review');
+            }}
+            onRetakeForGroup={(group) => {
+              const target = activeSession.sheets.find(
+                (s) => s.id === group.sheetIds[0]
+              );
+              setDuplicateModalOpen(false);
+              setRetakeTargetSheet(target ?? null);
+              setCameraModalOpen(true);
+            }}
+            onClose={() => setDuplicateModalOpen(false)}
+          />
         </>
       )}
     </main>

@@ -7,6 +7,7 @@ import {
   Printer,
   ScanLine,
   Settings,
+  Wand2,
 } from 'lucide-react';
 import { AppId } from '../../core/appRegistry';
 import { PageBanner } from '../ui/DesignSystem';
@@ -46,6 +47,16 @@ export function ToolsHubView({
       ctaLabel: 'Mở Workflow Center',
       icon: GitBranch,
       tourId: 'desktop-app-workflow-center',
+    },
+    {
+      id: 'exam-generator',
+      title: 'Smart Exam Generator 2.0',
+      description:
+        'Tạo đề kiểm tra tự động 5 bước theo ma trận, sinh biến thể đổi số Level 1 có kiểm chứng thế ngược độc lập (không AI API) và chuyển sang Exam Mixer Pro.',
+      metricLabel: 'Biến thể kiểm chứng cục bộ',
+      ctaLabel: 'Mở Smart Exam Generator',
+      icon: Wand2,
+      tourId: 'desktop-app-exam-generator',
     },
     {
       id: 'math-mixer',

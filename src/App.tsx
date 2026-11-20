@@ -118,6 +118,7 @@ import { ContextMenu, PackContextMenuState } from './components/shell/ContextMen
 import { SkeletonLoader } from './components/shell/SkeletonLoader';
 import { DesktopHome } from './components/shell/DesktopHome';
 import { CreditFooter } from './components/shell/CreditFooter';
+import { OfflineIndicator } from './components/shell/OfflineIndicator';
 import {
   LessonStudioApp,
   LessonStudioMode,
@@ -128,6 +129,7 @@ import { ResourceVaultApp } from './components/apps/ResourceVaultApp';
 import { WorkflowCenterApp } from './components/apps/WorkflowCenterApp';
 import { TeachingJournalApp } from './components/apps/TeachingJournalApp';
 import { MathExamMixerApp } from './components/apps/MathExamMixerApp';
+import { SmartExamGeneratorApp } from './components/apps/SmartExamGeneratorApp';
 import { SmartGradingStudioApp } from './components/apps/SmartGradingStudioApp';
 import { SettingsView } from './components/SettingsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -206,6 +208,7 @@ export default function App() {
   const [lessonStudioMode, setLessonStudioMode] = useState<LessonStudioMode>('editor');
   const [lessonStudioHasDraftChanges, setLessonStudioHasDraftChanges] = useState(false);
   const [printPackId, setPrintPackId] = useState<string>('');
+  const [examMixerPreferredExamId, setExamMixerPreferredExamId] = useState<string | null>(null);
   const [gradingPreferredExamId, setGradingPreferredExamId] = useState<string | null>(null);
 
   // Layer 3: Shared Core data state (IndexedDB v5)
@@ -1635,11 +1638,32 @@ export default function App() {
             </div>
           )}
 
+          {openedApps.includes('exam-generator') && (
+            <div className={activeView === 'exam-generator' ? 'block' : 'hidden print:hidden'}>
+              <ErrorBoundary moduleName="Smart Exam Generator 2.0" packs={packs} settings={settings}>
+                <SmartExamGeneratorApp
+                  mathExams={mathExams}
+                  onSaveMathExam={handleSaveMathExam}
+                  onOpenExamMixerWithExam={(examId) => {
+                    setExamMixerPreferredExamId(examId);
+                    openApp('math-mixer');
+                  }}
+                  onOpenGradingStudioWithExam={(examId) => {
+                    setGradingPreferredExamId(examId);
+                    openApp('grading-studio');
+                  }}
+                  onNotify={showToast}
+                />
+              </ErrorBoundary>
+            </div>
+          )}
+
           {openedApps.includes('math-mixer') && (
             <div className={activeView === 'math-mixer' ? 'block' : 'hidden print:hidden'}>
               <ErrorBoundary moduleName="Math Exam Mixer Pro" packs={packs} settings={settings}>
                 <MathExamMixerApp
                   mathExams={mathExams}
+                  preferredExamId={examMixerPreferredExamId}
                   onSaveMathExam={handleSaveMathExam}
                   onDeleteMathExam={handleDeleteMathExam}
                   onDuplicateMathExam={handleDuplicateMathExam}
@@ -1660,6 +1684,7 @@ export default function App() {
                   mathExams={mathExams}
                   preferredExamId={gradingPreferredExamId}
                   onOpenExamMixer={() => openApp('math-mixer')}
+                  onSaveMathExam={handleSaveMathExam}
                   onNotify={showToast}
                 />
               </ErrorBoundary>
@@ -1765,6 +1790,7 @@ export default function App() {
       />
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />
+      <OfflineIndicator />
       <TutorialOverlay />
     </div>
     </TutorialProvider>

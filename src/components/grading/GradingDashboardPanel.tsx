@@ -2,9 +2,12 @@ import { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BarChart3,
+  Camera,
   CheckCircle2,
+  Copy,
   Download,
   Eye,
+  Loader2,
   Search,
   ShieldCheck,
   Trash2,
@@ -22,9 +25,19 @@ import {
 } from '../../core/grading/gradingEngine';
 import { getSheetStatusLabelVi } from '../../core/grading/gradingExporter';
 import { triggerBlobDownload } from '../../core/grading/omrBrowserBridge';
+import {
+  createVerifiedSessionBackupPayload,
+  parseAndVerifySessionBackupJson,
+} from '../../core/grading/gradingBackupIntegrity';
 
 interface GradingDashboardPanelProps {
   session: GradingSession;
+  duplicateGroupCount: number;
+  queueInFlightCount: number;
+  lowStorageWarning?: string;
+  onStartCameraScan: () => void;
+  onReviewFlaggedSheets: () => void;
+  onOpenDuplicateResolver: () => void;
   onReviewSheet: (sheetId: string) => void;
   onDeleteSheet: (sheetId: string) => void;
   onUpdateGradingRule: (next: GradingRuleConfig) => void;
@@ -35,6 +48,12 @@ interface GradingDashboardPanelProps {
 
 export function GradingDashboardPanel({
   session,
+  duplicateGroupCount,
+  queueInFlightCount,
+  lowStorageWarning,
+  onStartCameraScan,
+  onReviewFlaggedSheets,
+  onOpenDuplicateResolver,
   onReviewSheet,
   onDeleteSheet,
   onUpdateGradingRule,
@@ -49,16 +68,31 @@ export function GradingDashboardPanel({
   const [minScoreFilter, setMinScoreFilter] = useState<string>('');
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 
+  const [showArchivedDuplicates, setShowArchivedDuplicates] = useState(false);
+
   const metrics = useMemo(
     () => computeGradingDashboardMetrics(session.sheets, session.gradingRule.maxScore),
     [session.gradingRule.maxScore, session.sheets]
   );
+
+  const activeSheetsCount = useMemo(
+    () => session.sheets.filter((s) => !s.archivedByDuplicateResolution).length,
+    [session.sheets]
+  );
+
+  const archivedCount = session.sheets.length - activeSheetsCount;
+  const flaggedCount = metrics.reviewRequiredCount + metrics.errorCount;
+  const classProgressPct =
+    session.students.length > 0
+      ? Math.min(100, Math.round((activeSheetsCount / session.students.length) * 100))
+      : 0;
 
   const filteredSheets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const minScoreNum = minScoreFilter.trim() === '' ? null : Number(minScoreFilter);
 
     return session.sheets.filter((s) => {
+      if (!showArchivedDuplicates && s.archivedByDuplicateResolution) return false;
       if (filterCode !== 'all' && s.examCode !== filterCode) return false;
       if (filterStatus !== 'all' && s.status !== filterStatus) return false;
       if (minScoreNum !== null && Number.isFinite(minScoreNum) && s.finalScore < minScoreNum) {
@@ -70,7 +104,14 @@ export function GradingDashboardPanel({
       }
       return true;
     });
-  }, [filterCode, filterStatus, minScoreFilter, searchQuery, session.sheets]);
+  }, [
+    filterCode,
+    filterStatus,
+    minScoreFilter,
+    searchQuery,
+    session.sheets,
+    showArchivedDuplicates,
+  ]);
 
   const maxBucketCount = Math.max(
     1,
@@ -78,11 +119,10 @@ export function GradingDashboardPanel({
   );
 
   const handleExportSessionBackup = () => {
-    const payload = {
-      schema: 'teacheros-grading-session-v1',
-      exportedAt: new Date().toISOString(),
+    const payload = createVerifiedSessionBackupPayload(
       session,
-    };
+      'Local-First Transfer Backup (TeacherOS Smart Grading Studio 3.0)'
+    );
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json;charset=utf-8',
     });
@@ -90,20 +130,23 @@ export function GradingDashboardPanel({
       blob,
       `TeacherOS_GradingSession_${session.className.replace(/\s+/g, '_')}.json`
     );
-    onNotify('success', 'Đã tải tệp sao lưu phiên chấm JSON cục bộ.');
+    onNotify(
+      'success',
+      `Đã tải bản sao lưu v2 có mã toàn vẹn (${payload.integrityChecksum.slice(0, 8)}…) để chuyển thủ công giữa điện thoại và máy tính.`
+    );
   };
 
   const handleImportSessionBackup = async (file: File) => {
     try {
-      const parsed = JSON.parse(await file.text()) as {
-        schema?: string;
-        session?: GradingSession;
-      };
-      if (!parsed.session || !parsed.session.id || !Array.isArray(parsed.session.sheets)) {
-        onNotify('error', 'Tệp JSON không phải bản sao lưu phiên chấm Smart Grading Studio hợp lệ.');
+      const result = parseAndVerifySessionBackupJson(await file.text());
+      if (!result.valid || !result.session) {
+        onNotify('error', result.error ?? 'Không thể xác thực tệp sao lưu phiên chấm.');
         return;
       }
-      onImportSessionJson(parsed.session);
+      onImportSessionJson(result.session);
+      if (result.warning) {
+        onNotify('info', result.warning);
+      }
     } catch {
       onNotify('error', 'Không thể đọc tệp JSON sao lưu phiên chấm.');
     }
@@ -111,6 +154,98 @@ export function GradingDashboardPanel({
 
   return (
     <div className="space-y-5">
+      {/* Mobile-First Quick Action Bar (One-Hand Thumb Friendly) */}
+      <section
+        aria-label="Thao tác nhanh chấm bài di động"
+        className="rounded-2xl border border-indigo-200/80 dark:border-indigo-900/70 bg-gradient-to-br from-indigo-50/75 via-white to-white dark:from-indigo-950/40 dark:via-slate-900 dark:to-slate-900 p-4 sm:p-5 space-y-3.5"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm sm:text-base font-bold text-slate-950 dark:text-white">
+                Tiến độ chấm lớp {session.className}
+              </h2>
+              {queueInFlightCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-2 py-0.5 text-[11px] font-mono-num font-semibold text-white">
+                  <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                  Đang xử lý {queueInFlightCount} phiếu
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400">
+              {session.students.length > 0 ? (
+                <>
+                  Đã quét <strong className="font-mono-num text-slate-900 dark:text-slate-100">{activeSheetsCount}/{session.students.length}</strong> học sinh ({classProgressPct}%) ·{' '}
+                  <strong className="font-mono-num text-emerald-700 dark:text-emerald-400">{metrics.confirmedCount}</strong> đã xác nhận
+                </>
+              ) : (
+                <>
+                  Đã quét <strong className="font-mono-num text-slate-900 dark:text-slate-100">{activeSheetsCount}</strong> phiếu · Chưa nhập danh sách lớp
+                </>
+              )}
+            </p>
+          </div>
+
+          {/* Primary & Secondary Mobile-Ready CTAs (>= 44px touch targets) */}
+          <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onStartCameraScan}
+              className="min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-xs transition-colors"
+            >
+              <Camera className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{activeSheetsCount > 0 ? 'Tiếp tục quét' : 'Mở Camera quét phiếu'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onReviewFlaggedSheets}
+              disabled={session.sheets.length === 0}
+              className={`min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-xs sm:text-sm font-semibold transition-colors disabled:opacity-45 ${
+                flaggedCount > 0
+                  ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60'
+                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
+              }`}
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>
+                Kiểm tra bài lỗi{flaggedCount > 0 ? ` (${flaggedCount})` : ''}
+              </span>
+            </button>
+
+            {duplicateGroupCount > 0 && (
+              <button
+                type="button"
+                onClick={onOpenDuplicateResolver}
+                className="min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl border border-amber-400 dark:border-amber-700 bg-amber-100/90 dark:bg-amber-950/80 hover:bg-amber-200/80 px-3.5 py-2.5 text-xs font-bold text-amber-950 dark:text-amber-100 transition-colors"
+              >
+                <Copy className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>Xử lý phiếu trùng ({duplicateGroupCount})</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Class Progress Bar */}
+        {session.students.length > 0 && (
+          <div className="space-y-1">
+            <div className="h-2 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-[#635BFF] to-emerald-500 transition-all duration-300"
+                style={{ width: `${classProgressPct}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {lowStorageWarning && (
+          <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{lowStorageWarning}</span>
+          </div>
+        )}
+      </section>
+
       {/* Row 1 — 5 Real-Data KPI Cards (Zero fake numbers) */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
@@ -282,40 +417,45 @@ export function GradingDashboardPanel({
             </label>
           </div>
 
-          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
-              <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-              <span>100% lưu cục bộ trên máy</span>
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleExportSessionBackup}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1 font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Sao lưu JSON</span>
-              </button>
-              <input
-                ref={backupInputRef}
-                type="file"
-                accept=".json"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) void handleImportSessionBackup(f);
-                  e.target.value = '';
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => backupInputRef.current?.click()}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1 font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-              >
-                <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Khôi phục</span>
-              </button>
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-300 font-medium">
+                <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                <span>Local-First · Không tự đồng bộ đám mây</span>
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportSessionBackup}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Sao lưu chuyển máy</span>
+                </button>
+                <input
+                  ref={backupInputRef}
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void handleImportSessionBackup(f);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => backupInputRef.current?.click()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Nạp bản sao lưu</span>
+                </button>
+              </div>
             </div>
+            <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+              Dữ liệu chấm lưu riêng trên thiết bị hiện tại. Để chuyển từ điện thoại sang máy tính, hãy bấm &ldquo;Sao lưu chuyển máy&rdquo; (có mã kiểm tra toàn vẹn) rồi nạp lại trên máy kia.
+            </p>
           </div>
         </div>
       </div>
@@ -376,6 +516,18 @@ export function GradingDashboardPanel({
               placeholder="Điểm ≥ ..."
               className="w-24 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 font-mono-num text-slate-700 dark:text-slate-200"
             />
+
+            {archivedCount > 0 && (
+              <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showArchivedDuplicates}
+                  onChange={(e) => setShowArchivedDuplicates(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600"
+                />
+                <span>Hiện {archivedCount} bản trùng đã ẩn</span>
+              </label>
+            )}
           </div>
         </div>
 

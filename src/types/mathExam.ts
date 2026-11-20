@@ -116,6 +116,8 @@ export interface McqOption {
   isCorrect: boolean;
   /** Khóa vị trí phương án này (A/B/C/D) khi trộn */
   lockPosition?: boolean;
+  /** Tài nguyên đồ thị / bảng biến thiên gắn liền với phương án (Phase 3 — tự động di chuyển cùng phương án khi trộn) */
+  visualAsset?: MathVisualAsset;
 }
 
 export interface MultiSelectOption {
@@ -294,6 +296,22 @@ export interface MathQuestion {
   answerConfirmed: boolean;
   /** Truy vết & cổng bảo toàn toán học khi nhập từ PDF hoặc các định dạng đa nguồn */
   sourceVerification?: QuestionSourceVerification;
+  /** Siêu dữ liệu biến thể đã kiểm chứng từ Smart Exam Generator 2.0/3.0 (tùy chọn, tương thích ngược) */
+  variantMeta?: {
+    parentQuestionId: string;
+    templateId: string;
+    variantId?: string;
+    variantCode: string;
+    seed: string;
+    parameterSignature: string;
+    parameterValues: Record<string, number>;
+    verificationSummary: string;
+    verifiedAt: string;
+    /** Phase 3: Fingerprint đồng bộ giữa tham số hàm số, đồ thị SVG, bảng biến thiên và đáp án */
+    graphFingerprint?: string;
+    /** Phase 3: Họ hàm động đã sinh (quadratic | cubic | rational) */
+    dynamicFunctionFamily?: 'quadratic' | 'cubic' | 'rational';
+  };
   createdAt: string;
   updatedAt: string;
 }

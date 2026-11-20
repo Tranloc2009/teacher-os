@@ -110,6 +110,73 @@ export function AnswerSheetGeneratorPanel({
     }, 150);
   };
 
+  const handlePrintClassBatch = () => {
+    if (session.students.length === 0) {
+      onNotify('error', 'Chưa có danh sách học sinh để in bộ phiếu cả lớp.');
+      return;
+    }
+    const codes =
+      session.selectedExamCodes.length > 0
+        ? session.selectedExamCodes
+        : [selectedExamCode || '101'];
+
+    const pagesHtml = session.students
+      .map((st, idx) => {
+        const assignedCode = codes[idx % codes.length];
+        const svg = buildPrintableOmrSheetSvg({
+          examTitle: session.examTitle || session.title,
+          subject: session.subject,
+          grade: session.grade,
+          examCode: assignedCode,
+          className: st.className || session.className,
+          studentId: st.studentId,
+          studentName: st.fullName,
+          sessionId: session.id.slice(-4).toUpperCase(),
+          questionCount: session.omrQuestionCount,
+          includeOpticalCode,
+        });
+        return `<div class="omr-page">${svg}</div>`;
+      })
+      .join('');
+
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc) {
+      document.body.removeChild(iframe);
+      onNotify('error', 'Không thể khởi tạo khung in A4 trên trình duyệt này.');
+      return;
+    }
+    doc.open();
+    doc.write(`<!doctype html><html><head><title>In bộ phiếu OMR cả lớp (${session.students.length} HS)</title>
+      <style>
+        @page { size: A4 portrait; margin: 0; }
+        html, body { margin: 0; padding: 0; background: #fff; }
+        .omr-page { width: 210mm; height: 297mm; page-break-after: always; break-after: page; }
+        .omr-page:last-child { page-break-after: auto; break-after: auto; }
+        svg { width: 210mm; height: 297mm; display: block; }
+      </style>
+    </head><body>${pagesHtml}</body></html>`);
+    doc.close();
+    window.setTimeout(() => {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      window.setTimeout(() => {
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      }, 2000);
+    }, 200);
+    onNotify(
+      'success',
+      `Đã chuẩn bị lệnh in A4 cho ${session.students.length} học sinh (xoay vòng mã đề: ${codes.join(', ')}).`
+    );
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
       {/* Left: Configuration Controls */}
@@ -196,6 +263,17 @@ export function AnswerSheetGeneratorPanel({
             <Printer className="h-4 w-4" aria-hidden="true" />
             <span>In phiếu chuẩn A4</span>
           </button>
+
+          {session.students.length > 0 && (
+            <button
+              type="button"
+              onClick={handlePrintClassBatch}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50/70 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 px-4 py-2.5 text-xs font-semibold text-indigo-800 dark:text-indigo-200 transition-colors"
+            >
+              <Printer className="h-4 w-4" aria-hidden="true" />
+              <span>In bộ phiếu cả lớp ({session.students.length} HS · chia đều mã đề)</span>
+            </button>
+          )}
 
           <button
             type="button"

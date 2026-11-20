@@ -6,6 +6,7 @@ export type AppId =
   | 'workflow-center'
   | 'print-studio'
   | 'math-mixer'
+  | 'exam-generator'
   | 'grading-studio'
   | 'teaching-journal'
   | 'settings';
@@ -110,6 +111,29 @@ export const APP_REGISTRY: AppDefinition[] = [
       'ma tran',
     ],
     sharedDataScopes: ['MathExamProject', 'PrintSettings'],
+  },
+  {
+    id: 'exam-generator',
+    name: 'Smart Exam Generator 2.0',
+    shortName: 'Tạo đề tự động',
+    description:
+      'Tạo đề tự động theo ma trận, sinh biến thể đổi số Level 1 có kiểm chứng thế ngược độc lập (không AI API, 100% cục bộ) và chuyển thẳng sang Exam Mixer Pro.',
+    layer: 'core',
+    status: 'ready',
+    statusLabel: 'Đang hoạt động',
+    shortcutHint: 'Alt+G',
+    pinnedInDock: true,
+    keywords: [
+      'tao de',
+      'exam generator',
+      'bien the',
+      'doi so',
+      'ma tran',
+      'ngan hang cau hoi',
+      'kiem chung',
+      'tu dong',
+    ],
+    sharedDataScopes: ['MathExamProject', 'BankQuestionRecord', 'QuestionTemplateDefinition'],
   },
   {
     id: 'grading-studio',

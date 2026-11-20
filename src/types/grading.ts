@@ -279,6 +279,15 @@ export interface GradedSheetRecord {
   maxScore: number;
   scoreFormulaText: string;
   duplicateStudentWarning?: string;
+  /** Phase 3: Vân tay ảnh 64-bit dHash để phát hiện chụp trùng gần giống nhau */
+  imageDHash?: string;
+  /** Phase 3: Nguồn nhập ảnh ('camera' | 'upload') */
+  captureSource?: 'camera' | 'upload';
+  /** Phase 3: Giáo viên đánh dấu cần chụp lại phiếu này */
+  retakeRequested?: boolean;
+  /** Phase 3: Phiếu được lưu trữ ẩn sau khi xử lý trùng (không tự động xóa mất dữ liệu) */
+  archivedByDuplicateResolution?: boolean;
+  replacedBySheetId?: string;
   notes?: string;
   updatedAt: string;
 }
@@ -300,6 +309,14 @@ export interface GradingSession {
   omrThresholds: OmrThresholdsConfig;
   students: StudentRecord[];
   sheets: GradedSheetRecord[];
+  /** Các bản nhập ảnh bảng điểm lớp (Phase 2 — Photo Gradebook OCR) */
+  photoGradebooks?: PhotoGradebookImportRecord[];
+  /** Sổ điểm thông minh hợp nhất OMR + Ảnh bảng điểm (Phase 2) */
+  gradebookEntries?: IntelligentGradebookEntry[];
+  /** Nhật ký kiểm toán mọi thay đổi điểm chính thức (Phase 2 — không bao giờ xóa lịch sử cũ) */
+  gradeAuditTrail?: OfficialGradeAuditEntry[];
+  /** Phase 3: Nhật ký xử lý phiếu trùng / thay thế */
+  duplicateResolutionHistory?: DuplicateResolutionEntry[];
   createdAt: string;
   updatedAt: string;
 }
@@ -308,7 +325,7 @@ export interface EvidenceBlobRecord {
   id: string;
   sessionId: string;
   sheetId: string;
-  kind: 'original' | 'annotated';
+  kind: 'original' | 'annotated' | 'gradebook-photo';
   mimeType: string;
   byteSize: number;
   blob: Blob;
@@ -337,3 +354,251 @@ export interface RgbaImageBuffer {
   height: number;
   data: Uint8ClampedArray;
 }
+
+// ============================================================================
+// SMART GRADING STUDIO 2.0 — PHASE 2: INTELLIGENT GRADEBOOK & PHOTO OCR TYPES
+// ============================================================================
+
+export type GradebookColumnRole =
+  | 'stt'
+  | 'studentId'
+  | 'fullName'
+  | 'lastName'
+  | 'firstName'
+  | 'className'
+  | 'examCode'
+  | 'score'
+  | 'notes'
+  | 'ignore';
+
+export interface GradebookColumnMapping {
+  columnIndex: number;
+  headerText: string;
+  customLabel: string;
+  role: GradebookColumnRole;
+  displayOrder: number;
+}
+
+export type ScoreParseStatus =
+  | 'valid'
+  | 'empty'
+  | 'absent'
+  | 'uncertain'
+  | 'unreadable'
+  | 'invalid';
+
+export interface ParsedScoreResult {
+  rawText: string;
+  normalizedText: string;
+  status: ScoreParseStatus;
+  /** Giá trị số chính xác (chỉ khác null khi status === 'valid') — tuyệt đối không biến ô trống thành 0 */
+  numericScore: number | null;
+  confidence: number;
+  needsReview: boolean;
+  warning?: string;
+}
+
+export interface OcrTableCell {
+  rowIndex: number;
+  columnIndex: number;
+  rawText: string;
+  editedText?: string;
+  confidence: number;
+  bbox: NormalizedRect;
+  unreadable: boolean;
+  uncertain: boolean;
+}
+
+export type StudentRowMatchState =
+  | 'MATCHED'
+  | 'UNMATCHED'
+  | 'AMBIGUOUS'
+  | 'REVIEW_REQUIRED';
+
+export interface OcrGradebookRow {
+  id: string;
+  rowIndex: number;
+  bbox: NormalizedRect;
+  cells: OcrTableCell[];
+  /** Dữ liệu trích xuất sau khi áp dụng Smart Column Mapping */
+  extractedOrderNumber?: number;
+  extractedStudentId: string;
+  extractedFullName: string;
+  extractedClassName: string;
+  extractedExamCode: string;
+  extractedNotes: string;
+  parsedScore: ParsedScoreResult;
+  /** Kết quả ghép học sinh với Student Roster */
+  matchState: StudentRowMatchState;
+  matchedStudentId: string | null;
+  suggestedStudentIds: string[];
+  matchWarning?: string;
+  /** Xác nhận thủ công của giáo viên cho dòng OCR này */
+  confirmedByTeacher: boolean;
+  confirmedAt?: string;
+  reviewNote?: string;
+}
+
+export interface PhotoCropRegion {
+  /** Vùng chọn bảng chuẩn hóa [0..1] trên ảnh đã xoay */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PhotoGradebookImportRecord {
+  id: string;
+  sessionId: string;
+  fileName: string;
+  uploadedAt: string;
+  photoBlobId: string;
+  thumbnailDataUrl?: string;
+  imageWidth: number;
+  imageHeight: number;
+  rotationDeg: 0 | 90 | 180 | 270;
+  detectedSkewDeg: number;
+  cropRegion: PhotoCropRegion;
+  ocrEngineLabel: string;
+  isHandwrittenSuspected: boolean;
+  headerCells: string[];
+  columnMappings: GradebookColumnMapping[];
+  columnMappingConfirmed: boolean;
+  rows: OcrGradebookRow[];
+  processingTimeMs: number;
+  warnings: string[];
+  updatedAt: string;
+}
+
+export type GradeReconciliationStatus =
+  | 'MATCHED'
+  | 'MISMATCH'
+  | 'MISSING'
+  | 'REVIEW_REQUIRED'
+  | 'CONFIRMED';
+
+export type OfficialScoreSource =
+  | 'omr'
+  | 'photo-ocr'
+  | 'reconciled-both'
+  | 'manual'
+  | 'unassigned';
+
+export interface OfficialGradeAuditEntry {
+  id: string;
+  studentId: string;
+  assessmentId: string;
+  previousScore: number | null;
+  newScore: number | null;
+  source: 'omr' | 'photo-ocr' | 'manual' | 'undo';
+  timestamp: string;
+  reason: string;
+  confirmedStatus: GradeReconciliationStatus;
+}
+
+export interface IntelligentGradebookEntry {
+  id: string;
+  sessionId: string;
+  orderNumber: number;
+  studentId: string;
+  fullName: string;
+  className: string;
+  examCode: string;
+  /** Nguồn A: Điểm từ phiếu OMR */
+  omrSheetId?: string;
+  omrScore: number | null;
+  omrStatus?: SheetGradingStatus;
+  /** Nguồn B: Điểm đọc từ ảnh bảng điểm */
+  photoImportId?: string;
+  photoRowId?: string;
+  photoScore: number | null;
+  photoRawText?: string;
+  photoParseStatus?: ScoreParseStatus;
+  /** Chênh lệch tuyệt đối |omrScore - photoScore| khi có cả 2 nguồn */
+  scoreDelta: number | null;
+  /** Điểm chính thức (chỉ được gán tự động khi không có xung đột và không có cờ REVIEW_REQUIRED) */
+  officialScore: number | null;
+  officialScoreSource: OfficialScoreSource;
+  reconciliationStatus: GradeReconciliationStatus;
+  confirmedByTeacher: boolean;
+  confirmedAt?: string;
+  notes: string;
+  hasOmrEvidence: boolean;
+  hasPhotoEvidence: boolean;
+  updatedAt: string;
+}
+
+export interface IntelligentGradebookStats {
+  totalEntries: number;
+  confirmedValidCount: number;
+  matchedCount: number;
+  mismatchCount: number;
+  missingCount: number;
+  reviewRequiredCount: number;
+  /** Chỉ tính từ tập dữ liệu hợp lệ và đã xác nhận (confirmedByTeacher && officialScore !== null) */
+  confirmedAverageScore: number | null;
+  confirmedHighestScore: number | null;
+  confirmedLowestScore: number | null;
+}
+
+// ============================================================================
+// SMART GRADING STUDIO 3.0 — PHASE 3: MOBILE SCANNER, BATCH QUEUE & DUPLICATES
+// ============================================================================
+
+export type DuplicateReason =
+  | 'same-sheet-id'
+  | 'same-optical-code'
+  | 'same-student-id'
+  | 'similar-image-hash';
+
+export type DuplicateResolutionAction =
+  | 'keep-new'
+  | 'keep-old'
+  | 'keep-both'
+  | 'mark-retake';
+
+export interface DuplicateResolutionEntry {
+  id: string;
+  timestamp: string;
+  reason: DuplicateReason;
+  action: DuplicateResolutionAction;
+  keptSheetId?: string;
+  affectedSheetIds: string[];
+  studentId?: string;
+  note?: string;
+}
+
+export interface DuplicateGroup {
+  id: string;
+  reason: DuplicateReason;
+  reasonLabel: string;
+  sheetIds: string[];
+  studentId?: string;
+  opticalKey?: string;
+  hammingDistance?: number;
+}
+
+export type BatchQueueItemStatus =
+  | 'waiting'
+  | 'processing'
+  | 'graded'
+  | 'review-required'
+  | 'failed';
+
+export interface BatchQueueItem {
+  id: string;
+  fileName: string;
+  createdAt: string;
+  status: BatchQueueItemStatus;
+  captureSource: 'camera' | 'upload';
+  thumbnailDataUrl?: string;
+  gradedSheetId?: string;
+  finalScore?: number;
+  maxScore?: number;
+  studentId?: string;
+  examCode?: string;
+  errorMessage?: string;
+  retakeForSheetId?: string;
+}
+
+

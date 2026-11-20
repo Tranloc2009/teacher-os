@@ -1073,7 +1073,44 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       }
     });
 
-    if (q.hasVisualAsset && (!q.visualAssets || q.visualAssets.length === 0)) {
+    const optionAssets = (q.options ?? [])
+      .map((o) => o.visualAsset)
+      .filter((a): a is NonNullable<typeof a> => Boolean(a));
+
+    optionAssets.forEach((asset) => {
+      const verification = verifyVisualAssetIntegrity(asset);
+      if (!verification.hasSourceData) {
+        issues.push({
+          id: `q-opt-asset-empty-${q.id}-${asset.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'asset',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          message: `Câu ${qNum} (${q.code}): Tài nguyên đồ thị phương án "${asset.label}" bị rỗng.`,
+          recommendation: 'Sinh lại biến thể đồ thị trước khi xuất.',
+        });
+      } else if (!verification.valid) {
+        issues.push({
+          id: `q-opt-asset-checksum-${q.id}-${asset.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'asset',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          message: `Câu ${qNum} (${q.code}): Checksum đồ thị phương án "${asset.label}" không khớp.`,
+          recommendation: 'Sinh lại biến thể đồ thị trước khi xuất.',
+        });
+      }
+    });
+
+    if (
+      q.hasVisualAsset &&
+      (!q.visualAssets || q.visualAssets.length === 0) &&
+      optionAssets.length === 0
+    ) {
       issues.push({
         id: `q-asset-flagged-empty-${q.id}`,
         severity: 'error',
@@ -1748,10 +1785,27 @@ export function verifyMixedExamIntegrity(
       });
     }
 
-    // 2. Kiểm tra tài nguyên hình ảnh / bảng biến thiên
+    // 2. Kiểm tra tài nguyên hình ảnh / bảng biến thiên (cả cấp câu hỏi và cấp phương án chọn đồ thị/BBT)
     const origAssets = orig.visualAssets ?? [];
     const mixedAssets = mq.visualAssets ?? [];
-    if (origAssets.length !== mixedAssets.length || (orig.hasVisualAsset && mixedAssets.length === 0)) {
+    const origOptionAssets = (orig.options ?? [])
+      .map((o) => ({ optionId: o.id, asset: o.visualAsset }))
+      .filter(
+        (entry): entry is { optionId: string; asset: NonNullable<typeof entry.asset> } =>
+          Boolean(entry.asset)
+      );
+    const mixedOptionAssets = (mq.options ?? [])
+      .map((o) => ({ optionId: o.id, asset: o.visualAsset }))
+      .filter(
+        (entry): entry is { optionId: string; asset: NonNullable<typeof entry.asset> } =>
+          Boolean(entry.asset)
+      );
+
+    if (
+      origAssets.length !== mixedAssets.length ||
+      origOptionAssets.length !== mixedOptionAssets.length ||
+      (orig.hasVisualAsset && mixedAssets.length === 0 && mixedOptionAssets.length === 0)
+    ) {
       issues.push({
         id: `mixed-asset-lost-${mixed.code}-${mq.id}`,
         severity: 'error',
@@ -1779,6 +1833,30 @@ export function verifyMixedExamIntegrity(
             code: mq.code,
             message: `Mã đề ${mixed.code}: Tài nguyên "${oa.label}" của câu ${mq.code} bị mất hoặc sai checksum.`,
             recommendation: 'Chặn xuất đề.',
+          });
+        }
+      });
+
+      origOptionAssets.forEach(({ optionId, asset: oa }) => {
+        const mixedMatch = mixedOptionAssets.find((item) => item.optionId === optionId);
+        const origCheck = computeVisualAssetChecksum(oa);
+        const mixedCheck = mixedMatch ? computeVisualAssetChecksum(mixedMatch.asset) : '';
+        if (
+          !mixedMatch ||
+          !mixedMatch.asset.sourceData.trim() ||
+          mixedMatch.asset.id !== oa.id ||
+          mixedCheck !== origCheck
+        ) {
+          issues.push({
+            id: `mixed-opt-asset-corrupt-${mixed.code}-${mq.id}-${oa.id}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'asset',
+            questionId: mq.id,
+            questionNumber: newNumber,
+            code: mq.code,
+            message: `Mã đề ${mixed.code}: Đồ thị phương án "${oa.label}" của câu ${mq.code} bị mất hoặc lệch khi đảo phương án.`,
+            recommendation: 'Chặn xuất đề và kiểm tra ánh xạ đồ thị phương án.',
           });
         }
       });

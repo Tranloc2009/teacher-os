@@ -11,14 +11,17 @@ import type {
   ExamCodeAnswerKey,
   GradedSheetRecord,
   GradingSession,
+  OmrBubbleChoice,
   OmrThresholdsConfig,
+  RgbaImageBuffer,
 } from '../../types/grading';
 import {
   decodeImageBlobForOmr,
   renderAnnotatedEvidencePngBlob,
   validateUploadedImageFile,
 } from '../../core/grading/omrBrowserBridge';
-import { runLocalOmrVisionPipeline } from '../../core/grading/omrVisionEngine';
+import { runOmrVisionInWorkerOrFallback } from '../../core/grading/omrWorkerClient';
+import { synthesizeOmrSheetImage } from '../../core/grading/omrTestSynth';
 import {
   annotateDuplicateStudentWarnings,
   gradeRecognizedSheet,
@@ -30,6 +33,7 @@ interface OmrBatchUploadPanelProps {
   answerKeysByCode: Record<string, ExamCodeAnswerKey>;
   onBatchCompleted: (newSheets: GradedSheetRecord[]) => void;
   onUpdateThresholds: (next: OmrThresholdsConfig) => void;
+  onOpenCameraScanner?: () => void;
   onNotify: (tone: 'success' | 'info' | 'error', message: string) => void;
 }
 
@@ -38,6 +42,7 @@ export function OmrBatchUploadPanel({
   answerKeysByCode,
   onBatchCompleted,
   onUpdateThresholds,
+  onOpenCameraScanner,
   onNotify,
 }: OmrBatchUploadPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -124,7 +129,7 @@ export function OmrBatchUploadPanel({
           });
 
           const decoded = await decodeImageBlobForOmr(file);
-          const recognition = runLocalOmrVisionPipeline(
+          const { recognition, imageDHash } = await runOmrVisionInWorkerOrFallback(
             decoded.rgba,
             session.omrQuestionCount,
             session.omrThresholds
@@ -142,6 +147,8 @@ export function OmrBatchUploadPanel({
             gradingRule: session.gradingRule,
             fallbackExamCode: fallbackExamCode || undefined,
           });
+          graded.imageDHash = imageDHash;
+          graded.captureSource = 'upload';
 
           // Kết xuất ảnh minh chứng riêng (annotated.png) vào IndexedDB
           try {
@@ -399,15 +406,149 @@ export function OmrBatchUploadPanel({
             Hỗ trợ tải hàng loạt 30–100 bài. Các ô tô mờ, tô trùng hoặc ảnh mất nét sẽ tự động đưa sang Hàng đợi duyệt thủ công.
           </p>
 
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+            {onOpenCameraScanner && (
+              <button
+                type="button"
+                disabled={processing}
+                onClick={onOpenCameraScanner}
+                className="min-h-[44px] inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-semibold text-white transition-colors disabled:opacity-50"
+              >
+                <Camera className="h-4 w-4" aria-hidden="true" />
+                <span>Mở Camera quét liên tục (Điện thoại / Webcam)</span>
+              </button>
+            )}
+
             <button
               type="button"
               disabled={processing}
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-semibold text-white transition-colors disabled:opacity-50"
+              className="min-h-[44px] inline-flex items-center gap-2 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 px-4 py-2.5 text-xs font-semibold text-indigo-800 dark:text-indigo-200 transition-colors disabled:opacity-50"
             >
               <UploadCloud className="h-4 w-4" aria-hidden="true" />
-              <span>Chọn ảnh từ máy tính / điện thoại</span>
+              <span>Chọn ảnh từ máy tính / thư viện</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={processing}
+              onClick={async () => {
+                const rgbaToPngFile = async (
+                  rgba: RgbaImageBuffer,
+                  name: string
+                ): Promise<File> => {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = rgba.width;
+                  canvas.height = rgba.height;
+                  const ctx = canvas.getContext('2d');
+                  if (!ctx) throw new Error('Không khởi tạo được Canvas 2D.');
+                  const imgData = new ImageData(
+                    new Uint8ClampedArray(rgba.data),
+                    rgba.width,
+                    rgba.height
+                  );
+                  ctx.putImageData(imgData, 0, 0);
+                  const blob = await new Promise<Blob>((resolve, reject) => {
+                    canvas.toBlob((b) => {
+                      if (b) resolve(b);
+                      else reject(new Error('Không kết xuất được PNG.'));
+                    }, 'image/png');
+                  });
+                  return new File([blob], name, { type: 'image/png' });
+                };
+
+                const code1 = session.selectedExamCodes[0] ?? '101';
+                const code2 =
+                  session.selectedExamCodes[1] ??
+                  session.selectedExamCodes[0] ??
+                  '101';
+                const key1 = answerKeysByCode[code1];
+                const key2 = answerKeysByCode[code2] ?? key1;
+                if (!key1) {
+                  onNotify('error', 'Không tìm thấy bảng đáp án mã đề hợp lệ.');
+                  return;
+                }
+
+                const st1 = session.students[0]?.studentId ?? 'HS001';
+                const st2 = session.students[1]?.studentId ?? 'HS002';
+                const st3 = session.students[2]?.studentId ?? 'HS003';
+
+                // Phiếu 1: Mã đề 1, tô đúng 100%, nghiêng phối cảnh 3.5 độ
+                const choices1: Record<number, OmrBubbleChoice[]> = {};
+                for (let q = 1; q <= session.omrQuestionCount; q += 1) {
+                  const ans = key1.mcqAnswerByOrder[q];
+                  if (ans) choices1[q] = [ans];
+                }
+                const img1 = synthesizeOmrSheetImage({
+                  questionCount: session.omrQuestionCount,
+                  filledChoices: choices1,
+                  tiltDegrees: 3.5,
+                  opticalPayload: {
+                    v: 1,
+                    sid: session.id,
+                    ec: code1,
+                    st: st1,
+                    p: 1,
+                  },
+                });
+
+                // Phiếu 2: Mã đề 2, câu 1 tô sai, câu 2 tô trùng 2 phương án A & B -> cần duyệt thủ công
+                const choices2: Record<number, OmrBubbleChoice[]> = {};
+                const allOpts: OmrBubbleChoice[] = ['A', 'B', 'C', 'D'];
+                for (let q = 1; q <= session.omrQuestionCount; q += 1) {
+                  const correctOpt = key2.mcqAnswerByOrder[q];
+                  if (!correctOpt) continue;
+                  if (q === 1) {
+                    const wrong =
+                      allOpts.find((o) => o !== correctOpt) ?? 'B';
+                    choices2[q] = [wrong];
+                  } else if (q === 2) {
+                    choices2[q] = ['A', 'B'];
+                  } else {
+                    choices2[q] = [correctOpt];
+                  }
+                }
+                const img2 = synthesizeOmrSheetImage({
+                  questionCount: session.omrQuestionCount,
+                  filledChoices: choices2,
+                  opticalPayload: {
+                    v: 1,
+                    sid: session.id,
+                    ec: code2,
+                    st: st2,
+                    p: 1,
+                  },
+                });
+
+                // Phiếu 3: Mã đề 1, xoay ngang 90 độ, câu 3 tô mờ -> tự động xoay về 0 độ & đưa câu 3 vào hàng đợi duyệt
+                const choices3: Record<number, OmrBubbleChoice[]> = {
+                  ...choices1,
+                };
+                const img3 = synthesizeOmrSheetImage({
+                  questionCount: session.omrQuestionCount,
+                  filledChoices: choices3,
+                  fillIntensityByQuestion: { 3: 0.28 },
+                  rotateDeg: 90,
+                  opticalPayload: {
+                    v: 1,
+                    sid: session.id,
+                    ec: code1,
+                    st: st3,
+                    p: 1,
+                  },
+                });
+
+                const files = await Promise.all([
+                  rgbaToPngFile(img1, `Phieu_${st1}_Ma_${code1}_nghieng3.5do.png`),
+                  rgbaToPngFile(img2, `Phieu_${st2}_Ma_${code2}_totrung_cau2.png`),
+                  rgbaToPngFile(img3, `Phieu_${st3}_Ma_${code1}_xoay90_tomo_cau3.png`),
+                ]);
+                await handleFiles(files);
+              }}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors disabled:opacity-50"
+            >
+              <Camera className="h-4 w-4 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+              <span>Nạp 3 ảnh phiếu OMR mẫu (chạy CV &amp; chấm thật)</span>
             </button>
           </div>
         </div>

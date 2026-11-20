@@ -12,6 +12,7 @@ import {
   Printer,
   ScanLine,
   Settings,
+  Wand2,
 } from 'lucide-react';
 import type { AppId } from '../../core/appRegistry';
 import type { ShellViewId } from './ShellTopBar';
@@ -71,7 +72,7 @@ interface UnifiedSidebarItem {
   viewId: ShellViewId;
   navTarget?: ShellNavId;
   appTarget?: AppId;
-  icon: 'home' | 'lesson' | 'exam' | 'grading' | 'vault' | 'workflow' | 'workspace' | 'journal' | 'print' | 'tools' | 'settings';
+  icon: 'home' | 'lesson' | 'generator' | 'exam' | 'grading' | 'vault' | 'workflow' | 'workspace' | 'journal' | 'print' | 'tools' | 'settings';
 }
 
 const SIDEBAR_MAIN_ITEMS: UnifiedSidebarItem[] = [
@@ -92,6 +93,15 @@ const SIDEBAR_MAIN_ITEMS: UnifiedSidebarItem[] = [
     viewId: 'lesson-studio',
     navTarget: 'lesson-studio',
     icon: 'lesson',
+  },
+  {
+    key: 'exam-generator',
+    label: 'Tạo đề tự động',
+    title: 'Smart Exam Generator 2.0 — Tạo đề theo ma trận & Biến thể đổi số kiểm chứng',
+    tourId: 'sidebar-app-exam-generator',
+    viewId: 'exam-generator',
+    appTarget: 'exam-generator',
+    icon: 'generator',
   },
   {
     key: 'math-mixer',
@@ -191,6 +201,8 @@ function SidebarItemIcon({
       return <Home className={className} aria-hidden="true" />;
     case 'lesson':
       return <BookOpen className={className} aria-hidden="true" />;
+    case 'generator':
+      return <Wand2 className={className} aria-hidden="true" />;
     case 'exam':
       return <Calculator className={className} aria-hidden="true" />;
     case 'grading':

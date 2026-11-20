@@ -21,6 +21,7 @@ import {
 } from './mathIntegrity';
 import { extractDocxDocument } from './ooxmlParser';
 import { getSubjectProfile, getUniversalQuestionType, resolveSubjectId } from './subjectProfileRegistry';
+import { convertSvgToPngDataUrl } from './examGenerator/dynamicSvgGraphEngine';
 
 export const DEFAULT_EXAM_EXPORT_SETTINGS: ExamExportSettings = {
   departmentName: 'SỞ GIÁO DỤC VÀ ĐÀO TẠO',
@@ -396,6 +397,9 @@ function renderStudentQuestionXml(
           { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
         )
       );
+      if (opt.visualAsset) {
+        appendVisualAssetToBody(bodyChunks, opt.visualAsset, mediaList, fontFamily);
+      }
     });
   } else if (q.type === 'true-false' && q.statements) {
     q.statements.forEach((st, sIdx) => {
@@ -563,6 +567,49 @@ export async function buildStudentExamDocxBuffer(
   const bodyChunks: string[] = [];
   const mediaList: EmbeddedMediaEntry[] = [];
 
+  // In browser environments, rasterize dynamic SVG graphs/variation tables to crisp PNG
+  // for universal Microsoft Word compatibility (in Node tests, clean SVG fallback is preserved).
+  const preparedQuestions: MathQuestion[] = await Promise.all(
+    version.questions.map(async (origQ) => {
+      const hasSvgQuestionAsset = (origQ.visualAssets ?? []).some((a) =>
+        a.sourceData.trim().startsWith('<svg')
+      );
+      const hasSvgOptionAsset = (origQ.options ?? []).some((o) =>
+        o.visualAsset?.sourceData.trim().startsWith('<svg')
+      );
+      if (typeof window === 'undefined' || (!hasSvgQuestionAsset && !hasSvgOptionAsset)) {
+        return origQ;
+      }
+      const rasterizeAsset = async (asset: MathVisualAsset): Promise<MathVisualAsset> => {
+        if (!asset.sourceData.trim().startsWith('<svg')) return asset;
+        const isBbt = asset.kind === 'variation-table';
+        const png = await convertSvgToPngDataUrl(
+          asset.sourceData,
+          isBbt ? 520 : 480,
+          isBbt ? 180 : 310
+        );
+        return png ? { ...asset, sourceData: png } : asset;
+      };
+      const nextVisualAssets = origQ.visualAssets
+        ? await Promise.all(origQ.visualAssets.map(rasterizeAsset))
+        : origQ.visualAssets;
+      const nextOptions = origQ.options
+        ? await Promise.all(
+            origQ.options.map(async (opt) =>
+              opt.visualAsset
+                ? { ...opt, visualAsset: await rasterizeAsset(opt.visualAsset) }
+                : opt
+            )
+          )
+        : origQ.options;
+      return {
+        ...origQ,
+        visualAssets: nextVisualAssets,
+        options: nextOptions,
+      };
+    })
+  );
+
   // Banner Header Table (2 cột: Đơn vị + Thông tin đề & Mã đề)
   const headerTableRows = [
     [
@@ -596,7 +643,7 @@ export async function buildStudentExamDocxBuffer(
   const renderedGroups = new Set<string>();
   let currentSection = '';
 
-  version.questions.forEach((q, idx) => {
+  preparedQuestions.forEach((q, idx) => {
     if (q.sectionTitle && q.sectionTitle !== currentSection) {
       currentSection = q.sectionTitle;
       bodyChunks.push(
@@ -881,9 +928,15 @@ export async function verifyExportedDocxBuffer(
       });
     }
 
-    // Kiểm tra bảo toàn số lượng ảnh/bảng
+    // Kiểm tra bảo toàn số lượng ảnh/bảng (gồm cả đồ thị/BBT trong câu hỏi và phương án MCQ)
     const expectedAssetsCount =
-      expectedVersion.questions.reduce((acc, q) => acc + (q.visualAssets?.length ?? 0), 0) +
+      expectedVersion.questions.reduce(
+        (acc, q) =>
+          acc +
+          (q.visualAssets?.length ?? 0) +
+          (q.options ?? []).filter((o) => Boolean(o.visualAsset)).length,
+        0
+      ) +
       (exam.questionGroups ?? [])
         .filter((g) => expectedVersion.questions.some((q) => q.groupId === g.id))
         .reduce((acc, g) => acc + g.sharedAssets.length, 0);

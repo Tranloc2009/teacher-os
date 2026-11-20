@@ -13,6 +13,20 @@ import type {
   GradingSession,
   StudentRoster,
 } from '../types/grading';
+import type {
+  BankQuestionRecord,
+  GeneratedExamDraft,
+  GeneratorBackupBundle,
+  QuestionTemplateDefinition,
+} from '../types/examGenerator';
+import {
+  DEMO_GENERATOR_BANK,
+  DEMO_GENERATOR_TEMPLATES,
+  PHASE2_DEMO_BANK,
+  PHASE2_DEMO_TEMPLATES,
+  PHASE3_DEMO_BANK,
+  PHASE3_DEMO_TEMPLATES,
+} from '../data/demoExamGeneratorData';
 import { deleteBlobFromOpfs, readBlobFromOpfs } from '../core/resourceStorage';
 import { DEMO_LESSON_PACKS } from '../data/demoPacks';
 import { DEMO_MATH_EXAM } from '../data/demoMathExams';
@@ -101,6 +115,9 @@ class TeacherOSDatabase extends Dexie {
   gradingSessions!: Table<GradingSession, string>;
   gradingRosters!: Table<StudentRoster, string>;
   gradingEvidenceBlobs!: Table<EvidenceBlobRecord, string>;
+  examGeneratorBank!: Table<BankQuestionRecord, string>;
+  examGeneratorTemplates!: Table<QuestionTemplateDefinition, string>;
+  examGeneratorDrafts!: Table<GeneratedExamDraft, string>;
 
   constructor() {
     super('TeacherOS2DB');
@@ -180,6 +197,27 @@ class TeacherOSDatabase extends Dexie {
       gradingSessions: 'id, examId, className, updatedAt',
       gradingRosters: 'id, className, updatedAt',
       gradingEvidenceBlobs: 'id, sessionId, sheetId, kind, updatedAt',
+    });
+    // Phiên bản 8 (Smart Exam Generator 2.0 — Phase 1): bổ sung 3 bảng ngân hàng câu hỏi, mẫu tham số và đề tạo tự động, giữ nguyên 100% dữ liệu v1-v7
+    this.version(8).stores({
+      lessonPacks: 'id, subject, grade, status, isDemo, updatedAt',
+      settings: 'id',
+      meta: 'key',
+      resources: 'id, type, subject, grade, updatedAt',
+      workflows: 'id, linkedPackId, updatedAt',
+      journals: 'id, packId, taughtDate, updatedAt',
+      mathExams: 'id, grade, status, updatedAt',
+      canvasBoards: 'id, mode, updatedAt',
+      canvasNodes: 'id, boardId, type, parentId, updatedAt',
+      canvasEdges: 'id, boardId, source, target, edgeType',
+      canvasViewSettings: 'boardId',
+      resourceFiles: 'id, resourceId, sha256, storageKind, updatedAt',
+      gradingSessions: 'id, examId, className, updatedAt',
+      gradingRosters: 'id, className, updatedAt',
+      gradingEvidenceBlobs: 'id, sessionId, sheetId, kind, updatedAt',
+      examGeneratorBank: 'id, subjectId, grade, topic, cognitiveLevel, type, updatedAt',
+      examGeneratorTemplates: 'id, familyId, subjectId, grade, updatedAt',
+      examGeneratorDrafts: 'id, subjectId, grade, status, updatedAt',
     });
   }
 }
@@ -1374,4 +1412,203 @@ export async function deleteSheetEvidenceBlobs(sheetId: string): Promise<void> {
     await db.gradingEvidenceBlobs.where('sheetId').equals(sheetId).delete();
   });
 }
+
+// ---------------------------------------------------------------------------
+// Smart Exam Generator 2.0 (Phase 1) — Local IndexedDB Storage (v8 additive)
+// ---------------------------------------------------------------------------
+
+const EXAM_GENERATOR_SEED_KEY = 'exam_generator_seeded_v1';
+const EXAM_GENERATOR_PHASE2_SEED_KEY = 'exam_generator_phase2_seeded_v1';
+const EXAM_GENERATOR_PHASE3_SEED_KEY = 'exam_generator_phase3_seeded_v1';
+
+export async function initializeExamGeneratorStore(): Promise<{
+  bank: BankQuestionRecord[];
+  templates: QuestionTemplateDefinition[];
+  drafts: GeneratedExamDraft[];
+}> {
+  return executeStorageOperation(async () => {
+    const seededMeta = await db.meta.get(EXAM_GENERATOR_SEED_KEY);
+    if (!seededMeta) {
+      const existingBankCount = await db.examGeneratorBank.count();
+      const existingTemplateCount = await db.examGeneratorTemplates.count();
+      await db.transaction(
+        'rw',
+        [db.examGeneratorBank, db.examGeneratorTemplates, db.meta],
+        async () => {
+          if (existingBankCount === 0) {
+            await db.examGeneratorBank.bulkPut(structuredClone(DEMO_GENERATOR_BANK));
+          }
+          if (existingTemplateCount === 0) {
+            await db.examGeneratorTemplates.bulkPut(
+              structuredClone(DEMO_GENERATOR_TEMPLATES)
+            );
+          }
+          await db.meta.put({ key: EXAM_GENERATOR_SEED_KEY, value: 'true' });
+          await db.meta.put({ key: EXAM_GENERATOR_PHASE2_SEED_KEY, value: 'true' });
+          await db.meta.put({ key: EXAM_GENERATOR_PHASE3_SEED_KEY, value: 'true' });
+        }
+      );
+    } else {
+      // Additive Phase 2 seeding for existing v8 users — NEVER overwrites or deletes user records
+      const phase2Meta = await db.meta.get(EXAM_GENERATOR_PHASE2_SEED_KEY);
+      if (!phase2Meta) {
+        await db.transaction(
+          'rw',
+          [db.examGeneratorBank, db.examGeneratorTemplates, db.meta],
+          async () => {
+            for (const item of PHASE2_DEMO_BANK) {
+              const exists = await db.examGeneratorBank.get(item.id);
+              if (!exists) {
+                await db.examGeneratorBank.put(structuredClone(item));
+              }
+            }
+            for (const tpl of PHASE2_DEMO_TEMPLATES) {
+              const exists = await db.examGeneratorTemplates.get(tpl.id);
+              if (!exists) {
+                await db.examGeneratorTemplates.put(structuredClone(tpl));
+              }
+            }
+            await db.meta.put({ key: EXAM_GENERATOR_PHASE2_SEED_KEY, value: 'true' });
+          }
+        );
+      }
+
+      // Additive Phase 3 seeding for existing v8 users — NEVER overwrites or deletes user records
+      const phase3Meta = await db.meta.get(EXAM_GENERATOR_PHASE3_SEED_KEY);
+      if (!phase3Meta) {
+        await db.transaction(
+          'rw',
+          [db.examGeneratorBank, db.examGeneratorTemplates, db.meta],
+          async () => {
+            for (const item of PHASE3_DEMO_BANK) {
+              const exists = await db.examGeneratorBank.get(item.id);
+              if (!exists) {
+                await db.examGeneratorBank.put(structuredClone(item));
+              }
+            }
+            for (const tpl of PHASE3_DEMO_TEMPLATES) {
+              const exists = await db.examGeneratorTemplates.get(tpl.id);
+              if (!exists) {
+                await db.examGeneratorTemplates.put(structuredClone(tpl));
+              }
+            }
+            await db.meta.put({ key: EXAM_GENERATOR_PHASE3_SEED_KEY, value: 'true' });
+          }
+        );
+      }
+    }
+
+    const [bank, templates, drafts] = await Promise.all([
+      db.examGeneratorBank.toArray(),
+      db.examGeneratorTemplates.toArray(),
+      db.examGeneratorDrafts.toArray(),
+    ]);
+
+    return {
+      bank: bank.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      templates: templates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      drafts: drafts.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    };
+  });
+}
+
+export async function saveGeneratorBankItem(
+  item: BankQuestionRecord
+): Promise<BankQuestionRecord> {
+  return executeStorageOperation(async () => {
+    const updated: BankQuestionRecord = {
+      ...item,
+      updatedAt: new Date().toISOString(),
+    };
+    await db.examGeneratorBank.put(updated);
+    return updated;
+  });
+}
+
+export async function deleteGeneratorBankItem(id: string): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.examGeneratorBank.delete(id);
+  });
+}
+
+export async function saveGeneratorTemplate(
+  tpl: QuestionTemplateDefinition
+): Promise<QuestionTemplateDefinition> {
+  return executeStorageOperation(async () => {
+    const updated: QuestionTemplateDefinition = {
+      ...tpl,
+      updatedAt: new Date().toISOString(),
+    };
+    await db.examGeneratorTemplates.put(updated);
+    return updated;
+  });
+}
+
+export async function deleteGeneratorTemplate(id: string): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.examGeneratorTemplates.delete(id);
+  });
+}
+
+export async function saveGeneratorDraft(
+  draft: GeneratedExamDraft
+): Promise<GeneratedExamDraft> {
+  return executeStorageOperation(async () => {
+    const updated: GeneratedExamDraft = {
+      ...draft,
+      updatedAt: new Date().toISOString(),
+    };
+    await db.examGeneratorDrafts.put(updated);
+    return updated;
+  });
+}
+
+export async function deleteGeneratorDraft(id: string): Promise<void> {
+  return executeStorageOperation(async () => {
+    await db.examGeneratorDrafts.delete(id);
+  });
+}
+
+export async function restoreGeneratorBackupBundle(
+  bundle: GeneratorBackupBundle
+): Promise<{
+  bank: BankQuestionRecord[];
+  templates: QuestionTemplateDefinition[];
+  drafts: GeneratedExamDraft[];
+}> {
+  return executeStorageOperation(async () => {
+    await db.transaction(
+      'rw',
+      [
+        db.examGeneratorBank,
+        db.examGeneratorTemplates,
+        db.examGeneratorDrafts,
+        db.meta,
+      ],
+      async () => {
+        if (Array.isArray(bundle.bankQuestions)) {
+          await db.examGeneratorBank.clear();
+          if (bundle.bankQuestions.length > 0) {
+            await db.examGeneratorBank.bulkPut(bundle.bankQuestions);
+          }
+        }
+        if (Array.isArray(bundle.templates)) {
+          await db.examGeneratorTemplates.clear();
+          if (bundle.templates.length > 0) {
+            await db.examGeneratorTemplates.bulkPut(bundle.templates);
+          }
+        }
+        if (Array.isArray(bundle.drafts)) {
+          await db.examGeneratorDrafts.clear();
+          if (bundle.drafts.length > 0) {
+            await db.examGeneratorDrafts.bulkPut(bundle.drafts);
+          }
+        }
+        await db.meta.put({ key: EXAM_GENERATOR_SEED_KEY, value: 'true' });
+      }
+    );
+    return initializeExamGeneratorStore();
+  });
+}
+
 

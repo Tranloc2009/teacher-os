@@ -12,11 +12,13 @@ import {
 import { AppId, getAppById } from '../../core/appRegistry';
 import { ThemeMode } from '../../core/theme';
 import { InternalNotificationItem } from '../../core/workspaceTabs';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export type ShellViewId = AppId | 'tools';
 
 const SUB_TOOL_IDS: ReadonlySet<AppId> = new Set([
   'workflow-center',
+  'exam-generator',
   'math-mixer',
   'grading-studio',
   'print-studio',
@@ -193,6 +195,8 @@ export function ShellTopBar({
 
         {/* Right: Real Application Controls */}
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          <PWAInstallButton />
+
           <button
             type="button"
             onClick={onOpenCommandPalette}

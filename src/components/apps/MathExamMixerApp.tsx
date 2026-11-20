@@ -96,6 +96,7 @@ import {
 
 interface MathExamMixerAppProps {
   mathExams: MathExamProject[];
+  preferredExamId?: string | null;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onDeleteMathExam: (id: string) => Promise<void>;
   onDuplicateMathExam: (exam: MathExamProject) => Promise<void>;
@@ -122,6 +123,7 @@ function triggerBlobDownload(blob: Blob, fileName: string) {
 
 export function MathExamMixerApp({
   mathExams,
+  preferredExamId,
   onSaveMathExam,
   onDeleteMathExam,
   onDuplicateMathExam,
@@ -129,8 +131,15 @@ export function MathExamMixerApp({
   onOpenGradingStudio,
 }: MathExamMixerAppProps) {
   const [selectedExamId, setSelectedExamId] = useState<string>(
-    mathExams[0]?.id ?? ''
+    preferredExamId || mathExams[0]?.id || ''
   );
+
+  useEffect(() => {
+    if (preferredExamId && mathExams.some((e) => e.id === preferredExamId)) {
+      setSelectedExamId(preferredExamId);
+      setStep(2);
+    }
+  }, [preferredExamId, mathExams]);
   const [step, setStep] = useState<MathExamStep>(1);
   const [selectedCodeTab, setSelectedCodeTab] = useState<string>('');
   const [compareCodeTab, setCompareCodeTab] = useState<string>('');
@@ -2208,21 +2217,26 @@ export function MathExamMixerApp({
                                 </div>
                               )}
                               {uType !== 'multi-select' && origQ?.type === 'mcq' && origQ.options && (
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
                                   {origQ.options.map((opt) => (
                                     <div
                                       key={opt.id}
-                                      className={`rounded px-2 py-1 ${
+                                      className={`rounded px-2 py-1 space-y-1 ${
                                         opt.id === origQ.correctOptionId
                                           ? 'bg-emerald-50 dark:bg-emerald-950/40 font-medium text-emerald-900 dark:text-emerald-200'
                                           : 'text-slate-600 dark:text-slate-400'
                                       }`}
                                     >
-                                      <span className="font-mono-num font-bold mr-1">
-                                        {opt.originalLabel}.
-                                        {opt.lockPosition ? ' [Khóa]' : ''}
-                                      </span>
-                                      <MathContentRenderer payload={opt.content} />
+                                      <div>
+                                        <span className="font-mono-num font-bold mr-1">
+                                          {opt.originalLabel}.
+                                          {opt.lockPosition ? ' [Khóa]' : ''}
+                                        </span>
+                                        <MathContentRenderer payload={opt.content} />
+                                      </div>
+                                      {opt.visualAsset && (
+                                        <MathVisualAssetRenderer asset={opt.visualAsset} compact />
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -2300,24 +2314,29 @@ export function MathExamMixerApp({
                                 </div>
                               )}
                               {uType !== 'multi-select' && mixedQ.type === 'mcq' && mixedQ.options && (
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
                                   {mixedQ.options.map((opt, oIdx) => {
                                     const newLbl = (['A', 'B', 'C', 'D'] as const)[oIdx];
                                     const isCorr = opt.id === mixedQ.correctOptionId;
                                     return (
                                       <div
                                         key={opt.id}
-                                        className={`rounded px-2 py-1 ${
+                                        className={`rounded px-2 py-1 space-y-1 ${
                                           isCorr
                                             ? 'bg-emerald-50 dark:bg-emerald-950/40 font-medium text-emerald-900 dark:text-emerald-200'
                                             : 'text-slate-700 dark:text-slate-300'
                                         }`}
                                       >
-                                        <span className="font-mono-num font-bold mr-1">
-                                          {newLbl}.
-                                          {opt.lockPosition ? ' [Khóa]' : ''}
-                                        </span>
-                                        <MathContentRenderer payload={opt.content} />
+                                        <div>
+                                          <span className="font-mono-num font-bold mr-1">
+                                            {newLbl}.
+                                            {opt.lockPosition ? ' [Khóa]' : ''}
+                                          </span>
+                                          <MathContentRenderer payload={opt.content} />
+                                        </div>
+                                        {opt.visualAsset && (
+                                          <MathVisualAssetRenderer asset={opt.visualAsset} compact />
+                                        )}
                                       </div>
                                     );
                                   })}

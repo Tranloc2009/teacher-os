@@ -470,6 +470,11 @@ export function recalculateSheetRecord(
   return {
     ...updated,
     annotatedBlobId: sheet.annotatedBlobId,
+    imageDHash: sheet.imageDHash,
+    captureSource: sheet.captureSource,
+    retakeRequested: sheet.retakeRequested,
+    archivedByDuplicateResolution: sheet.archivedByDuplicateResolution,
+    replacedBySheetId: sheet.replacedBySheetId,
   };
 }
 
@@ -481,12 +486,19 @@ export function annotateDuplicateStudentWarnings(
 ): GradedSheetRecord[] {
   const counts = new Map<string, number>();
   for (const s of sheets) {
+    if (s.archivedByDuplicateResolution) continue;
     const key = s.studentId.trim().toUpperCase();
     if (!key) continue;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
   return sheets.map((s) => {
+    if (s.archivedByDuplicateResolution) {
+      if (!s.duplicateStudentWarning) return s;
+      const cleaned = { ...s };
+      delete cleaned.duplicateStudentWarning;
+      return cleaned;
+    }
     const key = s.studentId.trim().toUpperCase();
     const count = key ? counts.get(key) ?? 0 : 0;
     if (count > 1) {
@@ -511,7 +523,8 @@ export function computeGradingDashboardMetrics(
   sheets: GradedSheetRecord[],
   maxScore = 10
 ): GradingDashboardMetrics {
-  const totalSheets = sheets.length;
+  const activeSheets = sheets.filter((s) => !s.archivedByDuplicateResolution);
+  const totalSheets = activeSheets.length;
   let autoGradedCount = 0;
   let reviewRequiredCount = 0;
   let confirmedCount = 0;
@@ -519,7 +532,7 @@ export function computeGradingDashboardMetrics(
 
   const validScores: number[] = [];
 
-  for (const s of sheets) {
+  for (const s of activeSheets) {
     if (s.status === 'confirmed') confirmedCount += 1;
     else if (s.status === 'auto-graded') autoGradedCount += 1;
     else if (s.status === 'review-required') reviewRequiredCount += 1;
