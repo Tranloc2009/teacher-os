@@ -70,7 +70,17 @@ VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 VITE_CLOUDFLARE_API_URL=https://teacheros-api.<subdomain>.workers.dev
 ```
 
-Sau khi build/redeploy frontend, mở **TeacherOS → Cài đặt & Sao lưu → Nền tảng Trực tuyến & Bảo mật** và bấm **Kiểm tra kết nối thật** để xác nhận:
+Frontend `teacheros-web` dùng Cloudflare Workers Static Assets Free. Nạp ba biến `VITE_*` trước khi build, rồi triển khai từ thư mục gốc:
+
+```bash
+bun install --frozen-lockfile
+bun run build
+wrangler deploy --config workers/web/wrangler.toml
+```
+
+Dùng URL trả về sau deploy làm origin duy nhất cho `ALLOWED_ORIGINS` của API. Đặt cùng origin làm Site URL trong Supabase Auth, rồi thêm URL trang chủ với dấu `/` cuối vào Redirect URLs. Rebuild trước khi deploy lại nếu bất kỳ biến `VITE_*` nào thay đổi.
+
+Mở **TeacherOS → Cài đặt & Sao lưu → Nền tảng Trực tuyến & Bảo mật** và bấm **Kiểm tra kết nối thật** để xác nhận:
 - Supabase Auth `/auth/v1/health` → `200 OK`
 - `teacheros-api` `/api/health` → `200 OK` (`configured=true`)
 - `teacheros-api` `/api/v1/auth/me` → `401` khi chưa đăng nhập và `200` kèm vai trò từ `user_roles` sau khi đăng nhập.
