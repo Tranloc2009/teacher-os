@@ -918,7 +918,7 @@ export function estimateMaxDistinctPermutations(exam: MathExamProject): number {
         continue;
       }
       if (q.type !== 'mcq' || !q.options) continue;
-      if (q.lockOptionShuffle || detectDependentOptions(q.options).length > 0) continue;
+      if (q.lockOptionShuffle || q.optionParseIncomplete || detectDependentOptions(q.options).length > 0) continue;
       const unlockedOpts = q.options.filter((o) => !o.lockPosition).length;
       if (unlockedOpts > 1) {
         total = Math.min(100000, total * factorialCapped(unlockedOpts, 100000));
@@ -1200,6 +1200,56 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       });
     }
 
+    // Kiểm tra tài nguyên UNRENDERABLE (EMF/WDP/WMF hỏng) gắn với câu hỏi
+    const inlineUnrenderableTokens: string[] = [];
+    const scanUnrenderable = (txt?: string) => {
+      if (!txt || !txt.includes('[TÀI_NGUYÊN_UNRENDERABLE:')) return;
+      const re = /\[TÀI_NGUYÊN_UNRENDERABLE:([^\]]+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(txt)) !== null) {
+        if (m[1]) inlineUnrenderableTokens.push(m[1].trim());
+      }
+    };
+    scanUnrenderable(q.stem?.rawSource);
+    (q.options ?? []).forEach((o) => scanUnrenderable(o.content?.rawSource));
+    (q.multiSelectOptions ?? []).forEach((o) => scanUnrenderable(o.content?.rawSource));
+    (q.statements ?? []).forEach((s) => scanUnrenderable(s.content?.rawSource));
+    scanUnrenderable(q.solutionGuide?.rawSource);
+
+    const allUnrenderable = Array.from(
+      new Set([...(q.unrenderableMediaRefs ?? []), ...inlineUnrenderableTokens])
+    );
+    if (allUnrenderable.length > 0) {
+      issues.push({
+        id: `q-unrenderable-media-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'asset',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): Chứa tài nguyên UNRENDERABLE không hiển thị được (${allUnrenderable.join(', ')}) — CHẶN xuất bản chính thức.`,
+        recommendation: 'Mở Document Import Doctor để kiểm tra và thay thế tài nguyên EMF/WDP/WMF lỗi bằng PNG/SVG hoặc LaTeX.',
+      });
+    }
+
+    // Kiểm tra cờ nhận diện thiếu phương án MCQ (OPTION_PARSE_INCOMPLETE)
+    if (q.optionParseIncomplete) {
+      issues.push({
+        id: `q-option-incomplete-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): OPTION_PARSE_INCOMPLETE — ${q.optionParseReason || 'Không nhận diện đủ 4 phương án A/B/C/D từ tài liệu gốc.'}`,
+        recommendation: 'Mở Document Import Doctor để đối chiếu tài liệu gốc và bổ sung phương án thiếu (hệ thống không tự sinh phương án).',
+      });
+    }
+
     // Kiểm tra nguồn gốc khóa đáp án (Answer Provenance) & phát hiện sửa nội dung sau khi xác nhận
     if (q.answerProvenance) {
       const prov = q.answerProvenance;
@@ -1242,6 +1292,19 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           ...locMeta,
           message: `Câu ${qNum} (${q.code}): THIẾU KHÓA ĐÁP ÁN (${prov.note || 'không tìm thấy đáp án xác minh trong tài liệu'}).`,
           recommendation: 'Chọn hoặc nhập đáp án đúng ở Bước 1/2 (hệ thống không tự mặc định A hay Sai).',
+        });
+      } else if (prov.status === 'unsupported') {
+        issues.push({
+          id: `q-prov-unsupported-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'option',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): Định dạng khóa đáp án chưa hỗ trợ tự động (UNSUPPORTED: ${prov.note || prov.rawEvidence || 'cần kiểm tra'}).`,
+          recommendation: 'Mở Answer Key Studio để nhập và xác nhận đáp án chuẩn trước khi trộn/xuất.',
         });
       } else if (
         prov.status === 'teacher-confirmed' &&
@@ -3070,3 +3133,75 @@ export function checkExamExportGate(exam: MathExamProject): {
     report: pre,
   };
 }
+
+const ANSWER_ONLY_ISSUE_PREFIXES = [
+  'q-prov-missing-',
+  'q-prov-review-',
+  'q-prov-conflict-',
+  'q-prov-unsupported-',
+  'q-prov-stale-confirm-',
+  'mcq-answer-',
+  'ms-answer-',
+  'tf-missing-state-',
+  'tf-candidate-state-',
+  'tf-bool-',
+  'sa-empty-',
+  'match-pairs-',
+  'exam-unconfirmed-answers',
+];
+
+function isAnswerOnlyIssue(issue: MathIntegrityIssue): boolean {
+  return ANSWER_ONLY_ISSUE_PREFIXES.some((prefix) => issue.id.startsWith(prefix));
+}
+
+/**
+ * Cổng kiểm chứng cho chế độ "Xuất bản nháp không kèm đáp án":
+ * - Nếu đề có BẤT KỲ lỗi toàn vẹn cấu trúc, công thức, tài nguyên UNRENDERABLE hoặc OPTION_PARSE_INCOMPLETE
+ *   -> CHẶN TUYỆT ĐỐI (BLOCK OFFICIAL EXPORT — DOCUMENT INTEGRITY FAILED).
+ * - Nếu đề hoàn chỉnh về nội dung/công thức/hình/phương án và CHỈ thiếu hoặc chưa xác nhận khóa đáp án
+ *   -> Cho phép xuất bản nháp học sinh (không kèm đáp án, có cảnh báo rõ ràng), đồng thời vẫn khóa
+ *   tuyệt đối xuất ZIP chính thức, DOCX đáp án, CSV và OMR Smart Grading Studio.
+ */
+export function checkDraftExportGate(exam: MathExamProject): {
+  canExportDraft: boolean;
+  blockingStructuralReasons: string[];
+  missingOrUnconfirmedAnswerCount: number;
+  warningMessage: string;
+  report: MathIntegrityReport;
+} {
+  const pre = evaluatePreMixIntegrity(exam);
+  const structuralErrors = pre.issues.filter(
+    (issue) => issue.severity === 'error' && !isAnswerOnlyIssue(issue)
+  );
+  const blockingStructuralReasons = Array.from(
+    new Set(structuralErrors.map((i) => i.message))
+  );
+
+  const missingOrUnconfirmedAnswerCount = exam.questions.filter(
+    (q) =>
+      q.type !== 'essay' &&
+      (!q.answerConfirmed ||
+        q.answerProvenance?.status === 'missing' ||
+        q.answerProvenance?.status === 'needs-review' ||
+        q.answerProvenance?.status === 'conflict' ||
+        q.answerProvenance?.status === 'unsupported')
+  ).length;
+
+  const canExportDraft =
+    exam.questions.length > 0 && blockingStructuralReasons.length === 0;
+
+  const warningMessage = !canExportDraft
+    ? 'BLOCK OFFICIAL EXPORT — DOCUMENT INTEGRITY FAILED: Đề còn lỗi công thức, phương án hoặc tài nguyên không đọc được nên không thể xuất kể cả bản nháp.'
+    : missingOrUnconfirmedAnswerCount > 0 || !exam.confirmedOriginalAnswers
+    ? `Bản nháp học sinh KHÔNG kèm bảng đáp án (còn ${missingOrUnconfirmedAnswerCount} câu chưa xác nhận đáp án). Chỉ dùng để rà soát bản in; không dùng để chấm OMR hoặc xuất ZIP chính thức.`
+    : 'Đề đã đủ điều kiện xuất chính thức (bạn vẫn có thể xuất bản nháp không kèm đáp án nếu muốn).';
+
+  return {
+    canExportDraft,
+    blockingStructuralReasons,
+    missingOrUnconfirmedAnswerCount,
+    warningMessage,
+    report: pre,
+  };
+}
+

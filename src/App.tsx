@@ -22,6 +22,7 @@ import {
   duplicateMathExam,
   getSnapshotSummary,
   initializeDatabase,
+  initializeExamGeneratorStore,
   listCanvasBoards,
   listCanvasEdges,
   listCanvasNodes,
@@ -32,7 +33,7 @@ import {
   listMathExams,
   listResources,
   listWorkflows,
-  loadConnectedWorkflowContext,
+  loadConnectedWorkflowStore,
   loadExamFormTemplates,
   normalizeLegacyLessonPack,
   replaceAllFromBackup,
@@ -43,7 +44,7 @@ import {
   saveCanvasEdge,
   saveCanvasNode,
   saveCanvasViewSettings,
-  saveConnectedWorkflowContext,
+  saveConnectedWorkflowStore,
   saveExamFormTemplates,
   saveJournal,
   saveLessonPack,
@@ -75,16 +76,28 @@ import type { GeneratedExamDraft } from './types/examGenerator';
 import type {
   ConnectedWorkflowContext,
   ConnectedWorkflowStageId,
+  ConnectedWorkflowStore,
+  ConnectedWorkspaceWorkflowSummary,
   DashboardNextStepSuggestion,
+  MathMixerSubView,
   ParsedUniversalCommand,
+  SmartActionItem,
   WorkflowStageEvaluation,
 } from './types/connectedWorkflow';
 import {
+  buildConnectedWorkspaceSummaries,
   computeDashboardNextSteps,
-  createInitialWorkflowContext,
+  computeSmartActionBar,
+  createInitialWorkflowStore,
+  createNewWorkflowInStore,
   evaluateConnectedWorkflowProgress,
+  getActiveWorkflowFromStore,
   patchWorkflowContext,
+  resolveStrictEntityById,
+  switchActiveWorkflow,
+  upsertWorkflowInStore,
 } from './core/connectedWorkflowEngine';
+import { checkExamExportGate } from './core/mathIntegrity';
 import {
   DEFAULT_JOURNALS,
   DEFAULT_RESOURCES,
@@ -241,19 +254,31 @@ export default function App() {
   const [printPreferredFormLabel, setPrintPreferredFormLabel] = useState<string | null>(null);
   const [examMixerPreferredExamId, setExamMixerPreferredExamId] = useState<string | null>(null);
   const [examMixerPreferredStep, setExamMixerPreferredStep] = useState<MathExamStep | null>(null);
+  const [examMixerPreferredSubView, setExamMixerPreferredSubView] =
+    useState<MathMixerSubView | null>(null);
+  const [examMixerPreferredExamCode, setExamMixerPreferredExamCode] = useState<string | null>(null);
   const [examGeneratorPreferredResourceId, setExamGeneratorPreferredResourceId] = useState<string | null>(null);
   const [examGeneratorPreferredTab, setExamGeneratorPreferredTab] = useState<GeneratorTabId | null>(null);
   const [examGeneratorPreferredPrompt, setExamGeneratorPreferredPrompt] = useState<string | null>(null);
   const [examGeneratorPreferredTopic, setExamGeneratorPreferredTopic] = useState<string | null>(null);
+  const [examGeneratorPreferredAction, setExamGeneratorPreferredAction] = useState<
+    'create' | 'index-to-bank' | null
+  >(null);
   const [gradingPreferredExamId, setGradingPreferredExamId] = useState<string | null>(null);
+  const [gradingPreferredSessionId, setGradingPreferredSessionId] = useState<string | null>(null);
   const [gradingPreferredClassName, setGradingPreferredClassName] = useState<string | null>(null);
   const [gradingPreferredTab, setGradingPreferredTab] = useState<GradingTabId | null>(null);
 
-  // Connected Workflow Shared Context (persisted across reload in IndexedDB meta)
-  const [workflowContext, setWorkflowContext] = useState<ConnectedWorkflowContext>(() =>
-    createInitialWorkflowContext()
+  // Connected Workflow Multi-Workflow Store (persisted across reload in IndexedDB meta + localStorage)
+  const [workflowStore, setWorkflowStore] = useState<ConnectedWorkflowStore>(() =>
+    createInitialWorkflowStore()
+  );
+  const workflowContext = useMemo(
+    () => getActiveWorkflowFromStore(workflowStore),
+    [workflowStore]
   );
   const [gradingSessions, setGradingSessions] = useState<GradingSession[]>([]);
+  const [examDrafts, setExamDrafts] = useState<GeneratedExamDraft[]>([]);
   const [examFormTemplates, setExamFormTemplates] = useState<ExamFormTemplate[]>(() =>
     structuredClone(BUILT_IN_EXAM_FORM_PRESETS)
   );
@@ -319,10 +344,14 @@ export default function App() {
         summary: string;
       }
     ) => {
-      setWorkflowContext((prev) => {
-        const next = patchWorkflowContext(prev, patch, historyItem);
-        void saveConnectedWorkflowContext(next);
-        return next;
+      setWorkflowStore((prevStore) => {
+        const current = getActiveWorkflowFromStore(prevStore);
+        const nextCtx = patchWorkflowContext(current, patch, historyItem);
+        const res = upsertWorkflowInStore(prevStore, nextCtx, { setActive: true });
+        if (res.applied) {
+          void saveConnectedWorkflowStore(res.store);
+        }
+        return res.store;
       });
     },
     []
@@ -337,11 +366,15 @@ export default function App() {
       setActiveTabId(res.activeTabId);
       return res.tabs;
     });
-    setWorkflowContext((prev) => {
-      if (prev.lastActiveApp === appId) return prev;
-      const next = patchWorkflowContext(prev, { lastActiveApp: appId });
-      void saveConnectedWorkflowContext(next);
-      return next;
+    setWorkflowStore((prevStore) => {
+      const current = getActiveWorkflowFromStore(prevStore);
+      if (current.lastActiveApp === appId) return prevStore;
+      const nextCtx = patchWorkflowContext(current, { lastActiveApp: appId });
+      const res = upsertWorkflowInStore(prevStore, nextCtx, { setActive: true });
+      if (res.applied) {
+        void saveConnectedWorkflowStore(res.store);
+      }
+      return res.store;
     });
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'auto' });
@@ -425,12 +458,18 @@ export default function App() {
     setLoadErrorInfo(null);
     try {
       const result = await initializeDatabase();
-      const [snap, savedWfCtx, loadedSessions, loadedForms] = await Promise.all([
-        getSnapshotSummary(),
-        loadConnectedWorkflowContext(),
-        listGradingSessions().catch(() => [] as GradingSession[]),
-        loadExamFormTemplates(),
-      ]);
+      const [snap, savedWfStore, loadedSessions, loadedForms, loadedGenStore] =
+        await Promise.all([
+          getSnapshotSummary(),
+          loadConnectedWorkflowStore(),
+          listGradingSessions().catch(() => [] as GradingSession[]),
+          loadExamFormTemplates(),
+          initializeExamGeneratorStore().catch(() => ({
+            bank: [],
+            templates: [],
+            drafts: [] as GeneratedExamDraft[],
+          })),
+        ]);
       setPacks(result.packs);
       setSettings(result.settings);
       setResources(result.resources);
@@ -442,8 +481,9 @@ export default function App() {
       setCanvasEdges(result.canvasEdges);
       setCanvasViewSettings(result.canvasViewSettings);
       setSnapshotSummary(snap);
-      setWorkflowContext(savedWfCtx);
+      setWorkflowStore(savedWfStore);
       setGradingSessions(loadedSessions);
+      setExamDrafts(loadedGenStore.drafts);
       setExamFormTemplates(loadedForms);
       setTemporaryMode(false);
       setStorageBannerError(null);
@@ -1363,25 +1403,35 @@ export default function App() {
     setPaletteOpen(false);
   }, []);
 
-  // Computed Connected Workflow 8-stage progress & real-data Dashboard next steps
+  // Computed Connected Workflow 8-stage progress, Smart Action Bar & Connected Workspace Dashboard
+  const workflowSnapshot = useMemo(
+    () => ({
+      resources,
+      mathExams,
+      gradingSessions,
+      drafts: examDrafts,
+    }),
+    [resources, mathExams, gradingSessions, examDrafts]
+  );
+
   const workflowStages = useMemo(
-    () =>
-      evaluateConnectedWorkflowProgress(workflowContext, {
-        resources,
-        mathExams,
-        gradingSessions,
-      }),
-    [workflowContext, resources, mathExams, gradingSessions]
+    () => evaluateConnectedWorkflowProgress(workflowContext, workflowSnapshot),
+    [workflowContext, workflowSnapshot]
+  );
+
+  const smartActionBar = useMemo(
+    () => computeSmartActionBar(workflowContext, workflowSnapshot, activeApp),
+    [workflowContext, workflowSnapshot, activeApp]
   );
 
   const dashboardNextSteps = useMemo(
-    () =>
-      computeDashboardNextSteps(workflowContext, {
-        resources,
-        mathExams,
-        gradingSessions,
-      }),
-    [workflowContext, resources, mathExams, gradingSessions]
+    () => computeDashboardNextSteps(workflowContext, workflowSnapshot),
+    [workflowContext, workflowSnapshot]
+  );
+
+  const connectedWorkspaceSummaries = useMemo(
+    () => buildConnectedWorkspaceSummaries(workflowStore, workflowSnapshot),
+    [workflowStore, workflowSnapshot]
   );
 
   const handleSyncWorkflowDraft = useCallback(
@@ -1452,7 +1502,15 @@ export default function App() {
 
   const handleOpenPrintStudioWithExam = useCallback(
     (examId: string, formLabel?: string) => {
-      const target = mathExams.find((e) => e.id === examId);
+      const lookup = resolveStrictEntityById(mathExams, examId);
+      if (lookup.missing) {
+        showToast(
+          'error',
+          `Không tìm thấy đề kiểm tra (ID: ${examId}). Hệ thống không tự mở nhầm đề khác.`
+        );
+        return;
+      }
+      const target = lookup.entity;
       setPrintPreferredExamId(examId);
       setPrintPreferredFormLabel(formLabel ?? null);
       if (target) {
@@ -1473,17 +1531,177 @@ export default function App() {
       }
       openApp('print-studio');
     },
-    [mathExams, openApp, updateWorkflowContext, workflowContext.examFormLabel]
+    [mathExams, openApp, showToast, updateWorkflowContext, workflowContext.examFormLabel]
+  );
+
+  const handleOpenGradingStudioGuarded = useCallback(
+    (params: {
+      examId?: string | null;
+      sessionId?: string | null;
+      className?: string | null;
+      tab?: GradingTabId;
+    }) => {
+      if (params.examId) {
+        const lookup = resolveStrictEntityById(mathExams, params.examId);
+        if (lookup.missing) {
+          showToast(
+            'error',
+            `Không tìm thấy đề kiểm tra (ID: ${params.examId}) để chấm OMR.`
+          );
+          setGradingPreferredExamId(params.examId);
+          openApp('grading-studio');
+          return;
+        }
+        if (lookup.entity) {
+          const gate = checkExamExportGate(lookup.entity);
+          if (!gate.canExport && params.tab !== 'azota') {
+            showToast(
+              'error',
+              gate.blockingReasons[0] ??
+                `Đề "${lookup.entity.title}" chưa đạt kiểm chứng toàn vẹn — vui lòng xác nhận đáp án & trộn mã đề trước khi chấm OMR.`
+            );
+            setExamMixerPreferredExamId(lookup.entity.id);
+            setExamMixerPreferredStep(2);
+            setExamMixerPreferredSubView('answer-studio');
+            setExamMixerPreferredExamCode(null);
+            openApp('math-mixer');
+            return;
+          }
+        }
+        setGradingPreferredExamId(params.examId);
+      }
+      if (params.sessionId !== undefined) {
+        setGradingPreferredSessionId(params.sessionId);
+      }
+      if (params.className) {
+        setGradingPreferredClassName(params.className);
+        updateWorkflowContext({ studentClassId: params.className });
+      }
+      setGradingPreferredTab(params.tab ?? 'sheet-gen');
+      openApp('grading-studio');
+    },
+    [mathExams, openApp, showToast, updateWorkflowContext]
+  );
+
+  const handleExecuteSmartAction = useCallback(
+    (action: SmartActionItem) => {
+      if (action.targetApp === 'resource-vault') {
+        openApp('resource-vault');
+        return;
+      }
+      if (action.targetApp === 'exam-generator') {
+        setExamGeneratorPreferredResourceId(action.resourceId ?? null);
+        setExamGeneratorPreferredAction(null);
+        setExamGeneratorPreferredTab(action.targetGeneratorTab ?? 'natural-language');
+        openApp('exam-generator');
+        return;
+      }
+      if (action.targetApp === 'math-mixer') {
+        setExamMixerPreferredExamId(action.examId ?? null);
+        setExamMixerPreferredStep(action.targetStep ?? 2);
+        setExamMixerPreferredSubView(action.targetSubView ?? null);
+        setExamMixerPreferredExamCode(action.examCode ?? null);
+        openApp('math-mixer');
+        return;
+      }
+      if (action.targetApp === 'print-studio') {
+        if (action.examId) {
+          handleOpenPrintStudioWithExam(action.examId);
+        } else {
+          openApp('print-studio');
+        }
+        return;
+      }
+      if (action.targetApp === 'grading-studio') {
+        handleOpenGradingStudioGuarded({
+          examId: action.examId,
+          sessionId: action.gradingSessionId ?? null,
+          className: action.className ?? null,
+          tab: action.targetGradingTab ?? 'sheet-gen',
+        });
+        return;
+      }
+      openApp(action.targetApp);
+    },
+    [handleOpenGradingStudioGuarded, handleOpenPrintStudioWithExam, openApp]
+  );
+
+  const handleSwitchWorkflow = useCallback(
+    (workflowId: string) => {
+      const res = switchActiveWorkflow(workflowStore, workflowId);
+      if (!res.found || !res.workflow) {
+        showToast('error', res.error ?? 'Không tìm thấy phiên quy trình yêu cầu.');
+        return;
+      }
+      setWorkflowStore(res.store);
+      void saveConnectedWorkflowStore(res.store);
+      showToast(
+        'info',
+        `Đã chuyển sang quy trình "${
+          res.workflow.generatedExamTitle ||
+          res.workflow.examDraftTitle ||
+          res.workflow.resourceTitle ||
+          res.workflow.title
+        }".`
+      );
+    },
+    [showToast, workflowStore]
+  );
+
+  const handleStartNewConnectedWorkflow = useCallback(() => {
+    const created = createNewWorkflowInStore(workflowStore);
+    setWorkflowStore(created.store);
+    void saveConnectedWorkflowStore(created.store);
+    setExamGeneratorPreferredResourceId(null);
+    setExamMixerPreferredExamId(null);
+    setExamMixerPreferredSubView(null);
+    setExamMixerPreferredExamCode(null);
+    setGradingPreferredExamId(null);
+    setGradingPreferredSessionId(null);
+    showToast(
+      'info',
+      'Đã tạo phiên quy trình kiểm tra mới (các quy trình cũ vẫn được lưu an toàn).'
+    );
+  }, [showToast, workflowStore]);
+
+  const handleResumeWorkflow = useCallback(
+    (summary: ConnectedWorkspaceWorkflowSummary) => {
+      if (summary.workflow.workflowId !== workflowStore.activeWorkflowId) {
+        const switched = switchActiveWorkflow(workflowStore, summary.workflow.workflowId);
+        if (switched.found) {
+          setWorkflowStore(switched.store);
+          void saveConnectedWorkflowStore(switched.store);
+        }
+      }
+      handleExecuteSmartAction(summary.resumeAction);
+    },
+    [handleExecuteSmartAction, workflowStore]
   );
 
   const handleNavigateWorkflowStage = useCallback(
     (stage: WorkflowStageEvaluation) => {
-      const activeExamId = workflowContext.generatedExamId ?? mathExams[0]?.id ?? null;
+      // Strict ID lookup: không tự mở nhầm mathExams[0] khi workflow đang trỏ tới ID đã bị xóa
+      const strictExam = resolveStrictEntityById(
+        mathExams,
+        workflowContext.generatedExamId
+      );
+      if (strictExam.missing && stage.id !== 'source' && stage.id !== 'select' && stage.id !== 'generate') {
+        showToast(
+          'error',
+          `Đề kiểm tra "${workflowContext.generatedExamTitle || workflowContext.generatedExamId}" không còn tồn tại. Hãy tạo đề mới hoặc chọn lại đề.`
+        );
+        setExamMixerPreferredExamId(workflowContext.generatedExamId ?? null);
+        openApp('math-mixer');
+        return;
+      }
+      const activeExamId = strictExam.entity?.id ?? null;
+
       if (stage.id === 'source') {
         openApp('resource-vault');
         return;
       }
       if (stage.id === 'select' || stage.id === 'generate') {
+        setExamGeneratorPreferredAction(null);
         setExamGeneratorPreferredTab('natural-language');
         openApp('exam-generator');
         return;
@@ -1492,6 +1710,10 @@ export default function App() {
         if (activeExamId) {
           setExamMixerPreferredExamId(activeExamId);
           setExamMixerPreferredStep(2);
+          setExamMixerPreferredSubView(
+            stage.status === 'blocked' ? 'import-doctor' : 'answer-studio'
+          );
+          setExamMixerPreferredExamCode(null);
           openApp('math-mixer');
         } else {
           setExamGeneratorPreferredTab('wizard');
@@ -1502,7 +1724,9 @@ export default function App() {
       if (stage.id === 'mix') {
         if (activeExamId) {
           setExamMixerPreferredExamId(activeExamId);
-          setExamMixerPreferredStep(3);
+          setExamMixerPreferredStep(stage.status === 'blocked' ? 2 : 3);
+          setExamMixerPreferredSubView(stage.status === 'blocked' ? 'import-doctor' : null);
+          setExamMixerPreferredExamCode(null);
         }
         openApp('math-mixer');
         return;
@@ -1516,14 +1740,23 @@ export default function App() {
         return;
       }
       if (stage.id === 'grade' || stage.id === 'summary') {
-        if (activeExamId) {
-          setGradingPreferredExamId(activeExamId);
-        }
-        setGradingPreferredTab(stage.id === 'summary' ? 'gradebook' : 'sheet-gen');
-        openApp('grading-studio');
+        handleOpenGradingStudioGuarded({
+          examId: activeExamId,
+          sessionId: workflowContext.gradingSessionId ?? null,
+          tab: stage.id === 'summary' ? 'gradebook' : 'sheet-gen',
+        });
       }
     },
-    [handleOpenPrintStudioWithExam, mathExams, openApp, workflowContext.generatedExamId]
+    [
+      handleOpenGradingStudioGuarded,
+      handleOpenPrintStudioWithExam,
+      mathExams,
+      openApp,
+      showToast,
+      workflowContext.generatedExamId,
+      workflowContext.generatedExamTitle,
+      workflowContext.gradingSessionId,
+    ]
   );
 
   const handleExecuteNextStep = useCallback(
@@ -1539,21 +1772,26 @@ export default function App() {
       }
       if (targetApp === 'math-mixer' && suggestion.examId) {
         setExamMixerPreferredExamId(suggestion.examId);
-        setExamMixerPreferredStep(2);
+        setExamMixerPreferredStep(suggestion.targetStep ?? 2);
+        setExamMixerPreferredSubView(suggestion.targetSubView ?? null);
+        setExamMixerPreferredExamCode(null);
         openApp('math-mixer');
         return;
       }
       if (targetApp === 'grading-studio' && suggestion.examId) {
-        setGradingPreferredExamId(suggestion.examId);
-        setGradingPreferredTab(
-          suggestion.id.startsWith('next-grade-') ? 'review' : 'sheet-gen'
-        );
-        openApp('grading-studio');
+        handleOpenGradingStudioGuarded({
+          examId: suggestion.examId,
+          sessionId: suggestion.gradingSessionId ?? null,
+          tab:
+            suggestion.targetGradingTab ??
+            (suggestion.id.startsWith('next-grade-') ? 'review' : 'sheet-gen'),
+        });
         return;
       }
       if (targetApp === 'exam-generator' && suggestion.resourceId) {
         const res = resources.find((r) => r.id === suggestion.resourceId);
         setExamGeneratorPreferredResourceId(suggestion.resourceId);
+        setExamGeneratorPreferredAction(null);
         setExamGeneratorPreferredTab('natural-language');
         if (res) {
           updateWorkflowContext(
@@ -1566,7 +1804,13 @@ export default function App() {
       }
       openApp(targetApp);
     },
-    [handleOpenPrintStudioWithExam, openApp, resources, updateWorkflowContext]
+    [
+      handleOpenGradingStudioGuarded,
+      handleOpenPrintStudioWithExam,
+      openApp,
+      resources,
+      updateWorkflowContext,
+    ]
   );
 
   const handleExecuteUniversalCommand = useCallback(
@@ -1579,6 +1823,7 @@ export default function App() {
             updateWorkflowContext({ resourceId: res.id, resourceTitle: res.title });
           }
         }
+        setExamGeneratorPreferredAction(null);
         setExamGeneratorPreferredPrompt(cmd.payload.promptText ?? cmd.payload.rawCommand);
         setExamGeneratorPreferredTab('natural-language');
         openApp('exam-generator');
@@ -1586,46 +1831,86 @@ export default function App() {
         return;
       }
       if (cmd.intent === 'open-bank-topic') {
+        setExamGeneratorPreferredAction(null);
         setExamGeneratorPreferredTopic(cmd.payload.topicQuery ?? '');
         setExamGeneratorPreferredTab('bank');
         openApp('exam-generator');
         return;
       }
-      if (cmd.intent === 'mix-current-exam') {
+      if (
+        cmd.intent === 'mix-current-exam' ||
+        cmd.intent === 'open-latest-exam' ||
+        cmd.intent === 'open-answer-key-studio' ||
+        cmd.intent === 'open-exam-answer-key'
+      ) {
         if (cmd.payload.examId) {
           setExamMixerPreferredExamId(cmd.payload.examId);
         }
-        setExamMixerPreferredStep(3);
-        openApp('math-mixer');
-        showToast(
-          'info',
-          `Đã mở Exam Mixer Pro${cmd.payload.versionCount ? ` (gợi ý ${cmd.payload.versionCount} mã đề)` : ''}.`
+        setExamMixerPreferredStep(
+          cmd.payload.mixerStep ??
+            (cmd.intent === 'mix-current-exam'
+              ? 3
+              : cmd.intent === 'open-exam-answer-key'
+              ? 4
+              : 2)
         );
+        setExamMixerPreferredSubView(cmd.payload.mixerSubView ?? null);
+        setExamMixerPreferredExamCode(cmd.payload.examCode ?? null);
+        openApp('math-mixer');
+        if (cmd.blockedReason) {
+          showToast('info', cmd.blockedReason);
+        } else if (cmd.intent === 'mix-current-exam') {
+          showToast(
+            'info',
+            `Đã mở Exam Mixer Pro${cmd.payload.versionCount ? ` (gợi ý ${cmd.payload.versionCount} mã đề)` : ''}.`
+          );
+        }
         return;
       }
       if (
         cmd.intent === 'create-omr-sheet' ||
         cmd.intent === 'open-latest-grading' ||
+        cmd.intent === 'open-grading-review' ||
+        cmd.intent === 'export-confirmed-gradebook' ||
         cmd.intent === 'open-azota-bridge'
       ) {
-        if (cmd.payload.examId) {
-          setGradingPreferredExamId(cmd.payload.examId);
+        if (cmd.blockedReason && cmd.targetApp === 'math-mixer') {
+          showToast('error', cmd.blockedReason);
+          if (cmd.payload.examId) setExamMixerPreferredExamId(cmd.payload.examId);
+          setExamMixerPreferredStep(cmd.payload.mixerStep ?? 2);
+          setExamMixerPreferredSubView(cmd.payload.mixerSubView ?? 'answer-studio');
+          setExamMixerPreferredExamCode(null);
+          openApp('math-mixer');
+          return;
         }
-        if (cmd.payload.className) {
-          setGradingPreferredClassName(cmd.payload.className);
-          updateWorkflowContext({ studentClassId: cmd.payload.className });
+        if (cmd.blockedReason && cmd.intent === 'export-confirmed-gradebook') {
+          showToast('info', cmd.blockedReason);
         }
-        setGradingPreferredTab(
-          cmd.payload.gradingTab ??
-            (cmd.intent === 'open-azota-bridge' ? 'azota' : 'sheet-gen')
-        );
-        openApp('grading-studio');
+        handleOpenGradingStudioGuarded({
+          examId: cmd.payload.examId ?? null,
+          sessionId: cmd.payload.gradingSessionId ?? null,
+          className: cmd.payload.className ?? null,
+          tab:
+            cmd.payload.gradingTab ??
+            (cmd.intent === 'open-azota-bridge'
+              ? 'azota'
+              : cmd.intent === 'open-grading-review'
+              ? 'review'
+              : cmd.intent === 'export-confirmed-gradebook'
+              ? 'export'
+              : 'sheet-gen'),
+        });
         return;
       }
       if (cmd.intent === 'print-exam-form') {
-        const examId = cmd.payload.examId ?? workflowContext.generatedExamId ?? mathExams[0]?.id;
-        if (examId) {
-          handleOpenPrintStudioWithExam(examId, cmd.payload.formLabel);
+        const strictExam = resolveStrictEntityById(
+          mathExams,
+          cmd.payload.examId ?? workflowContext.generatedExamId
+        );
+        if (strictExam.entity) {
+          handleOpenPrintStudioWithExam(strictExam.entity.id, cmd.payload.formLabel);
+        } else if (strictExam.missing) {
+          showToast('error', 'Đề kiểm tra gắn với quy trình không còn tồn tại để mở in.');
         } else {
           openApp('print-studio');
         }
@@ -1634,6 +1919,7 @@ export default function App() {
       openApp(cmd.targetApp);
     },
     [
+      handleOpenGradingStudioGuarded,
       handleOpenPrintStudioWithExam,
       mathExams,
       openApp,
@@ -1820,14 +2106,13 @@ export default function App() {
           <ConnectedWorkflowBar
             activeApp={activeApp}
             context={workflowContext}
+            allWorkflows={workflowStore.workflows}
             stages={workflowStages}
+            smartActionBar={smartActionBar}
             onNavigateStage={handleNavigateWorkflowStage}
-            onResetWorkflow={() => {
-              const fresh = createInitialWorkflowContext();
-              setWorkflowContext(fresh);
-              void saveConnectedWorkflowContext(fresh);
-              showToast('info', 'Đã tạo phiên quy trình kiểm tra mới (dữ liệu đã lưu vẫn được giữ nguyên).');
-            }}
+            onExecuteSmartAction={handleExecuteSmartAction}
+            onSwitchWorkflow={handleSwitchWorkflow}
+            onResetWorkflow={handleStartNewConnectedWorkflow}
           />
 
           <div className={activeView === 'desktop' ? 'block' : 'hidden print:hidden'}>
@@ -1837,13 +2122,21 @@ export default function App() {
                 mathExams={mathExams}
                 resources={resources}
                 workflows={workflows}
+                gradingSessions={gradingSessions}
+                examDrafts={examDrafts}
                 canvasBoards={canvasBoards}
                 canvasNodes={canvasNodes}
                 hasActiveUnsavedDraft={lessonStudioHasDraftChanges}
                 nextStepSuggestions={dashboardNextSteps}
+                connectedWorkspaceSummaries={connectedWorkspaceSummaries}
                 onCreateNewPack={handleCreateNew}
                 onOpenApp={openApp}
                 onExecuteNextStep={handleExecuteNextStep}
+                onResumeWorkflow={handleResumeWorkflow}
+                onStartNewConnectedWorkflow={() => {
+                  handleStartNewConnectedWorkflow();
+                  openApp('resource-vault');
+                }}
                 onOpenToolsHub={openToolsHub}
                 onOpenLibrary={() => {
                   setLessonStudioMode('library');
@@ -1937,17 +2230,21 @@ export default function App() {
                   onOpenExamMixer={(examId) => {
                     setExamMixerPreferredExamId(examId);
                     setExamMixerPreferredStep(5);
+                    setExamMixerPreferredSubView(null);
+                    setExamMixerPreferredExamCode(null);
                     openApp('math-mixer');
                   }}
                   onOpenGradingStudio={(examId) => {
-                    setGradingPreferredExamId(examId);
-                    setGradingPreferredTab('sheet-gen');
-                    openApp('grading-studio');
+                    handleOpenGradingStudioGuarded({
+                      examId,
+                      tab: 'sheet-gen',
+                    });
                   }}
                   onOpenAzotaBridge={(examId) => {
-                    setGradingPreferredExamId(examId);
-                    setGradingPreferredTab('azota');
-                    openApp('grading-studio');
+                    handleOpenGradingStudioGuarded({
+                      examId,
+                      tab: 'azota',
+                    });
                   }}
                   onExamPrinted={(examId, formLabel, formId) => {
                     const target = mathExams.find((e) => e.id === examId);
@@ -2015,6 +2312,7 @@ export default function App() {
               <ErrorBoundary moduleName="Resource Vault" packs={packs} settings={settings}>
                 <ResourceVaultApp
                   resources={resources}
+                  mathExams={mathExams}
                   activePack={activePack}
                   temporaryMode={temporaryMode}
                   onSaveResource={handleSaveResource}
@@ -2026,6 +2324,7 @@ export default function App() {
                   onCreateExamFromResource={(resourceId) => {
                     const res = resources.find((r) => r.id === resourceId);
                     setExamGeneratorPreferredResourceId(resourceId);
+                    setExamGeneratorPreferredAction('create');
                     setExamGeneratorPreferredTab('natural-language');
                     if (res) {
                       updateWorkflowContext(
@@ -2041,6 +2340,37 @@ export default function App() {
                       );
                     }
                     openApp('exam-generator');
+                  }}
+                  onIndexResourceToBank={(resourceId) => {
+                    const res = resources.find((r) => r.id === resourceId);
+                    setExamGeneratorPreferredResourceId(resourceId);
+                    setExamGeneratorPreferredAction('index-to-bank');
+                    setExamGeneratorPreferredTab('bank');
+                    if (res) {
+                      updateWorkflowContext(
+                        {
+                          resourceId: res.id,
+                          resourceTitle: res.title,
+                        },
+                        {
+                          stage: 'select',
+                          appId: 'resource-vault',
+                          summary: `Phân tích & thêm câu hỏi từ "${res.title}" vào Ngân hàng`,
+                        }
+                      );
+                    }
+                    openApp('exam-generator');
+                  }}
+                  onOpenLinkedExam={(examId) => {
+                    const target = mathExams.find((e) => e.id === examId);
+                    setExamMixerPreferredExamId(examId);
+                    setExamMixerPreferredStep(2);
+                    setExamMixerPreferredSubView(null);
+                    setExamMixerPreferredExamCode(null);
+                    if (target) {
+                      handleSyncWorkflowExam(target);
+                    }
+                    openApp('math-mixer');
                   }}
                   onShowToast={showToast}
                 />
@@ -2124,22 +2454,29 @@ export default function App() {
                   preferredTab={examGeneratorPreferredTab}
                   preferredPrompt={examGeneratorPreferredPrompt}
                   preferredTopicFilter={examGeneratorPreferredTopic}
+                  preferredAction={examGeneratorPreferredAction}
                   onClearPreferredResource={() => {
                     setExamGeneratorPreferredResourceId(null);
                     setExamGeneratorPreferredPrompt(null);
                     setExamGeneratorPreferredTopic(null);
+                    setExamGeneratorPreferredAction(null);
                   }}
                   onSyncWorkflowDraft={handleSyncWorkflowDraft}
+                  onDraftsChanged={setExamDrafts}
+                  onOpenResourceVault={() => openApp('resource-vault')}
                   onSaveMathExam={handleSaveMathExam}
                   onOpenExamMixerWithExam={(examId) => {
                     setExamMixerPreferredExamId(examId);
                     setExamMixerPreferredStep(2);
+                    setExamMixerPreferredSubView(null);
+                    setExamMixerPreferredExamCode(null);
                     openApp('math-mixer');
                   }}
                   onOpenGradingStudioWithExam={(examId) => {
-                    setGradingPreferredExamId(examId);
-                    setGradingPreferredTab('sheet-gen');
-                    openApp('grading-studio');
+                    handleOpenGradingStudioGuarded({
+                      examId,
+                      tab: 'sheet-gen',
+                    });
                   }}
                   onNotify={showToast}
                 />
@@ -2154,15 +2491,23 @@ export default function App() {
                   mathExams={mathExams}
                   preferredExamId={examMixerPreferredExamId}
                   preferredStep={examMixerPreferredStep}
+                  preferredStep2SubView={examMixerPreferredSubView}
+                  preferredExamCode={examMixerPreferredExamCode}
+                  onClearPreferredTarget={() => {
+                    setExamMixerPreferredExamId(null);
+                    setExamMixerPreferredSubView(null);
+                    setExamMixerPreferredExamCode(null);
+                  }}
                   onSaveMathExam={handleSaveMathExam}
                   onDeleteMathExam={handleDeleteMathExam}
                   onDuplicateMathExam={handleDuplicateMathExam}
                   onShowToast={showToast}
                   onOpenPrintStudio={(examId) => handleOpenPrintStudioWithExam(examId)}
                   onOpenGradingStudio={(examId) => {
-                    setGradingPreferredExamId(examId);
-                    setGradingPreferredTab('sheet-gen');
-                    openApp('grading-studio');
+                    handleOpenGradingStudioGuarded({
+                      examId,
+                      tab: 'sheet-gen',
+                    });
                   }}
                   onWorkflowExamSynced={handleSyncWorkflowExam}
                 />
@@ -2176,9 +2521,18 @@ export default function App() {
                 <SmartGradingStudioApp
                   mathExams={mathExams}
                   preferredExamId={gradingPreferredExamId}
+                  preferredSessionId={gradingPreferredSessionId}
                   preferredClassName={gradingPreferredClassName}
                   preferredTab={gradingPreferredTab}
-                  onOpenExamMixer={() => openApp('math-mixer')}
+                  onOpenExamMixer={(examId) => {
+                    if (examId) {
+                      setExamMixerPreferredExamId(examId);
+                      setExamMixerPreferredStep(2);
+                      setExamMixerPreferredSubView('answer-studio');
+                      setExamMixerPreferredExamCode(null);
+                    }
+                    openApp('math-mixer');
+                  }}
                   onSaveMathExam={handleSaveMathExam}
                   onSessionsChanged={handleSyncGradingSessions}
                   onNotify={showToast}

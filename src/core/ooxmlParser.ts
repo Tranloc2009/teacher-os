@@ -65,6 +65,7 @@ export interface DocxExtractionResult {
   unresolvedOleDetails?: DocxUnresolvedOleDetail[];
   legacyOleProgIds?: string[];
   unsupportedMediaCount?: number;
+  unsupportedMediaNames?: string[];
   convertedWmfMediaCount?: number;
   tableCount?: number;
   supportedImageCount?: number;
@@ -1027,6 +1028,8 @@ function extractParagraphContent(
   let oleDecodedLatexCount = 0;
   let unresolvedOleCount = 0;
 
+  const unrenderableTargets: string[] = [];
+
   const attachRelId = (rId: string): boolean => {
     const resolved = resolveImageAssetByRelId(rId, ctx, paragraphLocation);
     if (!resolved) return false;
@@ -1038,6 +1041,9 @@ function extractParagraphContent(
       return true;
     } else {
       ctx.unsupportedMediaRefs.add(resolved.target);
+      unrenderableTargets.push(resolved.target);
+      const fileName = resolved.target.split('/').pop() ?? resolved.target;
+      text += ` [TÀI_NGUYÊN_UNRENDERABLE:${fileName}] `;
       return false;
     }
   };
@@ -1046,25 +1052,51 @@ function extractParagraphContent(
     if (node.type === 'text') return;
     const tag = node.tag ?? '';
 
-    // Handle mc:AlternateContent cleanly: prefer mc:Choice, only walk mc:Fallback if Choice yielded no content/media
+    // Handle mc:AlternateContent cleanly: prefer mc:Choice, fallback if Choice yielded no valid content/media (or only UNRENDERABLE)
     if (tag === 'mc:AlternateContent') {
       const choice = findChildren(node, 'mc:Choice')[0];
       const fallback = findChildren(node, 'mc:Fallback')[0];
-      const beforeTextLen = text.length;
+      const beforeText = text;
       const beforeAssets = assetIds.length;
       const beforeOmml = ommlFragments.length;
+      const beforeUnrenderable = unrenderableTargets.length;
       if (choice) {
         for (const ch of choice.children ?? []) {
           walkParagraphNode(ch);
         }
       }
-      const choiceYieldedSomething =
-        text.length > beforeTextLen ||
-        assetIds.length > beforeAssets ||
-        ommlFragments.length > beforeOmml;
-      if (!choiceYieldedSomething && fallback) {
+      const addedText = text.slice(beforeText.length);
+      const addedOnlyUnrenderable =
+        unrenderableTargets.length > beforeUnrenderable &&
+        assetIds.length === beforeAssets &&
+        ommlFragments.length === beforeOmml &&
+        addedText.replace(/\[TÀI_NGUYÊN_UNRENDERABLE:[^\]]+\]/g, '').trim().length === 0;
+
+      const choiceYieldedValid =
+        !addedOnlyUnrenderable &&
+        (text.length > beforeText.length ||
+          assetIds.length > beforeAssets ||
+          ommlFragments.length > beforeOmml);
+
+      if (!choiceYieldedValid && fallback) {
+        const choiceSnapshotText = text;
+        const choiceAddedUnrenderable = unrenderableTargets.slice(beforeUnrenderable);
+        text = beforeText;
+        unrenderableTargets.length = beforeUnrenderable;
         for (const fb of fallback.children ?? []) {
           walkParagraphNode(fb);
+        }
+        const fallbackYieldedValid =
+          assetIds.length > beforeAssets ||
+          ommlFragments.length > beforeOmml ||
+          text.slice(beforeText.length).replace(/\[TÀI_NGUYÊN_UNRENDERABLE:[^\]]+\]/g, '').trim().length > 0;
+        if (fallbackYieldedValid) {
+          for (const t of choiceAddedUnrenderable) {
+            ctx.unsupportedMediaRefs.delete(t);
+          }
+        } else if (addedOnlyUnrenderable) {
+          text = choiceSnapshotText;
+          unrenderableTargets.push(...choiceAddedUnrenderable);
         }
       }
       return;
@@ -1074,7 +1106,11 @@ function extractParagraphContent(
       ctx.ommlCounter.count += 1;
       const frag = convertOmmlNodeToLatex(node, `omml-${ctx.ommlCounter.count}`);
       ommlFragments.push(frag);
-      text += frag.latex || '[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]';
+      const ommlChunk = frag.latex || '[CÔNG_THỨC_OMML_CẦN_KIỂM_TRA]';
+      if (text.endsWith('$') && ommlChunk.startsWith('$')) {
+        text += ' ';
+      }
+      text += ommlChunk;
       if (frag.complexFallback) {
         ctx.warnings.push(
           `Công thức OMML #${ctx.ommlCounter.count} tại ${paragraphLocation} có cấu trúc phức tạp — cần giáo viên rà soát lại phần hiển thị.`
@@ -1093,6 +1129,9 @@ function extractParagraphContent(
       if (res.unresolved) {
         hasLegacyOleEquation = true;
         unresolvedOleCount += 1;
+      }
+      if (text.endsWith('$') && res.replacementText.startsWith('$')) {
+        text += ' ';
       }
       text += res.replacementText;
       return;
@@ -1618,6 +1657,9 @@ export async function extractDocxDocument(
     unresolvedOleDetails: ctx.oleCounter.unresolvedDetails,
     legacyOleProgIds: Array.from(ctx.oleCounter.progIds),
     unsupportedMediaCount: ctx.unsupportedMediaRefs.size,
+    unsupportedMediaNames: Array.from(ctx.unsupportedMediaRefs).map(
+      (t) => t.split('/').pop() ?? t
+    ),
     convertedWmfMediaCount: ctx.convertedWmfMediaCount.count,
     tableCount: tableOrdinal,
     supportedImageCount: ctx.imageCounter.count,

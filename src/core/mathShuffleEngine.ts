@@ -857,9 +857,16 @@ function mixSingleQuestion(
     const origOpts = cloned.options ?? [];
     const depReasons = detectDependentOptions(origOpts);
     const canShuffleAllOpts =
-      rules.shuffleMcqOptions && !orig.lockOptionShuffle && depReasons.length === 0;
+      rules.shuffleMcqOptions &&
+      !orig.lockOptionShuffle &&
+      !orig.optionParseIncomplete &&
+      depReasons.length === 0;
 
-    if (rules.shuffleMcqOptions && depReasons.length > 0 && !orig.lockOptionShuffle) {
+    if (rules.shuffleMcqOptions && orig.optionParseIncomplete) {
+      warnings.push(
+        `Câu ${newOrderNumber} (${orig.code}) khóa đảo phương án vì OPTION_PARSE_INCOMPLETE (${orig.optionParseReason ?? 'thiếu phương án A/B/C/D'}).`
+      );
+    } else if (rules.shuffleMcqOptions && depReasons.length > 0 && !orig.lockOptionShuffle) {
       warnings.push(
         `Câu ${newOrderNumber} (${orig.code}) giữ nguyên thứ tự A/B/C/D vì: ${depReasons[0]}.`
       );

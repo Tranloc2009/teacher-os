@@ -118,17 +118,28 @@ export function PrintStudioApp({
   const [exportFormat, setExportFormat] = useState<ExportFormatId>('pdf');
   const tutorial = useOptionalTutorial();
 
+  const [missingPreferredExamId, setMissingPreferredExamId] = useState<string | null>(null);
+
   useEffect(() => {
-    if (preferredExamId && mathExams.some((e) => e.id === preferredExamId)) {
+    if (!preferredExamId) {
+      setMissingPreferredExamId(null);
+      return;
+    }
+    if (mathExams.some((e) => e.id === preferredExamId)) {
       setSelectedExamId(preferredExamId);
+      setSourceMode('math-exam');
+      setExamSubMode('form-designer');
+      setMissingPreferredExamId(null);
+    } else {
+      setMissingPreferredExamId(preferredExamId);
       setSourceMode('math-exam');
     }
   }, [preferredExamId, mathExams]);
 
-  const activeExam = useMemo(
-    () => mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0] ?? null,
-    [mathExams, selectedExamId]
-  );
+  const activeExam = useMemo(() => {
+    if (missingPreferredExamId) return null;
+    return mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0] ?? null;
+  }, [mathExams, selectedExamId, missingPreferredExamId]);
 
   useEffect(() => {
     if (!activeExam) {
@@ -358,7 +369,28 @@ export function PrintStudioApp({
       </div>
 
       {/* Connected Exam Print Mode (Exam Mixer Pro -> Exam Form Designer -> Print Studio -> Smart Grading Studio) */}
-      {sourceMode === 'math-exam' && activeExam ? (
+      {sourceMode === 'math-exam' && missingPreferredExamId ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-center space-y-3">
+          <p className="text-sm font-bold text-amber-900">
+            Không tìm thấy đề kiểm tra được yêu cầu (ID: {missingPreferredExamId}).
+          </p>
+          <p className="text-xs text-amber-800">
+            Hệ thống không tự mở nhầm đề khác để tránh xuất sai nội dung hoặc bảng đáp án.
+          </p>
+          {mathExams.length > 0 && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                setMissingPreferredExamId(null);
+                setSelectedExamId(mathExams[0].id);
+              }}
+            >
+              Chọn đề khác trong kho ({mathExams.length} đề)
+            </Button>
+          )}
+        </div>
+      ) : sourceMode === 'math-exam' && activeExam ? (
         <div className="space-y-4">
           <div className="no-print rounded-2xl border border-indigo-200/80 dark:border-indigo-900 bg-white/95 dark:bg-slate-900/90 p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-xs">
             <div className="flex flex-wrap items-center gap-2.5 min-w-0 w-full sm:w-auto">

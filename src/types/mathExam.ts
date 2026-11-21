@@ -136,6 +136,7 @@ export type AnswerProvenanceStatus =
   | 'missing'
   | 'needs-review'
   | 'conflict'
+  | 'unsupported'
   | 'source-matched'
   | 'teacher-confirmed';
 
@@ -377,6 +378,11 @@ export interface MathQuestion {
   sourceTrace?: QuestionSourceTrace;
   /** Cảnh báo bất thường từ bản ghi lưu cũ (ví dụ: 666/6666 trong phần Đúng/Sai hoặc sai kiểu) */
   legacyAnomalyReasons?: string[];
+  /** Cờ phát hiện thiếu phương án A/B/C/D khi nhập — khóa đảo phương án và chặn xuất chính thức */
+  optionParseIncomplete?: boolean;
+  optionParseReason?: string;
+  /** Danh sách tài nguyên ảnh/vector không đọc được (EMF/WDP/WMF lỗi) gắn với câu hỏi */
+  unrenderableMediaRefs?: string[];
   /** Chữ ký nội dung chuẩn hóa để phát hiện câu trùng nội dung khác ID */
   contentSignature?: string;
   /** Truy vết & cổng bảo toàn toán học khi nhập từ PDF hoặc các định dạng đa nguồn */
@@ -863,6 +869,19 @@ export interface MathExamProject {
   };
   /** Đối chiếu số câu khai báo trong đề gốc so với số câu thực tế đọc được theo từng phần */
   sectionCountAudits?: SectionCountAudit[];
+  /** Bản xem trước chỉ-đọc trích từ tài liệu gốc cho Document Import Doctor (không ghi đè file gốc) */
+  sourceDocumentPreview?: {
+    fileName: string;
+    sourceFileHash?: string;
+    importedAt: string;
+    sections: Array<{
+      title: string;
+      paragraphLocation?: string;
+      rawLines: string[];
+    }>;
+    rawLineCount: number;
+    unsupportedMediaNames?: string[];
+  };
   /** Yêu cầu bắt buộc lời giải/đáp số cho câu tự luận khi xuất theo mẫu có đáp án tự luận */
   requireEssayAnswerOnExport?: boolean;
   createdAt: string;

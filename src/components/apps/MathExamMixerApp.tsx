@@ -44,6 +44,7 @@ import {
 } from '../../types/mathExam';
 import {
   auditOriginalExamIntegrity,
+  checkDraftExportGate,
   checkExamExportGate,
   computeLockStats,
   createOriginalExamSnapshot,
@@ -73,7 +74,11 @@ import {
 import {
   buildAnswerKeyDocxBuffer,
   buildConsolidatedAnswerCsv,
+  buildDraftStudentExamDocxBuffer,
+  buildExamWithSolutionsDocxBuffer,
   buildMixedExamJsonExportPayload,
+  buildPerCodeAnswerKeyDocxBuffer,
+  buildSourceToOutputTraceabilityReport,
   buildStudentExamDocxBuffer,
   exportMixedExamZipBundle,
   verifyExportedAnswerKeyDocxBuffer,
@@ -87,6 +92,8 @@ import {
 import { createEmptyMathExamProject } from '../../data/demoMathExams';
 import { createId } from '../../db/database';
 import { MathExamEditor } from '../math/MathExamEditor';
+import { AnswerKeyStudioPanel } from '../math/AnswerKeyStudioPanel';
+import { DocumentImportDoctorPanel } from '../math/DocumentImportDoctorPanel';
 import { MathExamPrintPreview } from '../math/MathExamPrintPreview';
 import {
   MathContentRenderer,
@@ -101,6 +108,9 @@ interface MathExamMixerAppProps {
   mathExams: MathExamProject[];
   preferredExamId?: string | null;
   preferredStep?: MathExamStep | null;
+  preferredStep2SubView?: 'editor' | 'import-doctor' | 'answer-studio' | null;
+  preferredExamCode?: string | null;
+  onClearPreferredTarget?: () => void;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onDeleteMathExam: (id: string) => Promise<void>;
   onDuplicateMathExam: (exam: MathExamProject) => Promise<void>;
@@ -131,6 +141,9 @@ export function MathExamMixerApp({
   mathExams,
   preferredExamId,
   preferredStep,
+  preferredStep2SubView,
+  preferredExamCode,
+  onClearPreferredTarget,
   onSaveMathExam,
   onDeleteMathExam,
   onDuplicateMathExam,
@@ -142,21 +155,73 @@ export function MathExamMixerApp({
   const [selectedExamId, setSelectedExamId] = useState<string>(
     preferredExamId || mathExams[0]?.id || ''
   );
-
-  useEffect(() => {
-    if (preferredExamId && mathExams.some((e) => e.id === preferredExamId)) {
-      setSelectedExamId(preferredExamId);
-      setStep(preferredStep ?? 2);
-    } else if (preferredStep) {
-      setStep(preferredStep);
-    }
-  }, [preferredExamId, preferredStep, mathExams]);
   const [step, setStep] = useState<MathExamStep>(1);
+  const [step2Tab, setStep2Tab] = useState<'editor' | 'import-doctor' | 'answer-studio'>('editor');
+  const [doctorQuestionId, setDoctorQuestionId] = useState<string | null>(null);
+  const [draftConfirmPending, setDraftConfirmPending] = useState(false);
   const [selectedCodeTab, setSelectedCodeTab] = useState<string>('');
   const [compareCodeTab, setCompareCodeTab] = useState<string>('');
   const [step4ViewMode, setStep4ViewMode] = useState<
     'compare' | 'compare-codes' | 'answer-matrix'
   >('compare');
+  const [missingPreferredExamId, setMissingPreferredExamId] = useState<string | null>(null);
+  const [missingPreferredCodeNotice, setMissingPreferredCodeNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (preferredExamId) {
+      const exactExam = mathExams.find((e) => e.id === preferredExamId);
+      if (exactExam) {
+        setSelectedExamId(exactExam.id);
+        setMissingPreferredExamId(null);
+        setStep(preferredStep ?? 2);
+        if (preferredStep2SubView) {
+          setStep2Tab(preferredStep2SubView);
+        }
+        if (preferredExamCode) {
+          const hasCode = exactExam.generatedVersions.some(
+            (v) => v.code === preferredExamCode
+          );
+          if (hasCode) {
+            setSelectedCodeTab(preferredExamCode);
+            setStep(4);
+            setStep4ViewMode('answer-matrix');
+            setMissingPreferredCodeNotice(null);
+          } else {
+            setMissingPreferredCodeNotice(
+              `Mã đề ${preferredExamCode} chưa tồn tại trong "${exactExam.title}". Hãy trộn mã đề ở Bước 3 trước khi xem bảng đáp án mã ${preferredExamCode}.`
+            );
+          }
+        } else {
+          setMissingPreferredCodeNotice(null);
+        }
+      } else {
+        setMissingPreferredExamId(preferredExamId);
+      }
+    } else {
+      setMissingPreferredExamId(null);
+      if (preferredStep) {
+        setStep(preferredStep);
+      }
+      if (preferredStep2SubView) {
+        setStep2Tab(preferredStep2SubView);
+      }
+      if (preferredExamCode) {
+        const currentExam = mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0];
+        if (currentExam?.generatedVersions.some((v) => v.code === preferredExamCode)) {
+          setSelectedCodeTab(preferredExamCode);
+          setStep(4);
+          setStep4ViewMode('answer-matrix');
+          setMissingPreferredCodeNotice(null);
+        } else {
+          setMissingPreferredCodeNotice(
+            `Không tìm thấy mã đề ${preferredExamCode} trong đề đang mở.`
+          );
+        }
+      } else {
+        setMissingPreferredCodeNotice(null);
+      }
+    }
+  }, [preferredExamId, preferredStep, preferredStep2SubView, preferredExamCode, mathExams]);
   const [codeBatchPage, setCodeBatchPage] = useState<number>(0);
   const [mixErrors, setMixErrors] = useState<string[]>([]);
   const [mixWarnings, setMixWarnings] = useState<string[]>([]);
@@ -255,6 +320,23 @@ export function MathExamMixerApp({
 
   const exportGate = useMemo(
     () => (activeExam ? checkExamExportGate(activeExam) : null),
+    [activeExam]
+  );
+
+  const draftExportGate = useMemo(
+    () => (activeExam ? checkDraftExportGate(activeExam) : null),
+    [activeExam]
+  );
+
+  const hasSourceSolutions = useMemo(
+    () =>
+      Boolean(
+        activeExam?.questions.some(
+          (q) =>
+            Boolean(q.solutionGuide?.rawSource?.trim()) ||
+            Boolean(q.essayParts?.some((p) => p.solutionOutline?.rawSource?.trim()))
+        )
+      ),
     [activeExam]
   );
 
@@ -550,6 +632,115 @@ export function MathExamMixerApp({
     }
   };
 
+  const handleExportPerCodeAnswerDocx = async (code: string) => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất Đáp án theo mã bị chặn do lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    const ver = activeExam.generatedVersions.find((v) => v.code === code);
+    if (!ver) return;
+    setExportBusy(`percode-ans-${ver.code}`);
+    try {
+      const bytes = await buildPerCodeAnswerKeyDocxBuffer(activeExam, ver);
+      const bufferCopy = new Uint8Array(bytes).buffer;
+      triggerBlobDownload(
+        new Blob([bufferCopy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        `Dap_an_${ver.code}.docx`
+      );
+      onShowToast('success', `Đã xuất file Đáp án riêng Mã đề ${ver.code} (Dap_an_${ver.code}.docx).`);
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể xuất file đáp án theo mã đề.'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportExamWithSolutionsDocx = async (code: string) => {
+    if (!activeExam || !exportGate?.canExport) {
+      onShowToast(
+        'error',
+        exportGate?.blockingReasons[0] ?? 'Xuất Đề kèm lời giải bị chặn do lỗi toàn vẹn BLOCKED.'
+      );
+      return;
+    }
+    const ver = activeExam.generatedVersions.find((v) => v.code === code);
+    if (!ver) return;
+    setExportBusy(`sol-docx-${ver.code}`);
+    try {
+      const bytes = await buildExamWithSolutionsDocxBuffer(activeExam, ver);
+      const bufferCopy = new Uint8Array(bytes).buffer;
+      triggerBlobDownload(
+        new Blob([bufferCopy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        `De_kem_loi_giai_${ver.code}.docx`
+      );
+      onShowToast('success', `Đã xuất Đề kèm lời giải gốc Mã ${ver.code}.docx.`);
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể xuất Đề kèm lời giải.'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportDraftDocx = async () => {
+    if (!activeExam || !draftExportGate?.canExportDraft) {
+      onShowToast(
+        'error',
+        draftExportGate?.warningMessage ??
+          'BLOCK OFFICIAL EXPORT — DOCUMENT INTEGRITY FAILED.'
+      );
+      return;
+    }
+    setExportBusy('draft-docx');
+    try {
+      const bytes = await buildDraftStudentExamDocxBuffer(
+        activeExam,
+        activeVersion ?? undefined
+      );
+      const bufferCopy = new Uint8Array(bytes).buffer;
+      triggerBlobDownload(
+        new Blob([bufferCopy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        `Ban_nhap_khong_dap_an_${activeExam.id}.docx`
+      );
+      setDraftConfirmPending(false);
+      onShowToast(
+        'info',
+        'Đã xuất Bản nháp học sinh KHÔNG kèm đáp án (.DOCX). Chỉ dùng rà soát in ấn.'
+      );
+    } catch (err) {
+      onShowToast(
+        'error',
+        err instanceof Error ? err.message : 'Không thể xuất bản nháp DOCX.'
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const handleExportTraceabilityJson = () => {
+    if (!activeExam || activeExam.generatedVersions.length === 0) return;
+    const payload = buildSourceToOutputTraceabilityReport(activeExam);
+    triggerBlobDownload(
+      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }),
+      `Bao_cao_truy_vet_nguon_${activeExam.id}.json`
+    );
+    onShowToast('success', 'Đã tải Báo cáo truy vết nguồn-đầu-ra (QA Traceability JSON).');
+  };
+
   if (!activeExam) {
     return (
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -583,6 +774,54 @@ export function MathExamMixerApp({
   return (
     <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 space-y-6">
       <div className="no-print space-y-6">
+        {missingPreferredExamId && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/50 px-4 py-3 text-xs text-amber-950 dark:text-amber-200"
+          >
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
+              <div>
+                <p className="font-bold">
+                  Không tìm thấy đề kiểm tra được yêu cầu (ID: {missingPreferredExamId})
+                </p>
+                <p className="mt-0.5 text-amber-800 dark:text-amber-300">
+                  Đề kiểm tra này có thể đã bị xóa. Bạn có thể chọn thủ công một đề khác bên dưới hoặc tạo đề mới.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setMissingPreferredExamId(null);
+                onClearPreferredTarget?.();
+              }}
+              className="rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200"
+            >
+              Đã hiểu
+            </button>
+          </div>
+        )}
+
+        {missingPreferredCodeNotice && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-[#EEF0FF]/90 dark:bg-indigo-950/50 px-4 py-3 text-xs text-indigo-950 dark:text-indigo-200"
+          >
+            <span>{missingPreferredCodeNotice}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setMissingPreferredCodeNotice(null);
+                onClearPreferredTarget?.();
+              }}
+              className="rounded-lg border border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold"
+            >
+              Đóng
+            </button>
+          </div>
+        )}
+
         <ContextualAcademyBar
           tutorialId="tutorial.math-mixer"
           label="Math Exam Mixer"
@@ -624,7 +863,7 @@ export function MathExamMixerApp({
                   }}
                 >
                   <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Mở Print Studio</span>
+                  <span>Thiết kế mẫu đề</span>
                 </Button>
               )}
 
@@ -632,7 +871,18 @@ export function MathExamMixerApp({
                 <Button
                   variant="primary"
                   size="sm"
+                  disabled={!exportGate?.canExport}
                   onClick={() => {
+                    if (!exportGate?.canExport) {
+                      onShowToast(
+                        'error',
+                        exportGate?.blockingReasons[0] ??
+                          'Không thể chuyển sang Smart Grading Studio OMR khi đề chưa xác nhận đáp án gốc hoặc đang BLOCKED.'
+                      );
+                      setStep(2);
+                      setStep2Tab('answer-studio');
+                      return;
+                    }
                     onWorkflowExamSynced?.(activeExam);
                     onOpenGradingStudio(activeExam.id);
                   }}
@@ -826,15 +1076,99 @@ export function MathExamMixerApp({
         )}
       </div>
 
-      {/* Step 1 & Step 2 */}
-      {(step === 1 || step === 2) && (
+      {/* Step 1 */}
+      {step === 1 && (
         <MathExamEditor
           exam={activeExam}
-          stepMode={step}
+          stepMode={1}
           integrityIssues={originalIssues}
           onChangeExam={handleExamChange}
           onGoToStep={setStep}
         />
+      )}
+
+      {/* Step 2: Editor + Document Import Doctor + Answer Key Studio */}
+      {step === 2 && (
+        <div className="space-y-4">
+          <div className="no-print flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900 px-3.5 py-2.5 shadow-sm">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { id: 'editor', label: 'Soạn & Rà soát đề' },
+                  { id: 'import-doctor', label: 'Document Import Doctor' },
+                  { id: 'answer-studio', label: 'Answer Key Studio' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setStep2Tab(tab.id)}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
+                    step2Tab === tab.id
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              {originalIssues.filter((i) => i.severity === 'error').length === 0
+                ? 'Sẵn sàng chuyển sang Bước 3 trộn đề'
+                : `${originalIssues.filter((i) => i.severity === 'error').length} lỗi chặn (BLOCKED) cần xử lý trước khi xuất chính thức`}
+            </div>
+          </div>
+
+          {step2Tab === 'editor' && (
+            <MathExamEditor
+              exam={activeExam}
+              stepMode={2}
+              integrityIssues={originalIssues}
+              onChangeExam={handleExamChange}
+              onGoToStep={setStep}
+            />
+          )}
+
+          {step2Tab === 'import-doctor' && (
+            <DocumentImportDoctorPanel
+              exam={activeExam}
+              initialQuestionId={doctorQuestionId}
+              onEditQuestion={() => setStep2Tab('editor')}
+              onOpenAnswerStudio={() => setStep2Tab('answer-studio')}
+              onConfirmAndProceed={() => {
+                const blockingCount = originalIssues.filter((i) => i.severity === 'error').length;
+                if (blockingCount > 0 || !activeExam.confirmedOriginalAnswers) {
+                  setStep2Tab('answer-studio');
+                  onShowToast(
+                    'info',
+                    blockingCount > 0
+                      ? `Còn ${blockingCount} lỗi cần xử lý. Đã chuyển sang Answer Key Studio để hoàn tất xác nhận đáp án.`
+                      : 'Hãy xác nhận toàn bộ đáp án gốc trước khi trộn đề.'
+                  );
+                } else {
+                  setStep(3);
+                  onShowToast('success', 'Đề đã đạt kiểm tra toàn vẹn — chuyển sang Bước 3 trộn mã đề.');
+                }
+              }}
+            />
+          )}
+
+          {step2Tab === 'answer-studio' && (
+            <AnswerKeyStudioPanel
+              exam={activeExam}
+              onUpdateExam={handleExamChange}
+              onInspectQuestion={(qId) => {
+                setDoctorQuestionId(qId);
+                setStep2Tab('import-doctor');
+              }}
+              onEditQuestion={() => setStep2Tab('editor')}
+              onToast={(msg, tone) =>
+                onShowToast(tone === 'warning' ? 'info' : tone ?? 'info', msg)
+              }
+            />
+          )}
+        </div>
       )}
 
       {/* Step 3: Mix Rules Configuration */}
@@ -2602,6 +2936,38 @@ export function MathExamMixerApp({
                       </button>
                     )}
 
+                    {activeVersion && (
+                      <button
+                        type="button"
+                        disabled={!canExport || exportBusy !== null}
+                        onClick={() => void handleExportPerCodeAnswerDocx(activeVersion.code)}
+                        className="inline-flex items-center gap-1.5 rounded-[10px] border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-emerald-900 dark:text-emerald-200 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportBusy === `percode-ans-${activeVersion.code}`
+                            ? 'Đang tạo...'
+                            : `Đáp án Mã ${activeVersion.code} (.DOCX)`}
+                        </span>
+                      </button>
+                    )}
+
+                    {activeVersion && hasSourceSolutions && (
+                      <button
+                        type="button"
+                        disabled={!canExport || exportBusy !== null}
+                        onClick={() => void handleExportExamWithSolutionsDocx(activeVersion.code)}
+                        className="inline-flex items-center gap-1.5 rounded-[10px] border border-purple-300 dark:border-purple-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-purple-900 dark:text-purple-200 hover:bg-purple-50 dark:hover:bg-purple-950/40 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportBusy === `sol-docx-${activeVersion.code}`
+                            ? 'Đang tạo...'
+                            : `Đề kèm lời giải Mã ${activeVersion.code} (.DOCX)`}
+                        </span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       disabled={!canExport || exportBusy !== null}
@@ -2636,7 +3002,7 @@ export function MathExamMixerApp({
                         className="inline-flex items-center gap-1.5 rounded-[10px] border border-indigo-300 dark:border-indigo-700 bg-indigo-50/80 dark:bg-indigo-950/50 px-3 py-2 text-xs font-semibold text-indigo-800 dark:text-indigo-200 hover:bg-indigo-100 whitespace-nowrap"
                       >
                         <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>In theo mẫu A4 (Print Studio)</span>
+                        <span>Thiết kế mẫu đề &amp; In A4</span>
                       </button>
                     )}
 
@@ -2649,7 +3015,69 @@ export function MathExamMixerApp({
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>JSON</span>
                     </button>
+
+                    <button
+                      type="button"
+                      disabled={exportBusy !== null}
+                      onClick={handleExportTraceabilityJson}
+                      className="inline-flex items-center gap-1.5 rounded-[10px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+                      title="Tải báo cáo truy vết nguồn-đến-đầu-ra (QA Traceability JSON)"
+                    >
+                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Truy vết QA (.JSON)</span>
+                    </button>
                   </div>
+
+                  {/* Draft Export Without Answer Key Gate */}
+                  {!canExport && draftExportGate && (
+                    <div
+                      className={`rounded-lg border p-3 text-xs space-y-2 ${
+                        draftExportGate.canExportDraft
+                          ? 'border-amber-300 dark:border-amber-800 bg-amber-50/80 dark:bg-amber-950/30 text-amber-950 dark:text-amber-200'
+                          : 'border-rose-300 dark:border-rose-800 bg-rose-50/80 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200'
+                      }`}
+                    >
+                      <div className="font-semibold">
+                        {draftExportGate.canExportDraft
+                          ? 'Chế độ Bản nháp không kèm đáp án (Chỉ dùng rà soát đề in)'
+                          : 'BLOCK OFFICIAL EXPORT — DOCUMENT INTEGRITY FAILED'}
+                      </div>
+                      <p className="text-[11px]">{draftExportGate.warningMessage}</p>
+                      {draftExportGate.canExportDraft && !draftConfirmPending && (
+                        <button
+                          type="button"
+                          disabled={exportBusy !== null}
+                          onClick={() => setDraftConfirmPending(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+                        >
+                          <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Xuất bản nháp không kèm đáp án (.DOCX)</span>
+                        </button>
+                      )}
+                      {draftExportGate.canExportDraft && draftConfirmPending && (
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <span className="text-[11px] font-semibold">
+                            Xác nhận xuất bản nháp KHÔNG kèm bảng đáp án và KHÔNG dùng chấm OMR?
+                          </span>
+                          <button
+                            type="button"
+                            disabled={exportBusy !== null}
+                            onClick={() => void handleExportDraftDocx()}
+                            className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-bold text-white hover:bg-amber-700"
+                          >
+                            {exportBusy === 'draft-docx' ? 'Đang tạo...' : 'Xác nhận tải Bản nháp'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDraftConfirmPending(false)}
+                            className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-900 hover:bg-amber-100"
+                          >
+                            Hủy
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {lastExportIntegrity && (
                     <div
@@ -2751,10 +3179,19 @@ export function MathExamMixerApp({
                                 type="button"
                                 disabled={!canExport || exportBusy !== null}
                                 onClick={() => void handleExportSingleDocx(ver.code)}
-                                className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/30 px-2.5 py-1.5 text-[11px] font-medium text-blue-800 dark:text-blue-200 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50"
+                                className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/30 px-2 py-1.5 text-[11px] font-medium text-blue-800 dark:text-blue-200 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50"
                                 title={`Tải Ma_de_${ver.code}.docx`}
                               >
-                                DOCX
+                                Đề
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!canExport || exportBusy !== null}
+                                onClick={() => void handleExportPerCodeAnswerDocx(ver.code)}
+                                className="rounded border border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 px-2 py-1.5 text-[11px] font-medium text-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 disabled:opacity-50"
+                                title={`Tải Dap_an_${ver.code}.docx`}
+                              >
+                                Đáp án
                               </button>
                             </div>
                           </div>

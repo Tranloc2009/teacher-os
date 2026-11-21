@@ -19,7 +19,10 @@ import {
   SearchScopeFilter,
   searchWorkspaceLocally,
 } from '../../core/localSearch';
-import { parseUniversalCommand } from '../../core/connectedWorkflowEngine';
+import {
+  SUPPORTED_UNIVERSAL_COMMANDS,
+  parseUniversalCommand,
+} from '../../core/connectedWorkflowEngine';
 import type {
   ConnectedWorkflowContext,
   ParsedUniversalCommand,
@@ -55,11 +58,14 @@ const SCOPE_TABS: Array<{ id: SearchScopeFilter; label: string }> = [
 ];
 
 const QUICK_WORKFLOW_EXAMPLES = [
-  'Tạo đề Toán 12 từ Resource Vault',
-  'Mở ngân hàng câu hỏi chương Hàm số',
-  'Trộn đề này thành 4 mã',
+  'Mở Resource Vault',
+  'Tạo đề Toán 12 từ tài liệu đang chọn',
+  'Mở đề kiểm tra gần nhất',
+  'Trộn đề hiện tại thành 4 mã',
+  'Mở bảng đáp án mã 101',
   'Tạo phiếu trả lời cho lớp 12A2',
-  'Xuất đề theo mẫu giữa học kỳ',
+  'Mở danh sách bài cần duyệt',
+  'Xuất bảng điểm đã xác nhận',
 ];
 
 export function CommandPalette({
@@ -267,7 +273,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="no-print fixed inset-0 z-50 flex items-start justify-center bg-slate-950/55 p-4 sm:pt-14"
+      className="no-print fixed inset-0 z-[75] flex items-start justify-center bg-slate-950/55 p-4 sm:pt-14"
       role="dialog"
       aria-modal="true"
       aria-labelledby="cmd-palette-label"
@@ -385,8 +391,32 @@ export function CommandPalette({
             className="max-h-[56vh] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80"
           >
             {combinedRows.length === 0 ? (
-              <div className="px-6 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
-                Không có lệnh hoặc tài liệu cục bộ phù hợp. Hệ thống không tự thực thi lệnh mơ hồ hoặc lệnh xóa dữ liệu.
+              <div className="px-5 py-6 space-y-4">
+                <div className="text-center space-y-1">
+                  <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                    Không nhận diện được lệnh hoặc dữ liệu phù hợp với &ldquo;{query.trim()}&rdquo;
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Hệ thống 100% cục bộ không tự thực thi lệnh mơ hồ, lệnh xóa dữ liệu hoặc bỏ qua kiểm chứng. Chọn một lệnh tiếng Việt được hỗ trợ bên dưới:
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {SUPPORTED_UNIVERSAL_COMMANDS.slice(0, 8).map((hint) => (
+                    <button
+                      key={hint.example}
+                      type="button"
+                      onClick={() => setQuery(hint.example)}
+                      className="flex flex-col items-start rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 px-3 py-2 text-left hover:border-[#635BFF] hover:bg-[#F5F6FF] dark:hover:bg-indigo-950/40 transition-colors"
+                    >
+                      <span className="text-xs font-semibold text-[#4338CA] dark:text-indigo-300">
+                        {hint.example}
+                      </span>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-1">
+                        {hint.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
               </div>
             ) : (
               <>
@@ -429,8 +459,18 @@ export function CommandPalette({
                         </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="rounded-md border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-semibold text-[#4338CA] dark:text-indigo-300 whitespace-nowrap">
-                          {cmd.requiresConfirmation ? 'Xác nhận' : cmd.badgeText}
+                        <span
+                          className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap ${
+                            cmd.blockedReason
+                              ? 'border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300'
+                              : 'border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 text-[#4338CA] dark:text-indigo-300'
+                          }`}
+                        >
+                          {cmd.blockedReason
+                            ? cmd.badgeText
+                            : cmd.requiresConfirmation
+                            ? 'Xác nhận'
+                            : cmd.badgeText}
                         </span>
                         <ArrowRight className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
                       </div>

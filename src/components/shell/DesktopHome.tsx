@@ -1,20 +1,26 @@
 import { MouseEvent, useMemo } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
   BarChart3,
   BookOpen,
+  CheckCircle2,
   ChevronRight,
+  Circle,
   Clock,
   FileText,
   Folder,
   GitBranch,
+  GitMerge,
   GraduationCap,
   Layers,
   LayoutGrid,
   MoreHorizontal,
+  Play,
   Plus,
   Rocket,
   Search,
+  ShieldAlert,
   Sparkles,
   Target,
   Zap,
@@ -23,7 +29,12 @@ import { AppId } from '../../core/appRegistry';
 import type { CanvasBoard, CanvasNodeRecord } from '../../types/canvas';
 import { LessonPack, ResourceItem, WorkflowRun } from '../../types/lesson';
 import type { MathExamProject } from '../../types/mathExam';
-import type { DashboardNextStepSuggestion } from '../../types/connectedWorkflow';
+import type { GradingSession } from '../../types/grading';
+import type { GeneratedExamDraft } from '../../types/examGenerator';
+import type {
+  ConnectedWorkspaceWorkflowSummary,
+  DashboardNextStepSuggestion,
+} from '../../types/connectedWorkflow';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
 
 interface DesktopHomeProps {
@@ -31,16 +42,21 @@ interface DesktopHomeProps {
   mathExams: MathExamProject[];
   resources: ResourceItem[];
   workflows: WorkflowRun[];
+  gradingSessions?: GradingSession[];
+  examDrafts?: GeneratedExamDraft[];
   canvasBoards: CanvasBoard[];
   canvasNodes: CanvasNodeRecord[];
   hasActiveUnsavedDraft: boolean;
   nextStepSuggestions?: DashboardNextStepSuggestion[];
+  connectedWorkspaceSummaries?: ConnectedWorkspaceWorkflowSummary[];
   onCreateNewPack: () => void;
   onOpenApp: (appId: AppId) => void;
   onExecuteNextStep?: (
     suggestion: DashboardNextStepSuggestion,
     useSecondary?: boolean
   ) => void;
+  onResumeWorkflow?: (summary: ConnectedWorkspaceWorkflowSummary) => void;
+  onStartNewConnectedWorkflow?: () => void;
   onOpenToolsHub: () => void;
   onOpenLibrary: () => void;
   onOpenPackInStudio: (pack: LessonPack) => void;
@@ -205,13 +221,18 @@ export function DesktopHome({
   mathExams,
   resources,
   workflows,
+  gradingSessions = [],
+  examDrafts = [],
   canvasBoards,
   canvasNodes,
   hasActiveUnsavedDraft,
   nextStepSuggestions = [],
+  connectedWorkspaceSummaries = [],
   onCreateNewPack,
   onOpenApp,
   onExecuteNextStep,
+  onResumeWorkflow,
+  onStartNewConnectedWorkflow,
   onOpenToolsHub,
   onOpenLibrary,
   onOpenPackInStudio,
@@ -219,6 +240,38 @@ export function DesktopHome({
   onOpenPackContextMenu,
 }: DesktopHomeProps) {
   const tutorial = useOptionalTutorial();
+
+  const workspaceMetrics = useMemo(() => {
+    const examsNeedingAnswerConfirm = mathExams.filter(
+      (e) =>
+        e.questions.length > 0 &&
+        (!e.confirmedOriginalAnswers || e.questions.some((q) => !q.answerConfirmed))
+    ).length;
+    const totalGeneratedCodes = mathExams.reduce(
+      (acc, e) => acc + e.generatedVersions.length,
+      0
+    );
+    const pendingOmrSheets = gradingSessions.reduce((acc, s) => {
+      return (
+        acc +
+        s.sheets.filter(
+          (sh) =>
+            !sh.archivedByDuplicateResolution &&
+            !sh.confirmedByTeacher &&
+            (sh.status === 'review-required' ||
+              sh.status === 'error' ||
+              sh.uncertainCount > 0)
+        ).length
+      );
+    }, 0);
+    return {
+      draftExamsCount: examDrafts.length + mathExams.filter((e) => e.generatedVersions.length === 0).length,
+      examsNeedingAnswerConfirm,
+      totalGeneratedCodes,
+      gradingSessionsCount: gradingSessions.length,
+      pendingOmrSheets,
+    };
+  }, [examDrafts.length, gradingSessions, mathExams]);
 
   const drafts = useMemo(
     () => packs.filter((p) => p.status === 'draft'),
@@ -528,6 +581,242 @@ export function DesktopHome({
             />
           </button>
         </div>
+      </section>
+
+      {/* Row 2.25 — My Teaching Workspace (Connected Workflows & Live Exam Pipeline Status) */}
+      <section
+        aria-labelledby="aurora-my-workspace-heading"
+        data-testid="connected-workspace-dashboard"
+        className="aurora-surface-glass rounded-[20px] p-5 space-y-4 border border-indigo-200/60 dark:border-indigo-900/50"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <h2
+              id="aurora-my-workspace-heading"
+              className="inline-flex items-center gap-2 text-[15px] font-bold text-[#172033] dark:text-slate-50"
+            >
+              <GitMerge className="h-4 w-4 text-[#635BFF] dark:text-indigo-400" aria-hidden="true" />
+              <span>My Teaching Workspace · Quy trình kiểm tra liên thông</span>
+            </h2>
+            <p className="text-xs text-[#64748B] dark:text-slate-400">
+              Theo dõi trạng thái thực tế của toàn bộ luồng từ Resource Vault → Tạo đề → Duyệt đáp án → Trộn mã → Chấm OMR.
+            </p>
+          </div>
+          {onStartNewConnectedWorkflow && (
+            <button
+              type="button"
+              onClick={onStartNewConnectedWorkflow}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-[#4338CA] dark:text-indigo-300 hover:bg-[#EEF0FF] dark:hover:bg-indigo-950/60 transition-colors whitespace-nowrap"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Quy trình mới</span>
+            </button>
+          )}
+        </div>
+
+        {/* 4 Real Workspace Status Counters */}
+        <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+          <button
+            type="button"
+            onClick={() => onOpenApp('exam-generator')}
+            className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/75 px-3.5 py-2.5 text-left hover:border-[#635BFF]/45 transition-colors"
+          >
+            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              Đề đang soạn / nháp
+            </div>
+            <div className="mt-1 text-lg font-bold font-mono-num text-[#172033] dark:text-white">
+              {workspaceMetrics.draftExamsCount}
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenApp('math-mixer')}
+            className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/75 px-3.5 py-2.5 text-left hover:border-amber-400/60 transition-colors"
+          >
+            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              Chờ xác nhận đáp án
+            </div>
+            <div className="mt-1 flex items-baseline gap-1.5">
+              <span className="text-lg font-bold font-mono-num text-amber-700 dark:text-amber-300">
+                {workspaceMetrics.examsNeedingAnswerConfirm}
+              </span>
+              <span className="text-[11px] text-slate-500">đề</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenApp('print-studio')}
+            className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/75 px-3.5 py-2.5 text-left hover:border-violet-400/60 transition-colors"
+          >
+            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              Mã đề đã tạo
+            </div>
+            <div className="mt-1 flex items-baseline gap-1.5">
+              <span className="text-lg font-bold font-mono-num text-violet-700 dark:text-violet-300">
+                {workspaceMetrics.totalGeneratedCodes}
+              </span>
+              <span className="text-[11px] text-slate-500">mã</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenApp('grading-studio')}
+            className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/75 px-3.5 py-2.5 text-left hover:border-cyan-400/60 transition-colors"
+          >
+            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              Phiên chấm OMR
+            </div>
+            <div className="mt-1 flex items-baseline gap-1.5">
+              <span className="text-lg font-bold font-mono-num text-cyan-700 dark:text-cyan-300">
+                {workspaceMetrics.gradingSessionsCount}
+              </span>
+              <span className="text-[11px] text-slate-500 truncate">
+                {workspaceMetrics.pendingOmrSheets > 0
+                  ? `· ${workspaceMetrics.pendingOmrSheets} cần duyệt`
+                  : 'phiên'}
+              </span>
+            </div>
+          </button>
+        </div>
+
+        {/* Active & Recent Connected Workflows */}
+        {connectedWorkspaceSummaries.length > 0 && (
+          <div className="space-y-2.5">
+            {connectedWorkspaceSummaries.slice(0, 3).map((summary) => {
+              const wfTitle =
+                summary.workflow.generatedExamTitle ||
+                summary.workflow.examDraftTitle ||
+                summary.workflow.resourceTitle ||
+                summary.workflow.title;
+
+              const badgeStyle =
+                summary.validation.status === 'blocked'
+                  ? 'border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300'
+                  : summary.validation.status === 'missing-reference'
+                  ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                  : summary.validation.status === 'needs-review'
+                  ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                  : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300';
+
+              const badgeText =
+                summary.validation.status === 'blocked'
+                  ? 'Bị chặn kiểm chứng'
+                  : summary.validation.status === 'missing-reference'
+                  ? 'Thiếu liên kết nguồn'
+                  : summary.validation.status === 'needs-review'
+                  ? 'Cần duyệt'
+                  : 'Đạt chuẩn';
+
+              return (
+                <div
+                  key={summary.workflow.workflowId}
+                  className={`rounded-2xl border p-3.5 transition-colors ${
+                    summary.isActive
+                      ? 'border-[#635BFF]/45 bg-white dark:bg-slate-900 shadow-xs'
+                      : 'border-slate-200/80 dark:border-slate-800 bg-white/75 dark:bg-slate-900/60'
+                  }`}
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {summary.isActive && (
+                          <span className="rounded-md bg-[#EEF0FF] dark:bg-indigo-950 px-2 py-0.5 text-[10.5px] font-bold text-[#4338CA] dark:text-indigo-300">
+                            Đang mở
+                          </span>
+                        )}
+                        <h3 className="text-sm font-bold text-[#172033] dark:text-slate-100 truncate">
+                          {wfTitle}
+                        </h3>
+                        <span
+                          className={`rounded-md border px-2 py-0.5 text-[10.5px] font-semibold ${badgeStyle}`}
+                        >
+                          {badgeText}
+                        </span>
+                        <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
+                          {summary.completedStageCount}/{summary.totalStageCount} chặng
+                        </span>
+                      </div>
+
+                      {/* 5-step compact progress checklist */}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {summary.fiveStepProgress.map((st, idx) => (
+                          <div
+                            key={st.key}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium"
+                          >
+                            {st.status === 'completed' ? (
+                              <CheckCircle2
+                                className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400"
+                                aria-hidden="true"
+                              />
+                            ) : st.status === 'blocked' ? (
+                              <ShieldAlert
+                                className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400"
+                                aria-hidden="true"
+                              />
+                            ) : st.status === 'needs-review' ? (
+                              <AlertTriangle
+                                className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400"
+                                aria-hidden="true"
+                              />
+                            ) : st.status === 'in-progress' ? (
+                              <Clock
+                                className="h-3.5 w-3.5 text-[#635BFF] dark:text-indigo-400"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <Circle
+                                className="h-3 w-3 text-slate-300 dark:text-slate-600"
+                                aria-hidden="true"
+                              />
+                            )}
+                            <span
+                              className={
+                                st.status === 'completed'
+                                  ? 'text-emerald-800 dark:text-emerald-300'
+                                  : st.status === 'blocked'
+                                  ? 'text-rose-700 dark:text-rose-300'
+                                  : st.status === 'needs-review'
+                                  ? 'text-amber-800 dark:text-amber-300'
+                                  : 'text-slate-600 dark:text-slate-400'
+                              }
+                            >
+                              {st.label}
+                            </span>
+                            {idx < summary.fiveStepProgress.length - 1 && (
+                              <span
+                                className="text-slate-300 dark:text-slate-700 mx-0.5"
+                                aria-hidden="true"
+                              >
+                                →
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onResumeWorkflow
+                          ? onResumeWorkflow(summary)
+                          : onOpenApp(summary.resumeAction.targetApp)
+                      }
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#635BFF] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#5248f0] transition-colors shrink-0 whitespace-nowrap"
+                    >
+                      <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Tiếp tục công việc</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       {/* Row 2.5 — Gợi ý bước tiếp theo từ trạng thái dữ liệu thực (Section 10 — 100% cục bộ) */}

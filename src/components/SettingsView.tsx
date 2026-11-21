@@ -39,6 +39,7 @@ import {
   exportJsonBackupFile,
 } from '../utils/storageResilience';
 import { ConfirmDialog } from './ConfirmDialog';
+import { OnlineCloudPanel } from './cloud/OnlineCloudPanel';
 import { useOptionalTutorial } from './tutorial/TutorialProvider';
 
 interface SettingsBackupExtras {
@@ -187,12 +188,15 @@ export function SettingsView({
     <main className="mx-auto max-w-4xl px-4 py-8 sm:px-6 space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50">
-          Settings Center — Giao diện, In A4 &amp; An toàn dữ liệu
+          Settings Center — Giao diện, In A4, Cloud &amp; An toàn dữ liệu
         </h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-          Tùy biến không gian làm việc TeacherOS 4.0, cấu hình lề in A4 mặc định và quản lý bản chụp khôi phục (Snapshot / Rollback) cùng sao lưu JSON ngoại tuyến.
+          Tùy biến không gian làm việc TeacherOS, quản lý kết nối Supabase Free tùy chọn, cấu hình lề in A4 mặc định và sao lưu/khôi phục dữ liệu cục bộ.
         </p>
       </div>
+
+      {/* Section 0A: Nền tảng Trực tuyến & Bảo mật (Phase 4A — Free Tier Only) */}
+      <OnlineCloudPanel />
 
       {/* Section 0: Giao diện & Không gian làm việc TeacherOS 4.0 */}
       <section
@@ -640,7 +644,7 @@ export function SettingsView({
             <strong className="font-semibold text-slate-900 dark:text-slate-100">IndexedDB (TeacherOS2DB v6) &amp; OPFS</strong> trên trình duyệt của thiết bị này, không mất dữ liệu khi tải lại trang.
           </li>
           <li>
-            Ứng dụng hoạt động hoàn toàn phía trình duyệt (client-only), không kết nối máy chủ ngoài, không sử dụng AI API, không thu thập dữ liệu sử dụng và không yêu cầu tài khoản đăng nhập.
+            Mặc định ứng dụng hoạt động hoàn toàn cục bộ (Local-First), không tự động tải dữ liệu lên máy chủ ngoài và không sử dụng AI API. Kết nối Supabase Free / Cloudflare Workers Free là tùy chọn chủ động và tách biệt hoàn toàn với dữ liệu IndexedDB trên máy.
           </li>
           <li>
             Sau khi đã tải trang web ở lần mở đầu tiên và lưu dữ liệu trên máy, giáo viên có thể tiếp tục soạn bài và in PDF ngay cả khi mất kết nối Internet.

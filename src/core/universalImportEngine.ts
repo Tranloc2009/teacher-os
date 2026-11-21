@@ -62,6 +62,8 @@ export interface ImportDiagnosticReport {
   legacyOleWmfPreviewCount?: number;
   unresolvedOleCount?: number;
   unsupportedMediaCount?: number;
+  unsupportedMediaNames?: string[];
+  optionParseIncompleteCount?: number;
   confirmedAnswerCount: number;
   unconfirmedAnswerCount: number;
   sectionCountAudits?: SectionCountAudit[];
@@ -74,6 +76,7 @@ export interface UniversalImportResult {
   questions: MathQuestion[];
   questionGroups: QuestionGroup[];
   report: ImportDiagnosticReport;
+  sourceDocumentPreview?: MathExamProject['sourceDocumentPreview'];
 }
 
 export interface UniversalImportOptions {
@@ -91,6 +94,7 @@ export interface UniversalImportOptions {
   legacyOleWmfPreviewCount?: number;
   unresolvedOleCount?: number;
   unsupportedMediaCount?: number;
+  unsupportedMediaNames?: string[];
 }
 
 const ENGLISH_DEPENDENT_PATTERNS = [
@@ -1526,9 +1530,9 @@ export function parseUniversalExamText(
       tfMatches[0].label === 'a' &&
       (blk.sectionHintType === 'true-false' || tfMatches.length === 4);
 
-    // B. Kiểm tra MCQ / Multi-Select A. B. C. D. (hỗ trợ *A., sau tab/xuống dòng/khoảng trắng, và A. dính sát $/[[ASSET:/số)
+    // B. Kiểm tra MCQ / Multi-Select A. B. C. D. (hỗ trợ *A., sau tab/xuống dòng/khoảng trắng/cột bảng |, và A. dính sát $/[[ASSET:/số)
     const mcqRegex =
-      /(?:^|\n|\t|[ ]{1,})(\*?)([ABCD])\.(?:\s+|(?=\$|\[\[ASSET:|\\|[−\-+0-9(\[]))/g;
+      /(?:^|\n|\t|[ ]{1,}|\|\s*)(\*?)([ABCD])\.(?:\s+|(?=\$|\[\[ASSET:|\\|[−\-+0-9(\[]))/g;
     const mcqMatches: Array<{
       starred: boolean;
       label: McqOptionLabel;
@@ -1550,11 +1554,41 @@ export function parseUniversalExamText(
       lastFourMcq.length === 4 &&
       lastFourMcq.map((m) => m.label).join('') === 'ABCD';
 
+    // Phát hiện OPTION_PARSE_INCOMPLETE: có >=2 nhãn phương án A/B/C/D theo thứ tự (hoặc 1-3 nhãn trong Phần I MCQ) nhưng không đủ 4 phương án!
+    const incompleteMcqMatches = (() => {
+      if (hasFourMcq || isTrueFalseBlock || mcqMatches.length === 0) return [];
+      const orderMap: Record<McqOptionLabel, number> = { A: 0, B: 1, C: 2, D: 3 };
+      const picked: typeof mcqMatches = [];
+      for (const m of mcqMatches) {
+        if (picked.length === 0) {
+          picked.push(m);
+        } else {
+          const prevOrder = orderMap[picked[picked.length - 1].label];
+          const curOrder = orderMap[m.label];
+          if (curOrder > prevOrder) {
+            picked.push(m);
+          } else if (m.label === 'A') {
+            picked.length = 0;
+            picked.push(m);
+          }
+        }
+      }
+      if (picked.length >= 2 && picked.length < 4 && picked[0].label === 'A') {
+        return picked;
+      }
+      if (blk.sectionHintType === 'mcq' && picked.length >= 1 && picked.length < 4) {
+        return picked;
+      }
+      return [];
+    })();
+    const hasIncompleteMcq = incompleteMcqMatches.length > 0;
+
     // B2. Kiểm tra dòng "A. <giá trị>" xuất hiện trong Phần III (Trả lời ngắn) — ứng viên đáp án ngắn chứ không phải MCQ!
     let part3ShortAnswerCandidate: string | undefined;
     let bodyCleanForNonMcq = bodyWithMarkers;
     if (
       !hasFourMcq &&
+      !hasIncompleteMcq &&
       !isTrueFalseBlock &&
       blk.sectionHintType === 'short-answer'
     ) {
@@ -1600,9 +1634,18 @@ export function parseUniversalExamText(
       }
     };
 
+    const stripTablePipeEdges = (slice: string): string =>
+      slice
+        .replace(/^(?:\s*\|\s+)+/, '')
+        .replace(/(?:\s+\|\s*)+$/, '')
+        .replace(/^\|\s*$/, '')
+        .trim();
+
     if (hasFourMcq) {
       // Tách tài nguyên ĐỘC LẬP cho thân câu và từng phương án A/B/C/D!
-      const rawStemPart = bodyWithMarkers.slice(0, lastFourMcq[0].index).trim();
+      const rawStemPart = stripTablePipeEdges(
+        bodyWithMarkers.slice(0, lastFourMcq[0].index).trim()
+      );
       const parsedStem = extractAssetMarkersAndClean(
         rawStemPart,
         assetLookup
@@ -1611,7 +1654,7 @@ export function parseUniversalExamText(
 
       const rawOptionSlices = lastFourMcq.map((m, oIdx) => {
         const endIdx = oIdx < 3 ? lastFourMcq[oIdx + 1].index : bodyWithMarkers.length;
-        return bodyWithMarkers.slice(m.contentStart, endIdx).trim();
+        return stripTablePipeEdges(bodyWithMarkers.slice(m.contentStart, endIdx).trim());
       });
 
       const parsedOptions = rawOptionSlices.map((rawSlice) =>
@@ -1796,6 +1839,104 @@ export function parseUniversalExamText(
       questions.push(q);
       registerInGroup();
       emptyCounts[uType] += 1;
+      return;
+    }
+
+    if (hasIncompleteMcq) {
+      // OPTION_PARSE_INCOMPLETE: Giữ nguyên kiểu MCQ, KHÔNG tự sinh phương án thiếu, KHÓA đảo phương án và CHẶN xuất chính thức!
+      const rawStemPart = stripTablePipeEdges(
+        bodyWithMarkers.slice(0, incompleteMcqMatches[0].index).trim()
+      );
+      const parsedStem = extractAssetMarkersAndClean(rawStemPart, assetLookup);
+      const { cleanedText: stemText, assets: stemAssets } = parsedStem;
+
+      const rawOptionSlices = incompleteMcqMatches.map((m, oIdx) => {
+        const endIdx =
+          oIdx + 1 < incompleteMcqMatches.length
+            ? incompleteMcqMatches[oIdx + 1].index
+            : bodyWithMarkers.length;
+        return stripTablePipeEdges(bodyWithMarkers.slice(m.contentStart, endIdx).trim());
+      });
+      const parsedOptions = rawOptionSlices.map((rawSlice) =>
+        extractAssetMarkersAndClean(rawSlice, assetLookup)
+      );
+
+      const detectedLabels = incompleteMcqMatches.map((m) => m.label);
+      const missingLabels = MCQ_LABELS.filter((lbl) => !detectedLabels.includes(lbl));
+      const optionParseReason = `Chỉ nhận diện được ${detectedLabels.length}/4 phương án (${detectedLabels.join(', ')}), thiếu ${missingLabels.join(', ')}. Hệ thống không tự tạo phương án thiếu và đã khóa đảo phương án.`;
+
+      const builtOptions: McqOption[] = parsedOptions.map((po, oIdx) => {
+        const lbl = incompleteMcqMatches[oIdx].label;
+        return {
+          id: `${qId}-opt-${oIdx + 1}`,
+          originalLabel: lbl,
+          content: createImportedFormulaPayload(po, `${qId}-o${oIdx + 1}`, {
+            rawXmlFragments: collectOmmlForText(po.cleanedText, ommlFragments),
+            preserveExactWhitespace: preserveWhitespace,
+          }),
+          isCorrect: false,
+          ...(po.assets[0] ? { visualAsset: po.assets[0] } : {}),
+        };
+      });
+
+      const extraOptionAssets = parsedOptions.flatMap((po) => po.assets.slice(1));
+      const allQuestionAssets = [...stemAssets, ...extraOptionAssets];
+      const allAttachedIncludingOptions = [
+        ...allQuestionAssets,
+        ...builtOptions.map((o) => o.visualAsset).filter((a): a is MathVisualAsset => Boolean(a)),
+      ];
+
+      const formulaStatus = computeFormulaStatusForQuestion(
+        [stemText, ...builtOptions.map((o) => o.content.rawSource)],
+        allAttachedIncludingOptions
+      );
+
+      warnings.push(`Câu ${blk.questionNumber} (${code}): OPTION_PARSE_INCOMPLETE — ${optionParseReason}`);
+
+      const q: MathQuestion = {
+        id: qId,
+        code,
+        sectionTitle: blk.sectionTitle,
+        type: 'mcq',
+        universalType: 'mcq',
+        subjectId: resolvedSubjectId,
+        topic: subjectProfile.name,
+        cognitiveLevel: 'thong-hieu',
+        difficultyScore: 2,
+        points: 0.25,
+        stem: createImportedFormulaPayload(parsedStem, `${qId}-stem`, {
+          rawXmlFragments: collectOmmlForText(stemText, ommlFragments),
+          preserveExactWhitespace: preserveWhitespace,
+        }),
+        options: builtOptions,
+        correctOptionId: undefined,
+        solutionGuide: createImmutableContentPayload('', `${qId}-sol`),
+        visualAssets: allQuestionAssets,
+        hasVisualAsset: allAttachedIncludingOptions.length > 0,
+        groupId: blk.passageGroupKey,
+        lockQuestionPosition: false,
+        lockOptionShuffle: true,
+        allowStatementShuffle: false,
+        dependencyFlags: ['OPTION_PARSE_INCOMPLETE'],
+        optionParseIncomplete: true,
+        optionParseReason,
+        answerConfirmed: false,
+        answerProvenance: {
+          status: 'needs-review',
+          sourceFileHash: options?.sourceFileHash,
+          sourceLocation: blk.paragraphLocation,
+          note: `OPTION_PARSE_INCOMPLETE: ${optionParseReason}`,
+        },
+        formulaStatus,
+        sourceTrace: baseSourceTrace,
+        createdAt: now,
+        updatedAt: now,
+      };
+      q.universalLock = buildUniversalLockState(q, subjectProfile);
+      q.originalSnapshot = captureQuestionOriginalSnapshot(q);
+      questions.push(q);
+      registerInGroup();
+      emptyCounts.mcq += 1;
       return;
     }
 
@@ -2402,6 +2543,27 @@ export function parseUniversalExamText(
     });
   }
 
+  // Hậu kiểm: thu thập các token [TÀI_NGUYÊN_UNRENDERABLE:...] cho từng câu hỏi (mọi loại câu)
+  for (const q of questions) {
+    const found: string[] = [];
+    const scan = (txt?: string) => {
+      if (!txt || !txt.includes('[TÀI_NGUYÊN_UNRENDERABLE:')) return;
+      const re = /\[TÀI_NGUYÊN_UNRENDERABLE:([^\]]+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(txt)) !== null) {
+        if (m[1]) found.push(m[1].trim());
+      }
+    };
+    scan(q.stem?.rawSource);
+    (q.options ?? []).forEach((o) => scan(o.content?.rawSource));
+    (q.multiSelectOptions ?? []).forEach((o) => scan(o.content?.rawSource));
+    (q.statements ?? []).forEach((s) => scan(s.content?.rawSource));
+    scan(q.solutionGuide?.rawSource);
+    if (found.length > 0) {
+      q.unrenderableMediaRefs = Array.from(new Set(found));
+    }
+  }
+
   const assetsAttached =
     questions.reduce(
       (acc, q) =>
@@ -2413,10 +2575,57 @@ export function parseUniversalExamText(
     questionGroups.reduce((acc, g) => acc + g.sharedAssets.length, 0);
   const confirmedAnswerCount = questions.filter((q) => q.answerConfirmed).length;
   const unconfirmedAnswerCount = questions.length - confirmedAnswerCount;
+  const optionParseIncompleteCount = questions.filter((q) => Boolean(q.optionParseIncomplete)).length;
+
+  // Dựng bản xem trước chỉ-đọc từ tài liệu gốc cho Document Import Doctor (tối đa 600 dòng gọn nhẹ)
+  const previewSections: Array<{
+    title: string;
+    paragraphLocation?: string;
+    rawLines: string[];
+  }> = [];
+  const rawPreviewLines = rawInput
+    .split(/\r?\n/)
+    .map((l: string) => l.trimEnd())
+    .filter((l: string) => l.trim().length > 0);
+  const cappedLines = rawPreviewLines.slice(0, 600);
+  let curPreviewSec: { title: string; paragraphLocation?: string; rawLines: string[] } = {
+    title: 'Phần mở đầu tài liệu gốc',
+    rawLines: [],
+  };
+  const sectionHeadingPreviewRe =
+    /^\s*(?:PHẦN\s+[IVX\d]+|PART\s+[IVX\d]+|BẢNG\s+ĐÁP\s+ÁN|ĐÁP\s+ÁN\s*(?:VÀ|&)?\s*HƯỚNG\s+DẪN|HƯỚNG\s+DẪN\s+CHẤM|LỜI\s+GIẢI\s+CHI\s+TIẾT)/i;
+  for (const line of cappedLines) {
+    if (sectionHeadingPreviewRe.test(line)) {
+      if (curPreviewSec.rawLines.length > 0) {
+        previewSections.push(curPreviewSec);
+      }
+      curPreviewSec = {
+        title: line.trim().slice(0, 120),
+        rawLines: [line],
+      };
+    } else {
+      curPreviewSec.rawLines.push(line);
+    }
+  }
+  if (curPreviewSec.rawLines.length > 0) {
+    previewSections.push(curPreviewSec);
+  }
+
+  const sourceDocumentPreview: MathExamProject['sourceDocumentPreview'] = {
+    fileName: options?.fileName || `Tài liệu nhập (${sourceFormat.toUpperCase()})`,
+    sourceFileHash: options?.sourceFileHash,
+    importedAt: now,
+    sections: previewSections,
+    rawLineCount: rawPreviewLines.length,
+    ...(options?.unsupportedMediaNames?.length
+      ? { unsupportedMediaNames: options.unsupportedMediaNames }
+      : {}),
+  };
 
   return {
     questions,
     questionGroups,
+    sourceDocumentPreview,
     report: {
       sourceFormat,
       fileName: options?.fileName,
@@ -2440,6 +2649,10 @@ export function parseUniversalExamText(
       ...(options?.unsupportedMediaCount !== undefined
         ? { unsupportedMediaCount: options.unsupportedMediaCount }
         : {}),
+      ...(options?.unsupportedMediaNames?.length
+        ? { unsupportedMediaNames: options.unsupportedMediaNames }
+        : {}),
+      ...(optionParseIncompleteCount > 0 ? { optionParseIncompleteCount } : {}),
       confirmedAnswerCount,
       unconfirmedAnswerCount,
       sectionCountAudits,
@@ -2491,6 +2704,7 @@ export async function importUniversalExamFile(
       legacyOleWmfPreviewCount: extracted.legacyOleWmfPreviewCount,
       unresolvedOleCount: extracted.unresolvedOleCount,
       unsupportedMediaCount: extracted.unsupportedMediaCount,
+      unsupportedMediaNames: extracted.unsupportedMediaNames,
       preWarnings: [...(options?.preWarnings ?? []), ...extracted.warnings],
     });
   }
@@ -2539,6 +2753,9 @@ export function mergeImportedExamIntoProject(
       ? imported.questionGroups
       : [...(exam.questionGroups ?? []), ...imported.questionGroups],
     sectionCountAudits: imported.report.sectionCountAudits,
+    ...(imported.sourceDocumentPreview
+      ? { sourceDocumentPreview: imported.sourceDocumentPreview }
+      : {}),
     confirmedOriginalAnswers: false,
     generatedVersions: [],
     updatedAt: new Date().toISOString(),

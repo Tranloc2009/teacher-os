@@ -19,11 +19,17 @@ import type {
   GeneratorBackupBundle,
   QuestionTemplateDefinition,
 } from '../types/examGenerator';
-import type { ConnectedWorkflowContext } from '../types/connectedWorkflow';
+import type {
+  ConnectedWorkflowContext,
+  ConnectedWorkflowStore,
+} from '../types/connectedWorkflow';
 import {
   CONNECTED_WORKFLOW_META_KEY,
+  CONNECTED_WORKFLOW_STORE_KEY,
   createInitialWorkflowContext,
+  getActiveWorkflowFromStore,
   normalizeStoredWorkflowContext,
+  normalizeStoredWorkflowStore,
 } from '../core/connectedWorkflowEngine';
 import type { ExamFormTemplate } from '../types/examForm';
 import {
@@ -1821,6 +1827,79 @@ export async function saveConnectedWorkflowContext(
     // Keep in-memory & localStorage fallback if IndexedDB is temporarily unavailable
   }
   return ctx;
+}
+
+export async function loadConnectedWorkflowStore(): Promise<ConnectedWorkflowStore> {
+  let rawStore: unknown = null;
+  let legacyRaw: unknown = null;
+
+  try {
+    const rec = await db.meta.get(CONNECTED_WORKFLOW_STORE_KEY);
+    if (rec?.value) {
+      rawStore = JSON.parse(rec.value);
+    }
+  } catch {
+    // Fallback to localStorage below
+  }
+
+  if (!rawStore && typeof window !== 'undefined') {
+    try {
+      const lsRaw = window.localStorage.getItem(CONNECTED_WORKFLOW_STORE_KEY);
+      if (lsRaw) {
+        rawStore = JSON.parse(lsRaw);
+      }
+    } catch {
+      // Ignore malformed localStorage
+    }
+  }
+
+  if (!rawStore) {
+    try {
+      const legacyRec = await db.meta.get(CONNECTED_WORKFLOW_META_KEY);
+      if (legacyRec?.value) {
+        legacyRaw = JSON.parse(legacyRec.value);
+      }
+    } catch {
+      // Fallback below
+    }
+    if (!legacyRaw && typeof window !== 'undefined') {
+      try {
+        const legacyLs = window.localStorage.getItem(CONNECTED_WORKFLOW_META_KEY);
+        if (legacyLs) {
+          legacyRaw = JSON.parse(legacyLs);
+        }
+      } catch {
+        // Ignore malformed legacy localStorage
+      }
+    }
+  }
+
+  return normalizeStoredWorkflowStore(rawStore, legacyRaw);
+}
+
+export async function saveConnectedWorkflowStore(
+  store: ConnectedWorkflowStore
+): Promise<ConnectedWorkflowStore> {
+  const normalized = normalizeStoredWorkflowStore(store);
+  const serialized = JSON.stringify(normalized);
+  const activeCtx = getActiveWorkflowFromStore(normalized);
+  const activeSerialized = JSON.stringify(activeCtx);
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(CONNECTED_WORKFLOW_STORE_KEY, serialized);
+      window.localStorage.setItem(CONNECTED_WORKFLOW_META_KEY, activeSerialized);
+    } catch {
+      // Ignore quota errors on localStorage fallback
+    }
+  }
+  try {
+    await db.meta.put({ key: CONNECTED_WORKFLOW_STORE_KEY, value: serialized });
+    await db.meta.put({ key: CONNECTED_WORKFLOW_META_KEY, value: activeSerialized });
+  } catch {
+    // Keep in-memory & localStorage fallback if IndexedDB is temporarily unavailable
+  }
+  return normalized;
 }
 
 // ============================================================================

@@ -13,19 +13,35 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
+  checkDraftExportGate,
   checkExamExportGate,
   computeContentHash,
+  computeQuestionVerificationContentHash,
   formatVerifiedSectionHeading,
   getOptionLetterLabel,
   getStatementLetterLabel,
   sanitizeSvgSource,
 } from './mathIntegrity';
 import { extractDocxDocument } from './ooxmlParser';
+import { importUniversalExamFile } from './universalImportEngine';
 import { getSubjectProfile, getUniversalQuestionType, resolveSubjectId } from './subjectProfileRegistry';
 import { convertSvgToPngDataUrl } from './examGenerator/dynamicSvgGraphEngine';
 import { verifyDynamicGraphBinding } from './examGenerator/level3GraphTemplates';
-import type { ExamFormTemplate } from '../types/examForm';
-import { buildStudentInfoLine } from './examFormEngine';
+import type {
+  ExamBodyAlignment,
+  ExamEssayLineStyle,
+  ExamFormPostExportAuditReport,
+  ExamFormTemplate,
+  ExamOptionLayout,
+  ExamPageNumberFormat,
+  ExamShortAnswerBoxStyle,
+} from '../types/examForm';
+import {
+  buildPlaceholderContext,
+  buildStudentInfoLine,
+  resolveAutoOptionLayout,
+  resolveExamFormPlaceholders,
+} from './examFormEngine';
 
 export const DEFAULT_EXAM_EXPORT_SETTINGS: ExamExportSettings = {
   departmentName: 'SỞ GIÁO DỤC VÀ ĐÀO TẠO',
@@ -176,21 +192,33 @@ function makeParagraphXml(
     align?: 'left' | 'center' | 'right' | 'both';
     spacingBefore?: number;
     spacingAfter?: number;
+    lineTwips?: number;
     indentLeft?: number;
     keepNext?: boolean;
+    tabStopsTwips?: number[];
   }
 ): string {
   const pPr: string[] = [];
   if (opts?.align) pPr.push(`<w:jc w:val="${opts.align}"/>`);
-  if (opts?.spacingBefore !== undefined || opts?.spacingAfter !== undefined) {
+  const lineAttr =
+    opts?.lineTwips && opts.lineTwips > 0
+      ? ` w:line="${Math.round(opts.lineTwips)}" w:lineRule="auto"`
+      : '';
+  if (opts?.spacingBefore !== undefined || opts?.spacingAfter !== undefined || lineAttr) {
     pPr.push(
-      `<w:spacing w:before="${opts.spacingBefore ?? 0}" w:after="${opts.spacingAfter ?? 80}"/>`
+      `<w:spacing w:before="${opts?.spacingBefore ?? 0}" w:after="${opts?.spacingAfter ?? 80}"${lineAttr}/>`
     );
   } else {
     pPr.push('<w:spacing w:before="0" w:after="80"/>');
   }
   if (opts?.indentLeft) {
     pPr.push(`<w:ind w:left="${opts.indentLeft}"/>`);
+  }
+  if (opts?.tabStopsTwips && opts.tabStopsTwips.length > 0) {
+    const tabs = opts.tabStopsTwips
+      .map((pos) => `<w:tab w:val="left" w:pos="${Math.round(pos)}"/>`)
+      .join('');
+    pPr.push(`<w:tabs>${tabs}</w:tabs>`);
   }
   if (opts?.keepNext) {
     pPr.push('<w:keepNext/>');
@@ -379,14 +407,26 @@ function renderStudentQuestionXml(
     numberPrefix?: string;
     showPoints?: boolean;
     optionLabelStyle?: 'dot' | 'paren';
+    optionLayout?: ExamOptionLayout;
+    formTemplate?: ExamFormTemplate;
     sizeHalfPt?: number;
     questionSpacingBefore?: number;
+    paragraphSpacingAfter?: number;
+    lineTwips?: number;
+    bodyAlignment?: ExamBodyAlignment;
+    shortAnswerBoxStyle?: ExamShortAnswerBoxStyle;
+    shortAnswerBlankLines?: number;
+    essayAnswerLines?: number;
+    essayLineStyle?: ExamEssayLineStyle;
   }
 ): void {
   const uType = getUniversalQuestionType(q);
   const prefix = formOptions?.numberPrefix?.trim() || 'Câu';
   const sz = formOptions?.sizeHalfPt ?? 24;
   const optPunct = formOptions?.optionLabelStyle === 'paren' ? ')' : '.';
+  const bodyAlign = formOptions?.bodyAlignment === 'justify' ? 'both' : undefined;
+  const lineTwips = formOptions?.lineTwips;
+  const paraAfter = formOptions?.paragraphSpacingAfter ?? 40;
   const pointsSuffix =
     formOptions?.showPoints && typeof q.points === 'number' && q.points > 0
       ? ` (${q.points} điểm)`
@@ -419,14 +459,29 @@ function renderStudentQuestionXml(
   };
 
   // Stem line — TUYỆT ĐỐI không in đáp án hay giải thích vào đề học sinh
+  const pointsRuns = pointsSuffix
+    ? renderStyledRunsXml(`${pointsSuffix.trim()} `, {
+        italic: true,
+        fontFamily,
+        sizeHalfPt: Math.max(20, sz - 2),
+        color: '475569',
+      })
+    : '';
   bodyChunks.push(
     makeParagraphXml(
-      renderStyledRunsXml(`${prefix} ${qNumber}${pointsSuffix}: `, {
+      renderStyledRunsXml(`${prefix} ${qNumber}: `, {
         bold: true,
         fontFamily,
         sizeHalfPt: sz,
-      }) + renderContent(q.stem),
-      { spacingBefore: formOptions?.questionSpacingBefore ?? 100, spacingAfter: 40 }
+      }) +
+        pointsRuns +
+        renderContent(q.stem),
+      {
+        align: bodyAlign,
+        spacingBefore: formOptions?.questionSpacingBefore ?? 100,
+        spacingAfter: paraAfter,
+        lineTwips,
+      }
     )
   );
 
@@ -448,7 +503,7 @@ function renderStudentQuestionXml(
         makeParagraphXml(
           renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
             renderContent(opt.content),
-          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
+          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20, lineTwips }
         )
       );
       if (opt.visualAsset && !usedInline.has(opt.visualAsset.id)) {
@@ -456,39 +511,132 @@ function renderStudentQuestionXml(
       }
     });
   } else if (q.type === 'mcq' && q.options) {
-    q.options.forEach((opt, oIdx) => {
-      const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
+    const hasOptionVisual = q.options.some((o) => Boolean(o.visualAsset));
+    const resolvedGrid: '1-col' | '2-col' | '4-col' = hasOptionVisual
+      ? '1-col'
+      : formOptions?.formTemplate
+        ? resolveAutoOptionLayout(q, formOptions.formTemplate)
+        : formOptions?.optionLayout === '4-col'
+          ? '4-col'
+          : formOptions?.optionLayout === '2-col'
+            ? '2-col'
+            : '1-col';
+
+    if (resolvedGrid === '4-col' && q.options.length === 4) {
+      const rowRuns = q.options
+        .map((opt, oIdx) => {
+          const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
+          const sep = oIdx > 0 ? '<w:r><w:tab/></w:r>' : '';
+          return (
+            sep +
+            renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+            renderContent(opt.content)
+          );
+        })
+        .join('');
       bodyChunks.push(
-        makeParagraphXml(
-          renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
-            renderContent(opt.content),
-          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
-        )
+        makeParagraphXml(rowRuns, {
+          indentLeft: 360,
+          spacingBefore: 20,
+          spacingAfter: 20,
+          lineTwips,
+          tabStopsTwips: [2520, 4680, 6840],
+        })
       );
-      if (opt.visualAsset && !usedInline.has(opt.visualAsset.id)) {
-        appendVisualAssetToBody(bodyChunks, opt.visualAsset, mediaList, fontFamily);
+    } else if (resolvedGrid === '2-col' && q.options.length >= 2) {
+      for (let rowStart = 0; rowStart < q.options.length; rowStart += 2) {
+        const pair = q.options.slice(rowStart, rowStart + 2);
+        const rowRuns = pair
+          .map((opt, localIdx) => {
+            const oIdx = rowStart + localIdx;
+            const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
+            const sep = localIdx > 0 ? '<w:r><w:tab/></w:r>' : '';
+            return (
+              sep +
+              renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+              renderContent(opt.content)
+            );
+          })
+          .join('');
+        bodyChunks.push(
+          makeParagraphXml(rowRuns, {
+            indentLeft: 360,
+            spacingBefore: 20,
+            spacingAfter: 20,
+            lineTwips,
+            tabStopsTwips: [4680],
+          })
+        );
       }
-    });
+    } else {
+      q.options.forEach((opt, oIdx) => {
+        const lbl = MCQ_LABELS[oIdx] ?? getOptionLetterLabel(oIdx);
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`${lbl}${optPunct} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+              renderContent(opt.content),
+            { indentLeft: 360, spacingBefore: 20, spacingAfter: 20, lineTwips }
+          )
+        );
+        if (opt.visualAsset && !usedInline.has(opt.visualAsset.id)) {
+          appendVisualAssetToBody(bodyChunks, opt.visualAsset, mediaList, fontFamily);
+        }
+      });
+    }
   } else if (q.type === 'true-false' && q.statements) {
     q.statements.forEach((st, sIdx) => {
       const lbl = TF_LABELS[sIdx] ?? getStatementLetterLabel(sIdx);
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(`${lbl}) `, { bold: true, fontFamily }) +
+          renderStyledRunsXml(`${lbl}) `, { bold: true, fontFamily, sizeHalfPt: sz }) +
             renderContent(st.content),
-          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
+          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20, lineTwips }
         )
       );
     });
+  } else if (q.type === 'short-answer') {
+    const boxStyle = formOptions?.shortAnswerBoxStyle ?? 'none';
+    const blankLines = Math.max(0, Math.min(4, formOptions?.shortAnswerBlankLines ?? 0));
+    if (boxStyle === 'box') {
+      bodyChunks.push(
+        makeParagraphXml(
+          renderStyledRunsXml('Đáp số: [ .............................. ]', {
+            italic: true,
+            fontFamily,
+            sizeHalfPt: Math.max(20, sz - 2),
+            color: '475569',
+          }),
+          { indentLeft: 360, spacingBefore: 30, spacingAfter: 40, lineTwips }
+        )
+      );
+    } else if (boxStyle === 'dotted-line' && blankLines > 0) {
+      for (let i = 0; i < blankLines; i++) {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(
+              i === 0
+                ? 'Trả lời: ........................................................................'
+                : '....................................................................................',
+              {
+                fontFamily,
+                sizeHalfPt: Math.max(20, sz - 2),
+                color: '64748B',
+              }
+            ),
+            { indentLeft: 360, spacingBefore: 20, spacingAfter: 30, lineTwips }
+          )
+        );
+      }
+    }
   } else if (uType === 'fill-blank' && q.fillBlank?.wordBank && q.fillBlank.wordBank.length > 0) {
     const bankLine = q.fillBlank.wordBank
       .map((w, idx) => `${getOptionLetterLabel(idx)}. ${formatContentPayloadForText(w.content)}`)
       .join('    ');
     bodyChunks.push(
       makeParagraphXml(
-        renderStyledRunsXml('Ngân hàng từ gợi ý: ', { italic: true, fontFamily }) +
-          renderStyledRunsXml(bankLine, { fontFamily }),
-        { indentLeft: 360, spacingBefore: 20, spacingAfter: 40 }
+        renderStyledRunsXml('Ngân hàng từ gợi ý: ', { italic: true, fontFamily, sizeHalfPt: sz }) +
+          renderStyledRunsXml(bankLine, { fontFamily, sizeHalfPt: sz }),
+        { indentLeft: 360, spacingBefore: 20, spacingAfter: 40, lineTwips }
       )
     );
   } else if (uType === 'matching' && q.matching) {
@@ -510,22 +658,44 @@ function renderStudentQuestionXml(
       const lbl = usesNumeric ? `${idx + 1}.` : `${getStatementLetterLabel(idx)}.`;
       bodyChunks.push(
         makeParagraphXml(
-          renderStyledRunsXml(`${lbl} `, { bold: true, fontFamily }) +
-            renderStyledRunsXml(formatContentPayloadForText(item.content), { fontFamily }),
-          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
+          renderStyledRunsXml(`${lbl} `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+            renderStyledRunsXml(formatContentPayloadForText(item.content), { fontFamily, sizeHalfPt: sz }),
+          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20, lineTwips }
         )
       );
     });
-  } else if (q.type === 'essay' && q.essayParts && q.essayParts.length > 0) {
-    q.essayParts.forEach((part) => {
-      bodyChunks.push(
-        makeParagraphXml(
-          renderStyledRunsXml(`${part.label} (${part.points} điểm) `, { bold: true, fontFamily }) +
-            renderStyledRunsXml(formatContentPayloadForText(part.content), { fontFamily }),
-          { indentLeft: 360, spacingBefore: 20, spacingAfter: 20 }
-        )
-      );
-    });
+  } else if (q.type === 'essay') {
+    if (q.essayParts && q.essayParts.length > 0) {
+      q.essayParts.forEach((part) => {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`${part.label} (${part.points} điểm) `, { bold: true, fontFamily, sizeHalfPt: sz }) +
+              renderStyledRunsXml(formatContentPayloadForText(part.content), { fontFamily, sizeHalfPt: sz }),
+            { indentLeft: 360, spacingBefore: 20, spacingAfter: 20, lineTwips }
+          )
+        );
+      });
+    }
+    const essayLines = Math.max(0, Math.min(12, formOptions?.essayAnswerLines ?? 0));
+    const lineStyle = formOptions?.essayLineStyle ?? 'dotted';
+    if (essayLines > 0 && lineStyle !== 'blank') {
+      const lineStr =
+        lineStyle === 'lined'
+          ? '__________________________________________________________________________'
+          : '................................................................................................';
+      for (let i = 0; i < essayLines; i++) {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(lineStr, {
+              fontFamily,
+              sizeHalfPt: Math.max(20, sz - 2),
+              color: '94A3B8',
+            }),
+            { indentLeft: 360, spacingBefore: 30, spacingAfter: 30 }
+          )
+        );
+      }
+    }
   }
 }
 
@@ -538,6 +708,9 @@ async function packageOoxmlDocxBuffer(params: {
   fontFamily: string;
   fontSizePt?: number;
   columns?: 1 | 2;
+  showPageNumbers?: boolean;
+  pageNumberFormat?: ExamPageNumberFormat;
+  footerLabelText?: string;
 }): Promise<Uint8Array> {
   const zip = new JSZip();
   const topTwips = Math.round((params.marginsMm?.top ?? params.marginMm) * 56.7);
@@ -550,6 +723,7 @@ async function packageOoxmlDocxBuffer(params: {
     : '<w:pgSz w:w="11906" w:h="16838"/>';
   const colsXml = params.columns === 2 ? '<w:cols w:num="2" w:space="420"/>' : '';
   const defaultHalfPt = Math.round((params.fontSizePt ?? 12) * 2);
+  const includeFooterPart = Boolean(params.showPageNumbers || params.footerLabelText?.trim());
 
   const mediaExts = Array.from(new Set(params.mediaList.map((m) => m.ext)));
   const extMimeMap: Record<string, string> = {
@@ -570,6 +744,7 @@ async function packageOoxmlDocxBuffer(params: {
     .join('\n  ')}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  ${includeFooterPart ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' : ''}
 </Types>`;
 
   const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -580,6 +755,7 @@ async function packageOoxmlDocxBuffer(params: {
   const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  ${includeFooterPart ? '<Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>' : ''}
   ${params.mediaList
     .map(
       (m) =>
@@ -605,11 +781,16 @@ async function packageOoxmlDocxBuffer(params: {
   </w:style>
 </w:styles>`;
 
+  const footerRefXml = includeFooterPart
+    ? '<w:footerReference w:type="default" r:id="rIdFooter1"/>'
+    : '';
+
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
   <w:body>
     ${params.bodyXml}
     <w:sectPr>
+      ${footerRefXml}
       ${pgSzXml}
       <w:pgMar w:top="${topTwips}" w:right="${rightTwips}" w:bottom="${bottomTwips}" w:left="${leftTwips}" w:header="708" w:footer="708" w:gutter="0"/>
       ${colsXml}
@@ -622,6 +803,39 @@ async function packageOoxmlDocxBuffer(params: {
   zip.file('word/_rels/document.xml.rels', docRelsXml);
   zip.file('word/styles.xml', stylesXml);
   zip.file('word/document.xml', documentXml);
+
+  if (includeFooterPart) {
+    const labelRuns = params.footerLabelText?.trim()
+      ? renderStyledRunsXml(`${params.footerLabelText.trim()}   `, {
+          italic: true,
+          sizeHalfPt: 18,
+          fontFamily: params.fontFamily,
+          color: '64748B',
+        })
+      : '';
+    const pageRuns = params.showPageNumbers
+      ? renderStyledRunsXml('Trang ', {
+          sizeHalfPt: 18,
+          fontFamily: params.fontFamily,
+          color: '475569',
+        }) +
+        `<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>` +
+        (params.pageNumberFormat !== 'page-only'
+          ? renderStyledRunsXml(' / ', {
+              sizeHalfPt: 18,
+              fontFamily: params.fontFamily,
+              color: '475569',
+            }) + `<w:fldSimple w:instr="NUMPAGES"><w:r><w:t>1</w:t></w:r></w:fldSimple>`
+          : '')
+      : '';
+
+    const footerXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${makeParagraphXml(labelRuns + pageRuns, { align: 'right', spacingBefore: 0, spacingAfter: 0 })}
+</w:ftr>`;
+    zip.file('word/footer1.xml', footerXml);
+  }
+
   for (const media of params.mediaList) {
     zip.file(`word/${media.target}`, media.bytes);
   }
@@ -633,15 +847,14 @@ async function packageOoxmlDocxBuffer(params: {
  * Tạo file Word (.docx) đề thi dành riêng cho HỌC SINH cho một mã đề cụ thể.
  * Đảm bảo 0% rò rỉ đáp án hoặc lời giải.
  */
-export async function buildStudentExamDocxBuffer(
-  exam: MathExamProject,
-  version: MixedExamVersion,
-  formTemplate?: ExamFormTemplate
-): Promise<Uint8Array> {
-  const gate = checkExamExportGate(exam);
-  if (!gate.canExport) {
-    throw new Error(`Xuất DOCX bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
-  }
+async function renderStudentExamDocxInternal(params: {
+  exam: MathExamProject;
+  version: MixedExamVersion;
+  formTemplate?: ExamFormTemplate;
+  draftBannerText?: string;
+  includeSolutionsFromSource?: boolean;
+}): Promise<Uint8Array> {
+  const { exam, version, formTemplate, draftBannerText, includeSolutionsFromSource } = params;
 
   for (const q of version.questions) {
     const graphBinding = verifyDynamicGraphBinding({ question: q });
@@ -654,31 +867,56 @@ export async function buildStudentExamDocxBuffer(
 
   const settings = resolveExportSettings(exam);
   const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
-  const examTitle =
+  const placeholderCtx = formTemplate
+    ? buildPlaceholderContext(exam, version, formTemplate)
+    : {
+        departmentName: settings.departmentName,
+        schoolName: settings.schoolName,
+        subjectGroupName: '',
+        examTitle: settings.examTitleOverride.trim() || exam.title,
+        subject: subjectProfile.name,
+        grade: exam.grade,
+        duration: `${exam.durationMinutes} phút`,
+        schoolYear: exam.schoolYear,
+        examCode: version.code,
+      };
+  const resolveHdr = (s: string) => resolveExamFormPlaceholders(s, placeholderCtx);
+
+  const examTitle = resolveHdr(
     formTemplate?.headerSettings.examTitle.trim() ||
-    settings.examTitleOverride.trim() ||
-    exam.title;
-  const departmentName =
-    formTemplate?.headerSettings.departmentName.trim() || settings.departmentName;
-  const schoolName =
-    formTemplate?.headerSettings.schoolName.trim() || settings.schoolName;
-  const subjectGroupName = formTemplate?.headerSettings.subjectGroupName.trim() || '';
-  const schoolYear = formTemplate?.headerSettings.schoolYear.trim() || exam.schoolYear;
-  const subjectDisplay =
-    formTemplate?.headerSettings.subjectOverride.trim() || subjectProfile.name;
-  const gradeDisplay = formTemplate?.headerSettings.gradeOverride.trim() || exam.grade;
+      settings.examTitleOverride.trim() ||
+      exam.title
+  );
+  const departmentName = resolveHdr(
+    formTemplate?.headerSettings.departmentName.trim() || settings.departmentName
+  );
+  const schoolName = resolveHdr(
+    formTemplate?.headerSettings.schoolName.trim() || settings.schoolName
+  );
+  const subjectGroupName = resolveHdr(formTemplate?.headerSettings.subjectGroupName.trim() || '');
+  const schoolYear = resolveHdr(formTemplate?.headerSettings.schoolYear.trim() || exam.schoolYear);
+  const subjectDisplay = resolveHdr(
+    formTemplate?.headerSettings.subjectOverride.trim() || subjectProfile.name
+  );
+  const gradeDisplay = resolveHdr(formTemplate?.headerSettings.gradeOverride.trim() || exam.grade);
   const durationDisplay =
     formTemplate?.headerSettings.durationOverrideMinutes ?? exam.durationMinutes;
   const showExamCode = formTemplate ? formTemplate.headerSettings.showExamCode : true;
   const showQuestionCountSubtitle = formTemplate
     ? formTemplate.headerSettings.showQuestionCountSubtitle
     : true;
-  const headerNoteText = formTemplate
-    ? formTemplate.headerSettings.headerNote
-    : settings.headerNote;
+  const headerNoteText = resolveHdr(
+    formTemplate ? formTemplate.headerSettings.headerNote : settings.headerNote
+  );
   const fontFamily = formTemplate?.pageSettings.fontFamily || settings.fontFamily;
   const fontSizePt = formTemplate?.pageSettings.fontSizePt ?? 12;
   const sizeHalfPt = Math.round(fontSizePt * 2);
+  const lineTwips = formTemplate
+    ? Math.round((formTemplate.pageSettings.lineHeight || 1.4) * 240)
+    : undefined;
+  const paragraphSpacingAfter = formTemplate?.pageSettings.paragraphSpacingPt
+    ? Math.round(formTemplate.pageSettings.paragraphSpacingPt * 20)
+    : 40;
   const questionSpacingBefore = formTemplate
     ? Math.max(60, Math.round(formTemplate.pageSettings.questionSpacingPx * 9))
     : 100;
@@ -731,6 +969,31 @@ export async function buildStudentExamDocxBuffer(
     })
   );
 
+  // Optional School Logo embedded cleanly in word/media/ (never affects question media)
+  let logoDrawingParagraph = '';
+  const logoDataUrl = formTemplate?.headerSettings.schoolLogoDataUrl?.trim();
+  if (logoDataUrl) {
+    const logoAsset: MathVisualAsset = {
+      id: 'school-brand-logo',
+      kind: 'image',
+      label: 'school-logo',
+      sourceData: logoDataUrl,
+      altText: schoolName,
+      required: false,
+      checksum: computeContentHash(logoDataUrl),
+    };
+    const logoMedia = parseDataUrlAsset(logoAsset, mediaList, 50);
+    if (logoMedia) {
+      const logoPx = Math.max(28, Math.min(96, formTemplate?.headerSettings.schoolLogoWidthPx ?? 52));
+      const logoEmu = Math.round(logoPx * 9525);
+      logoDrawingParagraph = makeParagraphXml(makeDrawingRunXml(logoMedia, logoEmu, logoEmu), {
+        align: 'center',
+        spacingBefore: 0,
+        spacingAfter: 30,
+      });
+    }
+  }
+
   // Banner Header Table (2 cột: Đơn vị + Thông tin đề & Mã đề)
   const leftLines = [
     departmentName,
@@ -750,8 +1013,36 @@ export async function buildStudentExamDocxBuffer(
     .filter(Boolean)
     .join('\n');
 
-  const headerTableRows = [[leftLines, rightLines]];
-  bodyChunks.push(makeWordTableXml(headerTableRows, fontFamily, false));
+  if (logoDrawingParagraph) {
+    const leftCell = `<w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${logoDrawingParagraph}${makeParagraphXml(
+      renderStyledRunsXml(leftLines, { sizeHalfPt: 22, fontFamily }),
+      { align: 'center', spacingBefore: 20, spacingAfter: 20 }
+    )}</w:tc>`;
+    const rightCell = `<w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${makeParagraphXml(
+      renderStyledRunsXml(rightLines, { bold: true, sizeHalfPt: 22, fontFamily }),
+      { align: 'center', spacingBefore: 20, spacingAfter: 20 }
+    )}</w:tc>`;
+    bodyChunks.push(
+      `<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/><w:left w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/><w:right w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/></w:tblBorders></w:tblPr><w:tr>${leftCell}${rightCell}</w:tr></w:tbl>`
+    );
+  } else {
+    const headerTableRows = [[leftLines, rightLines]];
+    bodyChunks.push(makeWordTableXml(headerTableRows, fontFamily, false));
+  }
+
+  if (draftBannerText) {
+    bodyChunks.push(
+      makeParagraphXml(
+        renderStyledRunsXml(draftBannerText, {
+          bold: true,
+          sizeHalfPt: 22,
+          fontFamily,
+          color: 'B45309',
+        }),
+        { align: 'center', spacingBefore: 80, spacingAfter: 80 }
+      )
+    );
+  }
 
   const studentInfoLine = formTemplate
     ? buildStudentInfoLine(formTemplate)
@@ -871,16 +1162,26 @@ export async function buildStudentExamDocxBuffer(
             numberPrefix: formTemplate.bodySettings.questionNumberPrefix,
             showPoints: formTemplate.bodySettings.showPointsPerQuestion,
             optionLabelStyle: formTemplate.bodySettings.optionLabelStyle,
+            optionLayout: formTemplate.bodySettings.optionLayout,
+            formTemplate,
             sizeHalfPt,
             questionSpacingBefore,
+            paragraphSpacingAfter,
+            lineTwips,
+            bodyAlignment: formTemplate.pageSettings.bodyAlignment,
+            shortAnswerBoxStyle: formTemplate.bodySettings.shortAnswerBoxStyle,
+            shortAnswerBlankLines: formTemplate.bodySettings.shortAnswerBlankLines,
+            essayAnswerLines: formTemplate.bodySettings.essayAnswerLines,
+            essayLineStyle: formTemplate.bodySettings.essayLineStyle,
           }
         : undefined
     );
   });
 
   const showEndMarker = formTemplate ? formTemplate.footerSettings.showEndMarker : true;
-  const endMarkerText =
-    formTemplate?.footerSettings.endMarkerText.trim() || '——— HẾT ———';
+  const endMarkerText = resolveHdr(
+    formTemplate?.footerSettings.endMarkerText.trim() || '——— HẾT ———'
+  );
   if (showEndMarker) {
     bodyChunks.push(
       makeParagraphXml(
@@ -890,9 +1191,9 @@ export async function buildStudentExamDocxBuffer(
     );
   }
 
-  const footerNoteText = formTemplate
-    ? formTemplate.footerSettings.footerNote
-    : settings.footerNote;
+  const footerNoteText = resolveHdr(
+    formTemplate ? formTemplate.footerSettings.footerNote : settings.footerNote
+  );
   const footerSummary = [
     footerNoteText.trim() || null,
     formTemplate?.footerSettings.showCodeInFooter && showExamCode
@@ -916,6 +1217,47 @@ export async function buildStudentExamDocxBuffer(
     );
   }
 
+  if (includeSolutionsFromSource) {
+    const questionsWithSourceSol = preparedQuestions
+      .map((q, idx) => ({ q, orderNum: idx + 1 }))
+      .filter(
+        ({ q }) =>
+          Boolean(q.solutionGuide?.rawSource?.trim()) ||
+          Boolean(q.essayParts?.some((p) => p.solutionOutline?.rawSource?.trim()))
+      );
+    if (questionsWithSourceSol.length > 0) {
+      bodyChunks.push(
+        makeParagraphXml(
+          renderStyledRunsXml('PHẦN LỜI GIẢI CHI TIẾT (TRÍCH TỪ TÀI LIỆU GỐC)', {
+            bold: true,
+            sizeHalfPt: 24,
+            fontFamily,
+            color: '1E3A8A',
+          }),
+          { spacingBefore: 160, spacingAfter: 80 }
+        )
+      );
+      for (const { q, orderNum } of questionsWithSourceSol) {
+        const solText = q.solutionGuide?.rawSource?.trim()
+          ? q.solutionGuide.rawSource.trim()
+          : (q.essayParts ?? [])
+              .filter((p) => p.solutionOutline?.rawSource?.trim())
+              .map((p) => `${p.label} (${p.points}đ): ${p.solutionOutline.rawSource.trim()}`)
+              .join(' | ');
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`Lời giải Câu ${orderNum} (${q.code}): `, {
+              bold: true,
+              fontFamily,
+              sizeHalfPt,
+            }) + renderStyledRunsXml(solText, { fontFamily, sizeHalfPt }),
+            { spacingBefore: 40, spacingAfter: 60 }
+          )
+        );
+      }
+    }
+  }
+
   return packageOoxmlDocxBuffer({
     bodyXml: bodyChunks.join('\n'),
     mediaList,
@@ -932,6 +1274,201 @@ export async function buildStudentExamDocxBuffer(
     fontFamily,
     fontSizePt,
     columns: formTemplate?.pageSettings.columns ?? 1,
+    showPageNumbers: formTemplate?.pageSettings.showPageNumbers ?? true,
+    pageNumberFormat: formTemplate?.pageSettings.pageNumberFormat ?? 'page-of-total',
+    footerLabelText:
+      formTemplate?.footerSettings.showCodeInFooter && showExamCode
+        ? `Mã đề ${version.code}`
+        : undefined,
+  });
+}
+
+/**
+ * Tạo file Word (.docx) đề thi dành riêng cho HỌC SINH cho một mã đề cụ thể.
+ * Đảm bảo 0% rò rỉ đáp án hoặc lời giải. Bắt buộc đi qua `checkExamExportGate`.
+ */
+export async function buildStudentExamDocxBuffer(
+  exam: MathExamProject,
+  version: MixedExamVersion,
+  formTemplate?: ExamFormTemplate
+): Promise<Uint8Array> {
+  const gate = checkExamExportGate(exam);
+  if (!gate.canExport) {
+    throw new Error(`Xuất DOCX bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
+  }
+  return renderStudentExamDocxInternal({ exam, version, formTemplate });
+}
+
+/**
+ * Xuất BẢN NHÁP ĐỀ HỌC SINH KHÔNG KÈM ĐÁP ÁN (.docx):
+ * - Đi qua `checkDraftExportGate(exam)`: CHẶN nếu còn lỗi công thức, phương án thiếu (OPTION_PARSE_INCOMPLETE),
+ *   hoặc tài nguyên UNRENDERABLE.
+ * - Chỉ cho phép khi đề sạch về cấu trúc/nội dung và chỉ thiếu hoặc chưa xác nhận khóa đáp án.
+ * - Tuyệt đối KHÔNG ghi đáp án hay lời giải vào file xuất ra.
+ */
+export async function buildDraftStudentExamDocxBuffer(
+  exam: MathExamProject,
+  version?: MixedExamVersion,
+  formTemplate?: ExamFormTemplate
+): Promise<Uint8Array> {
+  const draftGate = checkDraftExportGate(exam);
+  if (!draftGate.canExportDraft) {
+    throw new Error(
+      `BLOCK OFFICIAL EXPORT — DOCUMENT INTEGRITY FAILED: ${draftGate.blockingStructuralReasons.join(' ')}`
+    );
+  }
+  const effectiveVersion: MixedExamVersion = version ?? {
+    code: 'NHAP',
+    seedUsed: exam.mixConfig.seed || 'draft',
+    generatedAt: new Date().toISOString(),
+    questions: exam.questions,
+    permutationMap: [],
+    answerKeyRows: [],
+    integrityPassed: false,
+    integrityWarnings: [draftGate.warningMessage],
+  };
+  return renderStudentExamDocxInternal({
+    exam,
+    version: effectiveVersion,
+    formTemplate,
+    draftBannerText:
+      'BẢN NHÁP HỌC SINH — CHƯA XÁC NHẬN KHÓA CHẤM · KHÔNG DÙNG CHẤM CHÍNH THỨC',
+    includeSolutionsFromSource: false,
+  });
+}
+
+/**
+ * Xuất ĐỀ KÈM LỜI GIẢI CHI TIẾT (.docx) cho giáo viên — CHỈ xuất lời giải thực sự có trong tài liệu gốc,
+ * tuyệt đối không tự bịa lời giải nếu đề nguồn không có.
+ */
+export async function buildExamWithSolutionsDocxBuffer(
+  exam: MathExamProject,
+  version: MixedExamVersion,
+  formTemplate?: ExamFormTemplate
+): Promise<Uint8Array> {
+  const gate = checkExamExportGate(exam);
+  if (!gate.canExport) {
+    throw new Error(`Xuất Đề kèm lời giải bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
+  }
+  const hasAnySolution = version.questions.some(
+    (q) =>
+      Boolean(q.solutionGuide?.rawSource?.trim()) ||
+      Boolean(q.essayParts?.some((p) => p.solutionOutline?.rawSource?.trim()))
+  );
+  if (!hasAnySolution) {
+    throw new Error(
+      'Tài liệu gốc không có lời giải chi tiết cho bất kỳ câu hỏi nào — hệ thống không tự sinh lời giải.'
+    );
+  }
+  return renderStudentExamDocxInternal({
+    exam,
+    version,
+    formTemplate,
+    includeSolutionsFromSource: true,
+  });
+}
+
+/**
+ * Tạo file Word (.docx) ĐÁP ÁN RIÊNG CHO TỪNG MÃ ĐỀ (VD: `dap-an/Dap_an_101.docx`)
+ * gồm Bảng đáp án mã đề và Bảng ánh xạ hoán vị so với đề gốc.
+ */
+export async function buildPerCodeAnswerKeyDocxBuffer(
+  exam: MathExamProject,
+  version: MixedExamVersion,
+  formTemplate?: ExamFormTemplate
+): Promise<Uint8Array> {
+  const gate = checkExamExportGate(exam);
+  if (!gate.canExport) {
+    throw new Error(`Xuất Đáp án Mã đề ${version.code} bị CHẶN (BLOCKED): ${gate.blockingReasons.join(' ')}`);
+  }
+
+  const settings = resolveExportSettings(exam);
+  const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
+  const examTitle =
+    formTemplate?.headerSettings.examTitle.trim() ||
+    settings.examTitleOverride.trim() ||
+    exam.title;
+  const fontFamily = formTemplate?.pageSettings.fontFamily || settings.fontFamily;
+  const bodyChunks: string[] = [];
+
+  bodyChunks.push(
+    makeParagraphXml(
+      renderStyledRunsXml(`ĐÁP ÁN MÃ ĐỀ ${version.code} — ${examTitle.toUpperCase()}`, {
+        bold: true,
+        sizeHalfPt: 28,
+        fontFamily,
+      }),
+      { align: 'center', spacingBefore: 40, spacingAfter: 40 }
+    )
+  );
+  bodyChunks.push(
+    makeParagraphXml(
+      renderStyledRunsXml(
+        `Môn: ${subjectProfile.name} · ${exam.grade} · Mã đề: ${version.code} · Tổng số câu: ${version.questions.length}`,
+        { italic: true, sizeHalfPt: 22, fontFamily, color: '475569' }
+      ),
+      { align: 'center', spacingBefore: 0, spacingAfter: 120 }
+    )
+  );
+
+  bodyChunks.push(
+    makeParagraphXml(
+      renderStyledRunsXml(`I. BẢNG ĐÁP ÁN MÃ ĐỀ ${version.code}`, {
+        bold: true,
+        sizeHalfPt: 24,
+        fontFamily,
+      }),
+      { spacingBefore: 60, spacingAfter: 60 }
+    )
+  );
+  const ansRows: string[][] = [['Câu mới', 'Phần', 'Dạng câu', 'Đáp án']];
+  version.answerKeyRows.forEach((row) => {
+    ansRows.push([
+      `Câu ${row.number}`,
+      row.sectionTitle || 'Đề thi',
+      row.universalType ?? row.type,
+      row.answer,
+    ]);
+  });
+  bodyChunks.push(makeWordTableXml(ansRows, fontFamily, true));
+
+  bodyChunks.push(
+    makeParagraphXml(
+      renderStyledRunsXml(`II. BẢNG ÁNH XẠ HOÁN VỊ MÃ ĐỀ ${version.code}`, {
+        bold: true,
+        sizeHalfPt: 24,
+        fontFamily,
+      }),
+      { spacingBefore: 120, spacingAfter: 60 }
+    )
+  );
+  const mapRows: string[][] = [['Câu mới', 'Câu gốc (ID)', 'Đáp án', 'Ánh xạ hoán vị']];
+  version.permutationMap.forEach((m, idx) => {
+    const optMap = m.optionPermutation
+      ? m.optionPermutation.map((o) => `${o.newLabel}←${o.originalLabel}`).join(' ')
+      : m.statementPermutation
+      ? m.statementPermutation.map((s) => `${s.newLabel}←${s.originalLabel}`).join(' ')
+      : m.matchingRightPermutation
+      ? m.matchingRightPermutation.map((r) => `${r.newLabel}←${r.originalLabel}`).join(' ')
+      : m.orderingPermutation
+      ? m.orderingPermutation.map((o) => `${o.newLabel}←${o.originalLabel}`).join(' ')
+      : 'Giữ nguyên';
+    mapRows.push([
+      `Câu ${m.newOrderNumber}`,
+      `Câu ${m.originalOrderNumber} (${m.originalCode})`,
+      version.answerKeyRows[idx]?.answer ?? m.exactAnswerSummary,
+      optMap,
+    ]);
+  });
+  bodyChunks.push(makeWordTableXml(mapRows, fontFamily, true));
+
+  return packageOoxmlDocxBuffer({
+    bodyXml: bodyChunks.join('\n'),
+    mediaList: [],
+    marginMm: settings.paperMarginMm,
+    orientation: formTemplate?.pageSettings.orientation ?? 'portrait',
+    fontFamily,
+    fontSizePt: formTemplate?.pageSettings.fontSizePt ?? 12,
   });
 }
 
@@ -949,10 +1486,16 @@ export async function buildAnswerKeyDocxBuffer(
 
   const settings = resolveExportSettings(exam);
   const subjectProfile = getSubjectProfile(resolveSubjectId(exam.subjectId || exam.subject));
-  const examTitle =
+  const placeholderCtx = formTemplate
+    ? buildPlaceholderContext(exam, exam.generatedVersions[0] ?? null, formTemplate)
+    : null;
+  const rawExamTitle =
     formTemplate?.headerSettings.examTitle.trim() ||
     settings.examTitleOverride.trim() ||
     exam.title;
+  const examTitle = placeholderCtx
+    ? resolveExamFormPlaceholders(rawExamTitle, placeholderCtx)
+    : rawExamTitle;
   const fontFamily = formTemplate?.pageSettings.fontFamily || settings.fontFamily;
   const includeMatrix = formTemplate
     ? formTemplate.answerLayout.includePerCodeAnswerTable
@@ -964,6 +1507,8 @@ export async function buildAnswerKeyDocxBuffer(
   const includeSolutions = formTemplate
     ? formTemplate.answerLayout.includeDetailedSolutions
     : false;
+  const answerTableStyle = formTemplate?.answerLayout.answerTableStyle ?? 'multi-column';
+  const answerColumns = formTemplate?.answerLayout.answerColumns ?? 4;
   const bodyChunks: string[] = [];
 
   bodyChunks.push(
@@ -986,7 +1531,7 @@ export async function buildAnswerKeyDocxBuffer(
     )
   );
 
-  // 1. Bảng đáp án tổng hợp tất cả mã đề (chia cụm 6 mã/bảng để vừa khổ A4)
+  // 1. Bảng đáp án tổng hợp tất cả mã đề (luôn giữ chuẩn tương thích, kết hợp bố cục kiểu giáo viên chọn)
   if (includeMatrix) {
     bodyChunks.push(
       makeParagraphXml(
@@ -1007,6 +1552,93 @@ export async function buildAnswerKeyDocxBuffer(
       }
       bodyChunks.push(makeWordTableXml(rows, fontFamily, true));
       bodyChunks.push(makeParagraphXml(renderStyledRunsXml('', { fontFamily }), { spacingAfter: 60 }));
+    }
+
+    // Chế độ trình bày bổ sung theo mẫu bảng đáp án đã thiết kế (horizontal / multi-column / by-section / per-code)
+    if (formTemplate && answerTableStyle === 'horizontal') {
+      exam.generatedVersions.forEach((ver) => {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`Bảng đáp án hàng ngang — Mã ${ver.code}`, {
+              bold: true,
+              sizeHalfPt: 22,
+              fontFamily,
+              color: '1E3A8A',
+            }),
+            { spacingBefore: 80, spacingAfter: 40 }
+          )
+        );
+        const stripSize = 8;
+        for (let s = 0; s < ver.answerKeyRows.length; s += stripSize) {
+          const strip = ver.answerKeyRows.slice(s, s + stripSize);
+          const tbl: string[][] = [
+            ['Câu', ...strip.map((r) => `${r.number}`)],
+            ['Đáp án', ...strip.map((r) => r.answer)],
+          ];
+          bodyChunks.push(makeWordTableXml(tbl, fontFamily, true));
+          bodyChunks.push(makeParagraphXml(renderStyledRunsXml('', { fontFamily }), { spacingAfter: 30 }));
+        }
+      });
+    } else if (formTemplate && answerTableStyle === 'multi-column') {
+      exam.generatedVersions.forEach((ver) => {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`Bảng đáp án ${answerColumns} cột — Mã ${ver.code}`, {
+              bold: true,
+              sizeHalfPt: 22,
+              fontFamily,
+              color: '1E3A8A',
+            }),
+            { spacingBefore: 80, spacingAfter: 40 }
+          )
+        );
+        const total = ver.answerKeyRows.length;
+        const perCol = Math.max(1, Math.ceil(total / answerColumns));
+        const hdr: string[] = [];
+        for (let c = 0; c < answerColumns; c++) hdr.push('Câu', 'Đáp án');
+        const rows: string[][] = [hdr];
+        for (let r = 0; r < perCol; r++) {
+          const rowCells: string[] = [];
+          for (let c = 0; c < answerColumns; c++) {
+            const entry = ver.answerKeyRows[c * perCol + r];
+            rowCells.push(entry ? `Câu ${entry.number}` : '', entry ? entry.answer : '');
+          }
+          rows.push(rowCells);
+        }
+        bodyChunks.push(makeWordTableXml(rows, fontFamily, true));
+      });
+    } else if (formTemplate && answerTableStyle === 'by-section') {
+      exam.generatedVersions.forEach((ver) => {
+        bodyChunks.push(
+          makeParagraphXml(
+            renderStyledRunsXml(`Đáp án phân theo từng phần — Mã ${ver.code}`, {
+              bold: true,
+              sizeHalfPt: 22,
+              fontFamily,
+              color: '1E3A8A',
+            }),
+            { spacingBefore: 80, spacingAfter: 40 }
+          )
+        );
+        const bySec = new Map<string, typeof ver.answerKeyRows>();
+        ver.answerKeyRows.forEach((r) => {
+          const sec = r.sectionTitle || 'Phần chung';
+          const arr = bySec.get(sec) ?? [];
+          arr.push(r);
+          bySec.set(sec, arr);
+        });
+        for (const [secTitle, secRows] of bySec.entries()) {
+          bodyChunks.push(
+            makeParagraphXml(
+              renderStyledRunsXml(secTitle, { bold: true, italic: true, sizeHalfPt: 20, fontFamily }),
+              { spacingBefore: 40, spacingAfter: 20 }
+            )
+          );
+          const tbl: string[][] = [['Câu', 'Dạng câu', 'Đáp án']];
+          secRows.forEach((r) => tbl.push([`Câu ${r.number}`, r.universalType ?? r.type, r.answer]));
+          bodyChunks.push(makeWordTableXml(tbl, fontFamily, true));
+        }
+      });
     }
   }
 
@@ -1164,6 +1796,97 @@ export function buildMixedExamJsonExportPayload(exam: MathExamProject): Record<s
       integrityStatus: v.integrityStatus ?? 'PASS',
       answerKeyRows: v.answerKeyRows,
       permutationMap: v.permutationMap,
+    })),
+  };
+}
+
+/**
+ * Báo cáo truy vết nguồn-đến-đầu-ra (Source-to-Output Traceability) cho QA & hậu kiểm:
+ * Ánh xạ Source: <file> / <section> / Câu <origNum> -> Output: Mã <code> / <section> / Câu <newNum>
+ * kèm sourceQuestionId, originalContentHash, mediaIds, answerId, permutationData, exportedQuestionId.
+ * Tuyệt đối KHÔNG ghi vào đề học sinh.
+ */
+export function buildSourceToOutputTraceabilityReport(exam: MathExamProject): {
+  generatedAt: string;
+  examId: string;
+  examTitle: string;
+  sourceFileName: string;
+  sourceFileHash: string | null;
+  totalSourceQuestions: number;
+  codes: Array<{
+    code: string;
+    seedUsed: string;
+    entries: Array<{
+      sourceQuestionId: string;
+      exportedQuestionId: string;
+      sourceLabel: string;
+      outputLabel: string;
+      originalCode: string;
+      originalContentHash: string | null;
+      mediaIds: string[];
+      answerId: string;
+      answerInCode: string;
+      answerProvenanceStatus: string | null;
+      permutationData: {
+        originalOrderNumber: number;
+        newOrderNumber: number;
+        optionPermutation: unknown;
+        statementPermutation: unknown;
+      };
+    }>;
+  }>;
+} {
+  const sourceFileName =
+    exam.sourceRecord?.fileName ??
+    exam.sourceDocumentPreview?.fileName ??
+    'manual-entry';
+  const sourceFileHash =
+    exam.sourceRecord?.contentHash ??
+    exam.sourceDocumentPreview?.sourceFileHash ??
+    null;
+  const origById = new Map(exam.questions.map((q) => [q.id, q]));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    examId: exam.id,
+    examTitle: exam.title,
+    sourceFileName,
+    sourceFileHash,
+    totalSourceQuestions: exam.questions.length,
+    codes: exam.generatedVersions.map((ver) => ({
+      code: ver.code,
+      seedUsed: ver.seedUsed,
+      entries: ver.permutationMap.map((m, idx) => {
+        const origQ = origById.get(m.questionId);
+        const mixedQ = ver.questions[idx];
+        const origSecNum =
+          origQ?.sourceTrace?.originalQuestionNumberInSection ?? m.originalOrderNumber;
+        const outSecNum = m.sectionQuestionNumber ?? m.newOrderNumber;
+        const mediaIds = [
+          ...(mixedQ?.visualAssets ?? []).map((a) => a.id),
+          ...(mixedQ?.options ?? [])
+            .map((o) => o.visualAsset?.id)
+            .filter((id): id is string => Boolean(id)),
+        ];
+        return {
+          sourceQuestionId: m.questionId,
+          exportedQuestionId: `${ver.code}-Q${m.newOrderNumber}`,
+          sourceLabel: `Source: ${sourceFileName} / ${origQ?.sectionTitle || m.sectionTitle} / Câu ${origSecNum}`,
+          outputLabel: `Output: Mã ${ver.code} / ${m.sectionTitle} / Câu ${outSecNum} (Tổng #${m.newOrderNumber})`,
+          originalCode: m.originalCode,
+          originalContentHash: origQ ? computeQuestionVerificationContentHash(origQ) : null,
+          mediaIds,
+          answerId: origQ?.correctOptionId ?? m.exactAnswerSummary,
+          answerInCode: ver.answerKeyRows[idx]?.answer ?? m.exactAnswerSummary,
+          answerProvenanceStatus: origQ?.answerProvenance?.status ?? null,
+          permutationData: {
+            originalOrderNumber: m.originalOrderNumber,
+            newOrderNumber: m.newOrderNumber,
+            optionPermutation: m.optionPermutation ?? null,
+            statementPermutation: m.statementPermutation ?? null,
+          },
+        };
+      }),
     })),
   };
 }
@@ -1377,6 +2100,100 @@ export async function verifyExportedDocxBuffer(
         recommendation: 'Kiểm tra lại định dạng ảnh đính kèm trước khi xuất.',
       });
     }
+
+    // Kiểm tra bảo toàn số lượng công thức ($...$ / $$...$$ / OMML): chặn lỗi công thức biến mất dù số câu đúng!
+    const countFormulaTokens = (txt: string): number => {
+      if (!txt) return 0;
+      const matches = txt.match(/\$\$[\s\S]+?\$\$|\$[^$\n]+\$/g);
+      return matches ? matches.length : 0;
+    };
+    const expectedLatexFormulaCount = expectedVersion.questions.reduce((sum, q) => {
+      let c = countFormulaTokens(q.stem.rawSource);
+      for (const o of q.options ?? []) c += countFormulaTokens(o.content.rawSource);
+      for (const s of q.statements ?? []) c += countFormulaTokens(s.content.rawSource);
+      return sum + c;
+    }, 0);
+    const extractedFormulaCount =
+      countFormulaTokens(fullText) + extracted.ommlFragments.length;
+    if (
+      expectedLatexFormulaCount > 0 &&
+      extractedFormulaCount < expectedLatexFormulaCount
+    ) {
+      issues.push({
+        id: `exp-formula-loss-${expectedVersion.code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: `File DOCX Mã đề ${expectedVersion.code} bị mất công thức toán học sau khi xuất: chỉ đọc lại được ${extractedFormulaCount}/${expectedLatexFormulaCount} biểu thức.`,
+        recommendation: 'Chặn phát hành vì công thức bị thất lạc trong quá trình đóng gói DOCX.',
+      });
+    }
+
+    // Kiểm tra toàn vẹn quan hệ ảnh trong OOXML (word/_rels/document.xml.rels -> word/media/* không rỗng, không gãy)
+    const rawZip = await JSZip.loadAsync(buffer);
+    const rawDocXml = (await rawZip.file('word/document.xml')?.async('string')) ?? '';
+    const rawRelsXml = (await rawZip.file('word/_rels/document.xml.rels')?.async('string')) ?? '';
+    const relTargetById = new Map<string, string>();
+    const relTagRe = /<Relationship\b([^>]*)\/?>/gi;
+    let rm: RegExpExecArray | null;
+    while ((rm = relTagRe.exec(rawRelsXml)) !== null) {
+      const attrs = rm[1] ?? '';
+      const idMatch = /\bId="([^"]+)"/i.exec(attrs);
+      const targetMatch = /\bTarget="([^"]+)"/i.exec(attrs);
+      if (idMatch?.[1] && targetMatch?.[1]) {
+        relTargetById.set(idMatch[1], targetMatch[1]);
+      }
+    }
+    const embedIds = new Set<string>();
+    const embedRe = /\b(?:r:embed|r:id)="([^"]+)"/g;
+    let em: RegExpExecArray | null;
+    while ((em = embedRe.exec(rawDocXml)) !== null) {
+      embedIds.add(em[1]);
+    }
+    for (const rId of embedIds) {
+      const target = relTargetById.get(rId);
+      if (!target) {
+        issues.push({
+          id: `exp-broken-rel-${expectedVersion.code}-${rId}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: `File DOCX Mã đề ${expectedVersion.code} chứa tham chiếu quan hệ ảnh bị gãy (${rId} không có trong word/_rels/document.xml.rels).`,
+          recommendation: 'Kiểm tra lại quá trình đóng gói ảnh media.',
+        });
+        continue;
+      }
+      if (/media\//i.test(target)) {
+        const mediaPath = target.startsWith('/')
+          ? target.slice(1)
+          : target.startsWith('word/')
+          ? target
+          : `word/${target.replace(/^\.\//, '')}`;
+        const mediaEntry = rawZip.file(mediaPath);
+        if (!mediaEntry) {
+          issues.push({
+            id: `exp-broken-media-${expectedVersion.code}-${rId}`,
+            severity: 'error',
+            tier: 'BLOCKED',
+            scope: 'export',
+            message: `File DOCX Mã đề ${expectedVersion.code} tham chiếu tệp ảnh không tồn tại (${mediaPath}).`,
+            recommendation: 'Chặn phát hành vì tệp ảnh trong DOCX bị thiếu.',
+          });
+        } else {
+          const mediaBytes = await mediaEntry.async('uint8array');
+          if (mediaBytes.byteLength === 0) {
+            issues.push({
+              id: `exp-empty-media-${expectedVersion.code}-${rId}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'export',
+              message: `File DOCX Mã đề ${expectedVersion.code} chứa tệp ảnh rỗng 0 byte (${mediaPath}).`,
+              recommendation: 'Chặn phát hành vì tệp ảnh bị hỏng.',
+            });
+          }
+        }
+      }
+    }
   } catch (err) {
     issues.push({
       id: `exp-docx-invalid-${expectedVersion.code}`,
@@ -1394,6 +2211,115 @@ export async function verifyExportedDocxBuffer(
     passed: issues.every((i) => i.severity !== 'error'),
     issues,
     extractedParagraphCount,
+  };
+}
+
+/**
+ * Kiểm chứng khứ hồi (Round-Trip Verification):
+ * Đọc lại file DOCX học sinh đã xuất bằng `importUniversalExamFile` và đối chiếu:
+ * - Số câu hỏi khôi phục khớp 100%
+ * - Không mất phương án A/B/C/D hay mệnh đề a/b/c/d
+ * - Không có placeholder công thức hoặc tài nguyên UNRENDERABLE
+ * - Bảo toàn công thức và toàn vẹn quan hệ ảnh OOXML.
+ */
+export async function verifyExportedDocxRoundTrip(
+  buffer: ArrayBuffer | Uint8Array,
+  expectedVersion: MixedExamVersion,
+  exam: MathExamProject
+): Promise<{
+  passed: boolean;
+  reimportedQuestionCount: number;
+  expectedQuestionCount: number;
+  issues: MathIntegrityIssue[];
+}> {
+  const baseVerify = await verifyExportedDocxBuffer(buffer, expectedVersion, exam);
+  const issues: MathIntegrityIssue[] = [...baseVerify.issues];
+  let reimportedQuestionCount = 0;
+
+  try {
+    let seq = 0;
+    const reimported = await importUniversalExamFile(
+      { fileName: `Ma_de_${expectedVersion.code}.docx`, buffer },
+      (prefix) => `${prefix}-rt-${++seq}`,
+      { subjectId: resolveSubjectId(exam.subjectId || exam.subject) }
+    );
+    reimportedQuestionCount = reimported.questions.length;
+
+    if (reimportedQuestionCount !== expectedVersion.questions.length) {
+      issues.push({
+        id: `rt-qcount-${expectedVersion.code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: `Round-trip DOCX Mã ${expectedVersion.code}: đọc lại được ${reimportedQuestionCount}/${expectedVersion.questions.length} câu hỏi.`,
+        recommendation: 'Kiểm tra lại định dạng xuất câu hỏi để tránh mất/nhân đôi câu.',
+      });
+    }
+
+    reimported.questions.forEach((rq, idx) => {
+      const expQ = expectedVersion.questions[idx];
+      if (!expQ) return;
+      if (rq.optionParseIncomplete) {
+        issues.push({
+          id: `rt-opt-incomplete-${expectedVersion.code}-${idx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: idx + 1,
+          message: `Round-trip DOCX Mã ${expectedVersion.code} Câu ${idx + 1}: phương án đọc lại bị thiếu (OPTION_PARSE_INCOMPLETE).`,
+          recommendation: 'Kiểm tra lại cấu trúc xuất phương án A/B/C/D.',
+        });
+      }
+      if (expQ.type === 'mcq' && (rq.options?.length ?? 0) !== (expQ.options?.length ?? 0)) {
+        issues.push({
+          id: `rt-mcq-opt-count-${expectedVersion.code}-${idx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: idx + 1,
+          message: `Round-trip DOCX Mã ${expectedVersion.code} Câu ${idx + 1}: số phương án đọc lại (${rq.options?.length ?? 0}) không khớp bản xuất (${expQ.options?.length ?? 0}).`,
+          recommendation: 'Kiểm tra định dạng xuất MCQ.',
+        });
+      }
+      if (expQ.type === 'true-false' && (rq.statements?.length ?? 0) !== (expQ.statements?.length ?? 0)) {
+        issues.push({
+          id: `rt-tf-stmt-count-${expectedVersion.code}-${idx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: idx + 1,
+          message: `Round-trip DOCX Mã ${expectedVersion.code} Câu ${idx + 1}: số mệnh đề Đúng/Sai đọc lại (${rq.statements?.length ?? 0}) không khớp bản xuất (${expQ.statements?.length ?? 0}).`,
+          recommendation: 'Kiểm tra định dạng xuất Đúng/Sai.',
+        });
+      }
+      if (rq.unrenderableMediaRefs && rq.unrenderableMediaRefs.length > 0) {
+        issues.push({
+          id: `rt-unrenderable-${expectedVersion.code}-${idx + 1}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          questionNumber: idx + 1,
+          message: `Round-trip DOCX Mã ${expectedVersion.code} Câu ${idx + 1}: chứa tài nguyên UNRENDERABLE (${rq.unrenderableMediaRefs.join(', ')}).`,
+          recommendation: 'Kiểm tra lại đóng gói hình ảnh.',
+        });
+      }
+    });
+  } catch (err) {
+    issues.push({
+      id: `rt-parse-error-${expectedVersion.code}`,
+      severity: 'error',
+      tier: 'BLOCKED',
+      scope: 'export',
+      message: `Round-trip DOCX Mã ${expectedVersion.code} lỗi đọc lại: ${err instanceof Error ? err.message : 'Lỗi không xác định'}`,
+      recommendation: 'Kiểm tra lại file DOCX xuất ra.',
+    });
+  }
+
+  return {
+    passed: issues.every((i) => i.severity !== 'error'),
+    reimportedQuestionCount,
+    expectedQuestionCount: expectedVersion.questions.length,
+    issues,
   };
 }
 
@@ -1611,7 +2537,8 @@ export function verifyExportedCsv(
  * Sau đó chạy kiểm chứng ngược ZIP + từng file DOCX bên trong (Layer 7: Export Integrity).
  */
 export async function exportMixedExamZipBundle(
-  exam: MathExamProject
+  exam: MathExamProject,
+  formTemplate?: ExamFormTemplate
 ): Promise<{
   zipBytes: Uint8Array;
   fileName: string;
@@ -1626,7 +2553,7 @@ export async function exportMixedExamZipBundle(
   const manifestEntries: Array<{ path: string; bytes: number; shaFnv: string }> = [];
 
   for (const ver of exam.generatedVersions) {
-    const docxBytes = await buildStudentExamDocxBuffer(exam, ver);
+    const docxBytes = await buildStudentExamDocxBuffer(exam, ver, formTemplate);
     const entryPath = `de-hoc-sinh/Ma_de_${ver.code}.docx`;
     zip.file(entryPath, docxBytes);
     manifestEntries.push({
@@ -1634,9 +2561,18 @@ export async function exportMixedExamZipBundle(
       bytes: docxBytes.byteLength,
       shaFnv: computeContentHash(`${entryPath}:${docxBytes.byteLength}`),
     });
+
+    const perCodeAnsBytes = await buildPerCodeAnswerKeyDocxBuffer(exam, ver, formTemplate);
+    const perCodeAnsPath = `dap-an/Dap_an_${ver.code}.docx`;
+    zip.file(perCodeAnsPath, perCodeAnsBytes);
+    manifestEntries.push({
+      path: perCodeAnsPath,
+      bytes: perCodeAnsBytes.byteLength,
+      shaFnv: computeContentHash(`${perCodeAnsPath}:${perCodeAnsBytes.byteLength}`),
+    });
   }
 
-  const answerDocx = await buildAnswerKeyDocxBuffer(exam);
+  const answerDocx = await buildAnswerKeyDocxBuffer(exam, formTemplate);
   zip.file('dap-an/Dap_an_va_Anh_xa.docx', answerDocx);
   manifestEntries.push({
     path: 'dap-an/Dap_an_va_Anh_xa.docx',
@@ -1662,6 +2598,8 @@ export async function exportMixedExamZipBundle(
     examTitle: exam.title,
     subject: exam.subject,
     subjectId: resolveSubjectId(exam.subjectId || exam.subject),
+    formTemplateId: formTemplate?.id ?? null,
+    formTemplateName: formTemplate?.name ?? null,
     preMixReport: exam.lastIntegrityReport ?? null,
     versions: exam.generatedVersions.map((v) => ({
       code: v.code,
@@ -1672,14 +2610,22 @@ export async function exportMixedExamZipBundle(
   };
   zip.file('kiem-chung/Bao_cao_toan_ven.json', JSON.stringify(integrityPayload, null, 2));
 
+  const traceabilityPayload = buildSourceToOutputTraceabilityReport(exam);
+  zip.file(
+    'kiem-chung/Bao_cao_truy_vet_nguon.json',
+    JSON.stringify(traceabilityPayload, null, 2)
+  );
+
   zip.file(
     'manifest.json',
     JSON.stringify(
       {
-        generator: 'TeacherOS Exam Mixer Pro 6.0',
+        generator: 'TeacherOS Exam Reliability Engine 1.0 + Form Designer',
         exportedAt: new Date().toISOString(),
         examTitle: exam.title,
         subject: exam.subject,
+        formTemplateId: formTemplate?.id ?? null,
+        formTemplateName: formTemplate?.name ?? null,
         totalCodes: exam.generatedVersions.length,
         codes: exam.generatedVersions.map((v) => v.code),
         files: manifestEntries,
@@ -1766,6 +2712,30 @@ export async function verifyExportedZipBundle(
     issues.push(...docxVerify.issues);
     if (docxVerify.passed) {
       verifiedCodes.push(ver.code);
+    }
+
+    const perCodeAnsEntry = loaded.file(`dap-an/Dap_an_${ver.code}.docx`);
+    if (!perCodeAnsEntry) {
+      issues.push({
+        id: `zip-missing-percode-ans-${ver.code}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'export',
+        message: `Thiếu file đáp án riêng dap-an/Dap_an_${ver.code}.docx trong gói ZIP.`,
+        recommendation: 'Thực hiện xuất lại bộ đề.',
+      });
+    } else {
+      const perCodeText = (await extractDocxDocument(await perCodeAnsEntry.async('uint8array'))).plainTextWithMarkers;
+      if (!perCodeText.includes(`MÃ ĐỀ ${ver.code}`) && !perCodeText.includes(`Mã đề ${ver.code}`)) {
+        issues.push({
+          id: `zip-invalid-percode-ans-${ver.code}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'export',
+          message: `File đáp án riêng Dap_an_${ver.code}.docx không chứa đúng mã đề ${ver.code}.`,
+          recommendation: 'Thực hiện xuất lại bộ đề.',
+        });
+      }
     }
   }
 
@@ -2293,5 +3263,102 @@ export async function auditUnknownExamZipBundle(
     passed: issues.every((i) => i.severity !== 'error'),
     codesInspected,
     issues,
+  };
+}
+
+/**
+ * Kiểm định hậu xuất toàn diện cho một file DOCX đã áp dụng Exam Form Template (Phase 3):
+ * - Mở lại ZIP & kiểm tra cấu trúc OOXML hợp lệ
+ * - Đếm số câu, công thức OMML / MathType / ảnh nhúng
+ * - Đảm bảo 0% rò rỉ đáp án học sinh & nguyên vẹn ánh xạ hoán vị
+ * - Báo cáo trung thực visualRenderStatus = 'NOT_TESTED' khi chạy trong trình duyệt
+ */
+export async function runExamFormPostExportAudit(
+  docxBytes: Uint8Array | ArrayBuffer,
+  exam: MathExamProject,
+  version: MixedExamVersion,
+  template?: ExamFormTemplate
+): Promise<ExamFormPostExportAuditReport> {
+  const checkedAt = new Date().toISOString();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  let ooxmlValid = false;
+  let ommlCount = 0;
+  let mathTypeCount = 0;
+  let embeddedMediaCount = 0;
+  let hasLogoMedia = false;
+  let zeroAnswerLeak = true;
+
+  try {
+    const zip = await JSZip.loadAsync(docxBytes);
+    const docEntry = zip.file('word/document.xml');
+    const relsEntry = zip.file('word/_rels/document.xml.rels');
+    const typesEntry = zip.file('[Content_Types].xml');
+    ooxmlValid = Boolean(docEntry && relsEntry && typesEntry);
+
+    if (docEntry) {
+      const xml = await docEntry.async('string');
+      ommlCount = (xml.match(/<m:oMath\b/g) ?? []).length;
+      mathTypeCount = (xml.match(/docx-ole-svg-/g) ?? []).length;
+      if (
+        xml.includes('BẢNG ĐÁP ÁN TỔNG HỢP') ||
+        xml.includes('PHẦN LỜI GIẢI CHI TIẾT')
+      ) {
+        zeroAnswerLeak = false;
+        errors.push('Phát hiện rò rỉ khối bảng đáp án hoặc lời giải trong file đề học sinh.');
+      }
+      if (template?.headerSettings.schoolLogoDataUrl?.trim()) {
+        hasLogoMedia = xml.includes('school-logo');
+      }
+    }
+    embeddedMediaCount = Object.keys(zip.files).filter((p) =>
+      p.startsWith('word/media/')
+    ).length;
+  } catch (err) {
+    ooxmlValid = false;
+    errors.push(
+      `Không thể đọc cấu trúc OOXML của file DOCX: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  const bufCheck = await verifyExportedDocxBuffer(docxBytes, version, exam);
+  for (const issue of bufCheck.issues) {
+    if (issue.severity === 'error') errors.push(issue.message);
+    else warnings.push(issue.message);
+  }
+
+  const rtCheck = await verifyExportedDocxRoundTrip(docxBytes, version, exam);
+  for (const issue of rtCheck.issues) {
+    if (issue.severity === 'error') errors.push(issue.message);
+    else warnings.push(issue.message);
+  }
+
+  const answerMappingIntact =
+    version.answerKeyRows.length === version.questions.length &&
+    version.permutationMap.length === version.questions.length;
+  if (!answerMappingIntact) {
+    errors.push('Số lượng dòng bảng đáp án hoặc bảng ánh xạ hoán vị không khớp số câu hỏi.');
+  }
+
+  return {
+    checkedAt,
+    examCode: version.code,
+    ooxmlValid,
+    questionCountMatched: rtCheck.reimportedQuestionCount === version.questions.length,
+    expectedQuestions: version.questions.length,
+    foundQuestions: rtCheck.reimportedQuestionCount,
+    ommlCount,
+    mathTypeCount,
+    embeddedMediaCount,
+    hasLogoMedia,
+    zeroAnswerLeak,
+    roundTripPassed: rtCheck.passed,
+    answerMappingIntact,
+    visualRenderStatus: 'NOT_TESTED',
+    visualRenderNote:
+      'Trình duyệt không chạy Microsoft Word / LibreOffice để kiểm tra hiển thị thị giác; đã xác minh đầy đủ cấu trúc OOXML, số câu, hình/công thức và khóa đáp án.',
+    errors,
+    warnings,
   };
 }

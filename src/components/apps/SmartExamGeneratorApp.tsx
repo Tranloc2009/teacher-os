@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Database,
   LayoutDashboard,
   ShieldCheck,
@@ -46,6 +47,8 @@ import { NaturalLanguageExamPanel } from '../examGenerator/NaturalLanguageExamPa
 import { QuestionBankManagerPanel } from '../examGenerator/QuestionBankManagerPanel';
 import { TemplateBuilderPanel } from '../examGenerator/TemplateBuilderPanel';
 
+import { findExistingExamForDraft } from '../../core/connectedWorkflowEngine';
+
 export type GeneratorTabId = 'dashboard' | 'natural-language' | 'wizard' | 'bank' | 'templates';
 
 interface SmartExamGeneratorAppProps {
@@ -55,8 +58,11 @@ interface SmartExamGeneratorAppProps {
   preferredTab?: GeneratorTabId | null;
   preferredPrompt?: string | null;
   preferredTopicFilter?: string | null;
+  preferredAction?: 'create' | 'index-to-bank' | null;
   onClearPreferredResource?: () => void;
   onSyncWorkflowDraft?: (draft: GeneratedExamDraft) => void;
+  onDraftsChanged?: (drafts: GeneratedExamDraft[]) => void;
+  onOpenResourceVault?: () => void;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onOpenExamMixerWithExam: (examId: string) => void;
   onOpenGradingStudioWithExam: (examId: string) => void;
@@ -78,8 +84,11 @@ export function SmartExamGeneratorApp({
   preferredTab,
   preferredPrompt,
   preferredTopicFilter,
+  preferredAction,
   onClearPreferredResource,
   onSyncWorkflowDraft,
+  onDraftsChanged,
+  onOpenResourceVault,
   onSaveMathExam,
   onOpenExamMixerWithExam,
   onOpenGradingStudioWithExam,
@@ -97,6 +106,8 @@ export function SmartExamGeneratorApp({
   const [templateBuilderTargetId, setTemplateBuilderTargetId] = useState<string | null>(null);
   const [templateBuilderSourceQ, setTemplateBuilderSourceQ] =
     useState<BankQuestionRecord | null>(null);
+  const inFlightExportDraftIdsRef = useRef<Set<string>>(new Set());
+  const autoIndexedResourceRef = useRef<string | null>(null);
 
   const loadStore = useCallback(async () => {
     setLoading(true);
@@ -120,14 +131,29 @@ export function SmartExamGeneratorApp({
   }, [loadStore]);
 
   useEffect(() => {
-    if (preferredTab) {
+    onDraftsChanged?.(drafts);
+  }, [drafts, onDraftsChanged]);
+
+  const missingPreferredResource = useMemo(
+    () =>
+      Boolean(
+        preferredResourceId &&
+          !resources.some((r) => r.id === preferredResourceId)
+      ),
+    [preferredResourceId, resources]
+  );
+
+  useEffect(() => {
+    if (preferredAction === 'index-to-bank' && preferredResourceId) {
+      setActiveTab('bank');
+    } else if (preferredTab) {
       setActiveTab(preferredTab);
     } else if (preferredResourceId || preferredPrompt) {
       setActiveTab('natural-language');
     } else if (preferredTopicFilter) {
       setActiveTab('bank');
     }
-  }, [preferredTab, preferredResourceId, preferredPrompt, preferredTopicFilter]);
+  }, [preferredAction, preferredTab, preferredResourceId, preferredPrompt, preferredTopicFilter]);
 
   const unifiedBank = useMemo(
     () => collectUnifiedQuestionBank(storedBank, mathExams),
@@ -193,6 +219,30 @@ export function SmartExamGeneratorApp({
     },
     [resources, storedBank, mathExams, onNotify]
   );
+
+  // Tự động lập chỉ mục tài liệu nguồn khi điều hướng từ Resource Vault ("Thêm câu vào ngân hàng")
+  useEffect(() => {
+    if (
+      loading ||
+      preferredAction !== 'index-to-bank' ||
+      !preferredResourceId ||
+      missingPreferredResource ||
+      autoIndexedResourceRef.current === preferredResourceId
+    ) {
+      return;
+    }
+    autoIndexedResourceRef.current = preferredResourceId;
+    void handleIndexResources([preferredResourceId]).finally(() => {
+      onClearPreferredResource?.();
+    });
+  }, [
+    loading,
+    preferredAction,
+    preferredResourceId,
+    missingPreferredResource,
+    handleIndexResources,
+    onClearPreferredResource,
+  ]);
 
   const handleAddBankQuestion = async (item: BankQuestionRecord) => {
     try {
@@ -287,14 +337,21 @@ export function SmartExamGeneratorApp({
   };
 
   const handleSendToExamMixer = async (draft: GeneratedExamDraft) => {
+    // Idempotency guard: chống bấm đúp tạo trùng 2 đề trong Exam Mixer Pro
+    if (inFlightExportDraftIdsRef.current.has(draft.id)) {
+      return;
+    }
     const graphBindingCheck = verifyDraftDynamicGraphBindings(draft);
     if (!graphBindingCheck.valid) {
       onNotify('error', graphBindingCheck.reason ?? 'BLOCK EXPORT — STALE GRAPH DATA');
       return;
     }
+    inFlightExportDraftIdsRef.current.add(draft.id);
     try {
+      const existingLinked = findExistingExamForDraft(mathExams, draft);
+      const deterministicExamId = existingLinked?.id ?? draft.exportedExamProjectId ?? `mexam-gen-${draft.id}`;
       const project = convertDraftToMathExamProject(draft, {
-        examId: draft.exportedExamProjectId,
+        examId: deterministicExamId,
         examCount: 4,
         startCodeNumber: 101,
       });
@@ -306,23 +363,33 @@ export function SmartExamGeneratorApp({
       });
       onNotify(
         'success',
-        `Đã chuyển "${savedProject.title}" (${savedProject.questions.length} câu) sang Exam Mixer Pro.`
+        existingLinked
+          ? `Đã đồng bộ lại "${savedProject.title}" (${savedProject.questions.length} câu) trong Exam Mixer Pro (không tạo bản trùng).`
+          : `Đã chuyển "${savedProject.title}" (${savedProject.questions.length} câu) sang Exam Mixer Pro.`
       );
       onOpenExamMixerWithExam(savedProject.id);
     } catch {
       onNotify('error', 'Không thể chuyển đề sang Exam Mixer Pro.');
+    } finally {
+      inFlightExportDraftIdsRef.current.delete(draft.id);
     }
   };
 
   const handleMixAndSendToGrading = async (draft: GeneratedExamDraft) => {
+    if (inFlightExportDraftIdsRef.current.has(draft.id)) {
+      return;
+    }
     const gate = canExportOfficialAnswerKey(draft);
     if (!gate.allowed) {
       onNotify('error', gate.reason ?? 'Cần xác nhận toàn bộ đáp án trước khi chấm OMR.');
       return;
     }
+    inFlightExportDraftIdsRef.current.add(draft.id);
     try {
+      const existingLinked = findExistingExamForDraft(mathExams, draft);
+      const deterministicExamId = existingLinked?.id ?? draft.exportedExamProjectId ?? `mexam-gen-${draft.id}`;
       const project = convertDraftToMathExamProject(draft, {
-        examId: draft.exportedExamProjectId,
+        examId: deterministicExamId,
         examCount: 4,
         startCodeNumber: 101,
       });
@@ -349,6 +416,8 @@ export function SmartExamGeneratorApp({
       onOpenGradingStudioWithExam(savedProject.id);
     } catch {
       onNotify('error', 'Không thể tạo mã đề để chuyển sang Smart Grading Studio.');
+    } finally {
+      inFlightExportDraftIdsRef.current.delete(draft.id);
     }
   };
 
@@ -402,6 +471,43 @@ export function SmartExamGeneratorApp({
           </div>
         }
       />
+
+      {missingPreferredResource && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/50 px-4 py-3 text-xs text-amber-950 dark:text-amber-200"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <p className="font-bold">
+                Không tìm thấy tài liệu nguồn đã chọn (ID: {preferredResourceId})
+              </p>
+              <p className="mt-0.5 text-amber-800 dark:text-amber-300">
+                Tài liệu có thể đã bị xóa khỏi Resource Vault. Hệ thống không tự động chọn nhầm tài liệu khác — hãy chọn lại tài liệu nguồn.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {onOpenResourceVault && (
+              <button
+                type="button"
+                onClick={onOpenResourceVault}
+                className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+              >
+                Chọn lại trong Resource Vault
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onClearPreferredResource?.()}
+              className="rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200"
+            >
+              Đóng cảnh báo
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Module Navigation Tabs */}
       <div

@@ -1,0 +1,31 @@
+# =============================================================================
+# TeacherOS 5.0 — Phase 4A Cloudflare Workers Free API (`teacheros-api`)
+# Free Tier Only: No R2, No Durable Objects, No Paid Queues, No Google Billing
+# =============================================================================
+
+name = "teacheros-api"
+main = "src/index.ts"
+compatibility_date = "2026-03-01"
+workers_dev = true
+
+[vars]
+# Danh sách origin được phép gọi API (phân tách bằng dấu phẩy, TUYỆT ĐỐI không dùng "*")
+# Đã bao gồm localhost, AI Studio preview và domain Pages mẫu — hãy thay domain Cloudflare Pages thật của bạn nếu khác.
+ALLOWED_ORIGINS = "http://localhost:3000,https://teacheros.pages.dev,https://ais-dev-unpyp2byvmk2zwk6hgx725-21463468161.asia-northeast1.run.app,https://ais-pre-unpyp2byvmk2zwk6hgx725-21463468161.asia-northeast1.run.app"
+
+# URL dự án Supabase Free (công khai, KHÔNG phải secret)
+SUPABASE_URL = "https://odbiolvnxxxipybsyhla.supabase.co"
+
+# Giới hạn tần suất:
+# - Public /api/health dùng best-effort per-isolate (nên kết hợp thêm 1 Free WAF Rule trên Cloudflare Dashboard)
+# - Mutating authenticated routes (/api/v1/* POST) dùng bộ đếm bền vững trong PostgreSQL (global multi-instance)
+RATE_LIMIT_MAX = "60"
+RATE_LIMIT_WINDOW_MS = "60000"
+MUTATION_RATE_LIMIT_MAX = "20"
+MUTATION_RATE_LIMIT_WINDOW_SEC = "60"
+
+# -----------------------------------------------------------------------------
+# REQUIRED SECRETS (Cài đặt bằng `wrangler secret put`, KHÔNG ghi giá trị vào tệp này):
+#   npx wrangler secret put SUPABASE_SECRET_KEY
+#   npx wrangler secret put SUPABASE_PUBLISHABLE_KEY
+# -----------------------------------------------------------------------------

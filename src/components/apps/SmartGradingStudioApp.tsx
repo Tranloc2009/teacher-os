@@ -32,6 +32,8 @@ import {
   buildExamAnswerKeyMap,
   listGradableExams,
 } from '../../core/grading/examMixerBridge';
+import { checkExamExportGate } from '../../core/mathIntegrity';
+import { findExistingGradingSession } from '../../core/connectedWorkflowEngine';
 import { generateMixedExams } from '../../core/mathShuffleEngine';
 import {
   annotateDuplicateStudentWarnings,
@@ -96,9 +98,10 @@ export type GradingTabId =
 interface SmartGradingStudioAppProps {
   mathExams: MathExamProject[];
   preferredExamId?: string | null;
+  preferredSessionId?: string | null;
   preferredClassName?: string | null;
   preferredTab?: GradingTabId | null;
-  onOpenExamMixer: () => void;
+  onOpenExamMixer: (examId?: string) => void;
   onSaveMathExam?: (exam: MathExamProject) => Promise<unknown> | void;
   onSessionsChanged?: (sessions: GradingSession[]) => void;
   onNotify: (tone: 'success' | 'info' | 'error', message: string) => void;
@@ -107,6 +110,7 @@ interface SmartGradingStudioAppProps {
 export function SmartGradingStudioApp({
   mathExams,
   preferredExamId,
+  preferredSessionId,
   preferredClassName,
   preferredTab,
   onOpenExamMixer,
@@ -117,6 +121,13 @@ export function SmartGradingStudioApp({
   const [sessions, setSessions] = useState<GradingSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<GradingTabId>('dashboard');
+  const creatingSessionRef = useRef(false);
+  const [preferredExamAlert, setPreferredExamAlert] = useState<{
+    kind: 'missing' | 'blocked';
+    title: string;
+    detail: string;
+    examId?: string;
+  } | null>(null);
   const [selectedReviewSheetId, setSelectedReviewSheetId] = useState<string | null>(
     null
   );
@@ -197,7 +208,43 @@ export function SmartGradingStudioApp({
   }, [sessions, onSessionsChanged]);
 
   useEffect(() => {
-    if (preferredExamId && gradableExams.some((e) => e.id === preferredExamId)) {
+    if (preferredSessionId) {
+      const exactSession = sessions.find((s) => s.id === preferredSessionId);
+      if (exactSession) {
+        setActiveSessionId(exactSession.id);
+        setCreatingNew(false);
+      }
+    }
+  }, [preferredSessionId, sessions]);
+
+  useEffect(() => {
+    if (preferredExamId) {
+      const targetExam = mathExams.find((e) => e.id === preferredExamId);
+      if (!targetExam) {
+        setPreferredExamAlert({
+          kind: 'missing',
+          title: `Không tìm thấy đề kiểm tra (ID: ${preferredExamId})`,
+          detail:
+            'Đề kiểm tra gắn với quy trình này không còn tồn tại. Hệ thống không tự mở nhầm đề khác để bảo vệ tính chính xác đáp án OMR.',
+        });
+        return;
+      }
+
+      const exportGate = checkExamExportGate(targetExam);
+      const isGradable = gradableExams.some((e) => e.id === targetExam.id);
+      if (!isGradable || !exportGate.canExport) {
+        setPreferredExamAlert({
+          kind: 'blocked',
+          title: `Chặn chấm OMR cho "${targetExam.title}" do chưa đạt kiểm chứng toàn vẹn`,
+          detail:
+            exportGate.blockingReasons[0] ??
+            'Đề chưa có mã đề hợp lệ hoặc chưa xác nhận đủ đáp án gốc. Vui lòng hoàn tất trong Exam Mixer Pro trước khi chấm OMR.',
+          examId: targetExam.id,
+        });
+        return;
+      }
+
+      setPreferredExamAlert(null);
       setDraftExamId(preferredExamId);
       const existing = sessions.find((s) => s.examId === preferredExamId);
       if (existing) {
@@ -206,10 +253,13 @@ export function SmartGradingStudioApp({
       } else if (preferredTab !== 'azota') {
         setCreatingNew(true);
       }
-    } else if (!draftExamId && gradableExams.length > 0) {
-      setDraftExamId(gradableExams[0].id);
+    } else {
+      setPreferredExamAlert(null);
+      if (!draftExamId && gradableExams.length > 0) {
+        setDraftExamId(gradableExams[0].id);
+      }
     }
-  }, [draftExamId, gradableExams, preferredExamId, preferredTab, sessions]);
+  }, [draftExamId, gradableExams, mathExams, preferredExamId, preferredTab, sessions]);
 
   const draftExam = useMemo(
     () => gradableExams.find((e) => e.id === draftExamId) ?? gradableExams[0],
@@ -606,8 +656,19 @@ export function SmartGradingStudioApp({
   };
 
   const handleCreateSession = async () => {
+    // Idempotency guard: chống bấm đúp tạo trùng phiên chấm OMR
+    if (creatingSessionRef.current) return;
     if (!draftExam) {
       onNotify('error', 'Vui lòng tạo và trộn ít nhất 1 mã đề trong Exam Mixer Pro trước.');
+      return;
+    }
+    const exportGate = checkExamExportGate(draftExam);
+    if (!exportGate.canExport) {
+      onNotify(
+        'error',
+        exportGate.blockingReasons[0] ??
+          'Đề kiểm tra chưa đạt cổng kiểm chứng toàn vẹn trong Exam Mixer Pro.'
+      );
       return;
     }
     if (draftSelectedCodes.length === 0) {
@@ -615,43 +676,68 @@ export function SmartGradingStudioApp({
       return;
     }
 
+    const normalizedClass = draftClassName.trim() || '12A1';
+    const existingDuplicate = findExistingGradingSession(
+      sessions,
+      draftExam.id,
+      normalizedClass,
+      draftSelectedCodes
+    );
+    if (existingDuplicate) {
+      setActiveSessionId(existingDuplicate.id);
+      setCreatingNew(false);
+      setActiveTab('roster');
+      onNotify(
+        'info',
+        `Đã mở lại phiên chấm hiện có "${existingDuplicate.title}" cho lớp ${existingDuplicate.className} (chống tạo trùng phiên).`
+      );
+      return;
+    }
+
     const keys = buildExamAnswerKeyMap(draftExam, draftSelectedCodes);
+    const invalidCodes = Object.values(keys).filter((k) => !k.valid);
     const validKey = Object.values(keys).find((k) => k.valid);
-    if (!validKey) {
+    if (!validKey || invalidCodes.length > 0) {
       const firstErr =
+        invalidCodes[0]?.blockingErrors[0] ??
         Object.values(keys)[0]?.blockingErrors[0] ??
         'Các mã đề đã chọn chưa đạt điều kiện chấm OMR tự động.';
       onNotify('error', firstErr);
       return;
     }
 
-    const now = new Date().toISOString();
-    const newSession: GradingSession = {
-      id: createId('grade'),
-      title: draftTitle.trim() || `Chấm ${draftExam.title}`,
-      examId: draftExam.id,
-      examTitle: draftExam.title,
-      subject: draftExam.subject,
-      grade: draftExam.grade,
-      className: draftClassName.trim() || '12A1',
-      selectedExamCodes: [...draftSelectedCodes],
-      omrQuestionCount: validKey.autoGradableCount,
-      gradingRule: { ...DEFAULT_GRADING_RULE },
-      omrThresholds: { ...DEFAULT_OMR_THRESHOLDS },
-      students: [],
-      sheets: [],
-      createdAt: now,
-      updatedAt: now,
-    };
+    creatingSessionRef.current = true;
+    try {
+      const now = new Date().toISOString();
+      const newSession: GradingSession = {
+        id: createId('grade'),
+        title: draftTitle.trim() || `Chấm ${draftExam.title}`,
+        examId: draftExam.id,
+        examTitle: draftExam.title,
+        subject: draftExam.subject,
+        grade: draftExam.grade,
+        className: normalizedClass,
+        selectedExamCodes: [...draftSelectedCodes],
+        omrQuestionCount: validKey.autoGradableCount,
+        gradingRule: { ...DEFAULT_GRADING_RULE },
+        omrThresholds: { ...DEFAULT_OMR_THRESHOLDS },
+        students: [],
+        sheets: [],
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    await persistSession(newSession);
-    setActiveSessionId(newSession.id);
-    setCreatingNew(false);
-    setActiveTab('roster');
-    onNotify(
-      'success',
-      `Đã tạo phiên chấm "${newSession.title}" (${newSession.selectedExamCodes.length} mã đề, ${newSession.omrQuestionCount} câu OMR).`
-    );
+      await persistSession(newSession);
+      setActiveSessionId(newSession.id);
+      setCreatingNew(false);
+      setActiveTab('roster');
+      onNotify(
+        'success',
+        `Đã tạo phiên chấm "${newSession.title}" (${newSession.selectedExamCodes.length} mã đề, ${newSession.omrQuestionCount} câu OMR).`
+      );
+    } finally {
+      creatingSessionRef.current = false;
+    }
   };
 
   const handleUpdateStudents = async (nextStudents: StudentRecord[]) => {
@@ -899,6 +985,41 @@ export function SmartGradingStudioApp({
 
   return (
     <main className="mx-auto max-w-[1380px] px-4 py-5 sm:px-6 sm:py-6 space-y-5">
+      {preferredExamAlert && (
+        <div
+          role="alert"
+          className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-xs ${
+            preferredExamAlert.kind === 'blocked'
+              ? 'border-rose-300 dark:border-rose-800 bg-rose-50/90 dark:bg-rose-950/50 text-rose-950 dark:text-rose-200'
+              : 'border-amber-300 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/50 text-amber-950 dark:text-amber-200'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <p className="font-bold">{preferredExamAlert.title}</p>
+              <p className="mt-0.5 opacity-90">{preferredExamAlert.detail}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onOpenExamMixer(preferredExamAlert.examId)}
+              className="rounded-xl bg-[#635BFF] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#5248f0]"
+            >
+              Mở Exam Mixer Pro để xử lý
+            </button>
+            <button
+              type="button"
+              onClick={() => setPreferredExamAlert(null)}
+              className="rounded-xl border border-current/25 bg-white/80 dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold"
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Compact Aurora Bento Module Header */}
       <header className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 py-4 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
@@ -1028,7 +1149,7 @@ export function SmartGradingStudioApp({
                 )}
                 <button
                   type="button"
-                  onClick={onOpenExamMixer}
+                  onClick={() => onOpenExamMixer?.()}
                   className="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
                 >
                   <Layers className="h-4 w-4" aria-hidden="true" />
