@@ -27,6 +27,8 @@ export interface PreferredExamTarget {
   examCode?: string | null;
 }
 
+export type ExamMixerNavigationRequest = PreferredExamTarget & { requestId: number };
+
 export interface PreferredTargetResolution {
   action: 'noop' | 'apply' | 'missing-exam';
   targetKey: string | null;
@@ -157,8 +159,11 @@ export function buildPreferredTargetKey(
     return null;
   }
 
+  if (target.requestId !== undefined) {
+    return String(target.requestId);
+  }
+
   return [
-    target.requestId ?? 0,
     target.examId ?? '',
     target.step ?? '',
     target.step2SubView ?? '',

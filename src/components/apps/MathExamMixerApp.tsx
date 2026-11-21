@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -104,7 +104,9 @@ import {
   MathIntegrityReportPanel,
 } from '../math/MathIntegrityReportPanel';
 import {
-  StepTransitionCheckResult,
+  type ExamMixerNavigationRequest,
+  type StepTransitionCheckResult,
+  buildPreferredTargetKey,
   evaluateStep2ToStep3Transition,
   evaluateStepNavigationGuard,
   resolvePreferredTargetNavigation,
@@ -112,12 +114,8 @@ import {
 
 interface MathExamMixerAppProps {
   mathExams: MathExamProject[];
-  preferredTargetRequestId?: number;
-  preferredExamId?: string | null;
-  preferredStep?: MathExamStep | null;
-  preferredStep2SubView?: 'editor' | 'import-doctor' | 'answer-studio' | null;
-  preferredExamCode?: string | null;
-  onClearPreferredTarget?: () => void;
+  preferredTarget?: ExamMixerNavigationRequest | null;
+  onClearPreferredTarget?: (requestId: number) => void;
   onSaveMathExam: (exam: MathExamProject, silent?: boolean) => Promise<MathExamProject>;
   onDeleteMathExam: (id: string) => Promise<void>;
   onDuplicateMathExam: (exam: MathExamProject) => Promise<void>;
@@ -146,11 +144,7 @@ function triggerBlobDownload(blob: Blob, fileName: string) {
 
 export function MathExamMixerApp({
   mathExams,
-  preferredTargetRequestId,
-  preferredExamId,
-  preferredStep,
-  preferredStep2SubView,
-  preferredExamCode,
+  preferredTarget,
   onClearPreferredTarget,
   onSaveMathExam,
   onDeleteMathExam,
@@ -161,7 +155,7 @@ export function MathExamMixerApp({
   onWorkflowExamSynced,
 }: MathExamMixerAppProps) {
   const [selectedExamId, setSelectedExamId] = useState<string>(
-    preferredExamId || mathExams[0]?.id || ''
+    preferredTarget?.examId || mathExams[0]?.id || ''
   );
   const [step, setStep] = useState<MathExamStep>(1);
   const [step2Tab, setStep2Tab] = useState<'editor' | 'import-doctor' | 'answer-studio'>('editor');
@@ -180,82 +174,6 @@ export function MathExamMixerApp({
     useState<StepTransitionCheckResult | null>(null);
   const lastConsumedTargetKeyRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    const resolution = resolvePreferredTargetNavigation({
-      target: {
-        requestId: preferredTargetRequestId,
-        examId: preferredExamId,
-        step: preferredStep,
-        step2SubView: preferredStep2SubView,
-        examCode: preferredExamCode,
-      },
-      lastConsumedTargetKey: lastConsumedTargetKeyRef.current,
-      mathExams,
-      currentSelectedExamId: selectedExamId,
-    });
-
-    if (resolution.action === 'noop') {
-      return;
-    }
-
-    if (resolution.action === 'missing-exam') {
-      setMissingPreferredExamId(resolution.missingExamId ?? null);
-      return;
-    }
-
-    lastConsumedTargetKeyRef.current = resolution.targetKey;
-    setMissingPreferredExamId(null);
-    setMissingPreferredCodeNotice(resolution.missingCodeNotice ?? null);
-
-    if (resolution.selectedExamId) {
-      setSelectedExamId(resolution.selectedExamId);
-    }
-
-    if (resolution.nextStep2Tab) {
-      setStep2Tab(resolution.nextStep2Tab);
-    }
-    if (resolution.nextSelectedCodeTab) {
-      setSelectedCodeTab(resolution.nextSelectedCodeTab);
-    }
-    if (resolution.nextStep4ViewMode) {
-      setStep4ViewMode(resolution.nextStep4ViewMode);
-    }
-
-    if (resolution.nextStep !== undefined) {
-      if (resolution.nextStep === 3) {
-        const targetExam =
-          (resolution.selectedExamId
-            ? mathExams.find((e) => e.id === resolution.selectedExamId)
-            : mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0]) ?? null;
-        const guard = evaluateStep2ToStep3Transition(targetExam);
-        if (!guard.allowed) {
-          setStep(2);
-          setStepTransitionError(guard);
-          onShowToast('error', `${guard.title}. ${guard.message}`);
-        } else {
-          setStepTransitionError(null);
-          setStep(3);
-        }
-      } else {
-        setStepTransitionError(null);
-        setStep(resolution.nextStep);
-      }
-    }
-
-    if (resolution.shouldClearPreferredTarget) {
-      onClearPreferredTarget?.();
-    }
-  }, [
-    preferredTargetRequestId,
-    preferredExamId,
-    preferredStep,
-    preferredStep2SubView,
-    preferredExamCode,
-    mathExams,
-    selectedExamId,
-    onClearPreferredTarget,
-    onShowToast,
-  ]);
   const [codeBatchPage, setCodeBatchPage] = useState<number>(0);
   const [mixErrors, setMixErrors] = useState<string[]>([]);
   const [mixWarnings, setMixWarnings] = useState<string[]>([]);
@@ -271,27 +189,6 @@ export function MathExamMixerApp({
       mixAbortRef.current?.abort();
     };
   }, []);
-
-  useEffect(() => {
-    if (tutorial?.activeTutorial?.tutorialId !== 'tutorial.math-mixer') return;
-    const sid = tutorial.currentStep?.stepId;
-    if (
-      sid === 'math-step-overview' ||
-      sid === 'math-subject-profile' ||
-      sid === 'math-import-source' ||
-      sid === 'math-lock-controls'
-    ) {
-      setStep(1);
-    } else if (sid === 'math-confirm-step') {
-      setStep(2);
-    } else if (sid === 'math-mix-rules') {
-      setStep(3);
-    } else if (sid === 'math-compare-codes') {
-      setStep(4);
-    } else if (sid === 'math-verify-export' || sid === 'math-export-formats') {
-      setStep(5);
-    }
-  }, [tutorial?.activeTutorial?.tutorialId, tutorial?.currentStep?.stepId]);
 
   const activeExam = useMemo(
     () =>
@@ -375,13 +272,109 @@ export function MathExamMixerApp({
     [activeExam]
   );
 
-  const handleExamChange = (next: MathExamProject) => {
-    void onSaveMathExam(next, true);
-  };
+  const tutorialStepId =
+    tutorial?.activeTutorial?.tutorialId === 'tutorial.math-mixer'
+      ? tutorial.currentStep?.stepId
+      : undefined;
+  const lastTutorialStep = useRef<string | undefined>(undefined);
+  const tutorialOverridden = useRef(false);
+  const navigationRevision = useRef(0);
+
+  const cancelPreferredTarget = useCallback(() => {
+    if (preferredTarget) {
+      lastConsumedTargetKeyRef.current = buildPreferredTargetKey(preferredTarget);
+      onClearPreferredTarget?.(preferredTarget.requestId);
+    }
+    setMissingPreferredExamId(null);
+  }, [preferredTarget, onClearPreferredTarget]);
+
+  const navigateStep = useCallback((
+    targetStep: MathExamStep,
+    source: 'user' | 'preferred' | 'tutorial' = 'user',
+    exam: MathExamProject | null = activeExam
+  ): boolean => {
+    if (source === 'user') cancelPreferredTarget();
+    if (source !== 'tutorial' && tutorialStepId) tutorialOverridden.current = true;
+    navigationRevision.current += 1;
+
+    const guard = evaluateStepNavigationGuard(exam, step, targetStep);
+    if (!guard.allowed) {
+      setStepTransitionError(guard);
+      onShowToast('error', `${guard.title}. ${guard.message}`);
+      // An explicit request for a different invalid exam opens its review.
+      if (source === 'preferred' && exam?.id !== activeExam?.id) setStep(2);
+      return false;
+    }
+    setStepTransitionError(null);
+    setMixErrors([]);
+    setStep(targetStep);
+    return true;
+  }, [activeExam, cancelPreferredTarget, onShowToast, step, tutorialStepId]);
 
   useEffect(() => {
-    setStepTransitionError(null);
-  }, [activeExam?.id]);
+    if (!preferredTarget) return;
+    const resolution = resolvePreferredTargetNavigation({
+      target: preferredTarget,
+      lastConsumedTargetKey: lastConsumedTargetKeyRef.current,
+      mathExams,
+      currentSelectedExamId: selectedExamId,
+    });
+    if (resolution.action === 'noop') return;
+    if (resolution.action === 'missing-exam') {
+      setMissingPreferredExamId(resolution.missingExamId ?? null);
+      return;
+    }
+
+    lastConsumedTargetKeyRef.current = resolution.targetKey;
+    onClearPreferredTarget?.(preferredTarget.requestId);
+    setMissingPreferredExamId(null);
+    setMissingPreferredCodeNotice(resolution.missingCodeNotice ?? null);
+    if (resolution.selectedExamId) setSelectedExamId(resolution.selectedExamId);
+    if (resolution.nextStep2Tab) setStep2Tab(resolution.nextStep2Tab);
+    if (resolution.nextSelectedCodeTab) setSelectedCodeTab(resolution.nextSelectedCodeTab);
+    if (resolution.nextStep4ViewMode) setStep4ViewMode(resolution.nextStep4ViewMode);
+
+    if (resolution.nextStep !== undefined) {
+      const targetExam = resolution.selectedExamId
+        ? mathExams.find((exam) => exam.id === resolution.selectedExamId) ?? null
+        : activeExam;
+      navigateStep(resolution.nextStep, 'preferred', targetExam);
+    }
+  }, [preferredTarget, mathExams, selectedExamId, activeExam, navigateStep, onClearPreferredTarget]);
+
+  useEffect(() => {
+    if (!tutorialStepId) {
+      lastTutorialStep.current = undefined;
+      tutorialOverridden.current = false;
+      return;
+    }
+    if (lastTutorialStep.current === tutorialStepId) return;
+    lastTutorialStep.current = tutorialStepId;
+    if (step === 3) tutorialOverridden.current = true;
+    if (tutorialOverridden.current || preferredTarget) return;
+
+    const tutorialSteps: Partial<Record<string, MathExamStep>> = {
+      'math-step-overview': 1,
+      'math-subject-profile': 1,
+      'math-import-source': 1,
+      'math-lock-controls': 1,
+      'math-confirm-step': 2,
+      'math-mix-rules': 3,
+      'math-compare-codes': 4,
+      'math-verify-export': 5,
+      'math-export-formats': 5,
+    };
+    const target = tutorialSteps[tutorialStepId];
+    if (target !== undefined && target !== step) navigateStep(target, 'tutorial');
+  }, [tutorialStepId, step, preferredTarget, navigateStep]);
+
+  const handleExamChange = (next: MathExamProject) => {
+    cancelPreferredTarget();
+    if (tutorialStepId) tutorialOverridden.current = true;
+    navigationRevision.current += 1;
+    // The parent handles storage errors and reports them to the user.
+    void onSaveMathExam(next, true).catch(() => {});
+  };
 
   useEffect(() => {
     if (!stepTransitionError || !activeExam) return;
@@ -391,28 +384,14 @@ export function MathExamMixerApp({
     }
   }, [activeExam, stepTransitionError]);
 
-  const handleNavigateStep = (targetStep: MathExamStep) => {
-    const guard = evaluateStepNavigationGuard(activeExam, step, targetStep);
-    if (!guard.allowed) {
-      setStepTransitionError(guard);
-      if (step !== 2) {
-        setStep(2);
-      }
-      onShowToast('error', `${guard.title}. ${guard.message}`);
-      return;
-    }
-    setStepTransitionError(null);
-    setMixErrors([]);
-    setStep(targetStep);
-  };
-
   const handleCreateExam = async () => {
+    const revision = ++navigationRevision.current;
+    cancelPreferredTarget();
     const fresh = createEmptyMathExamProject(createId);
     const saved = await onSaveMathExam(fresh, true);
+    if (navigationRevision.current !== revision) return;
     setSelectedExamId(saved.id);
-    setStep(1);
-    setStepTransitionError(null);
-    setMixErrors([]);
+    navigateStep(1);
     setMixWarnings([]);
     setLastExportIntegrity(null);
     onShowToast('success', 'Đã tạo đề kiểm tra mới.');
@@ -425,10 +404,10 @@ export function MathExamMixerApp({
       setStepTransitionError(guard);
       setMixErrors([guard.message]);
       onShowToast('error', `${guard.title}. ${guard.message}`);
-      setStep(2);
       return;
     }
 
+    const revision = navigationRevision.current;
     mixAbortRef.current?.abort();
     const controller = new AbortController();
     mixAbortRef.current = controller;
@@ -444,6 +423,11 @@ export function MathExamMixerApp({
 
       if (res.cancelled) {
         onShowToast('info', 'Đã hủy quá trình trộn đề hàng loạt.');
+        return;
+      }
+
+      if (navigationRevision.current !== revision) {
+        onShowToast('info', 'Cấu hình hoặc bước đã thay đổi. Hãy trộn lại để dùng cấu hình mới nhất.');
         return;
       }
 
@@ -464,11 +448,12 @@ export function MathExamMixerApp({
         updatedAt: new Date().toISOString(),
       };
       await onSaveMathExam(updated, true);
+      if (navigationRevision.current !== revision) return;
       setSelectedCodeTab(res.versions[0]?.code ?? '');
       setCompareCodeTab(res.versions[1]?.code ?? res.versions[0]?.code ?? '');
       setCodeBatchPage(0);
       setLastExportIntegrity(null);
-      setStep(4);
+      navigateStep(4);
       const postDiag = buildQuestionOrderDiagnostics(updated);
       if (postDiag.shuffleQuestionsEnabled && postDiag.allVersionsUnchanged) {
         onShowToast(
@@ -852,8 +837,7 @@ export function MathExamMixerApp({
             <button
               type="button"
               onClick={() => {
-                setMissingPreferredExamId(null);
-                onClearPreferredTarget?.();
+                cancelPreferredTarget();
               }}
               className="rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200"
             >
@@ -872,7 +856,6 @@ export function MathExamMixerApp({
               type="button"
               onClick={() => {
                 setMissingPreferredCodeNotice(null);
-                onClearPreferredTarget?.();
               }}
               className="rounded-lg border border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold"
             >
@@ -938,7 +921,7 @@ export function MathExamMixerApp({
                         exportGate?.blockingReasons[0] ??
                           'Không thể chuyển sang Smart Grading Studio OMR khi đề chưa xác nhận đáp án gốc hoặc đang BLOCKED.'
                       );
-                      setStep(2);
+                      navigateStep(2);
                       setStep2Tab('answer-studio');
                       return;
                     }
@@ -971,6 +954,9 @@ export function MathExamMixerApp({
                   type="button"
                   onClick={() => {
                     const nextTarget = mathExams.find((e) => e.id !== activeExam.id);
+                    cancelPreferredTarget();
+                    navigationRevision.current += 1;
+                    setStepTransitionError(null);
                     void onDeleteMathExam(activeExam.id);
                     if (nextTarget) setSelectedExamId(nextTarget.id);
                   }}
@@ -997,6 +983,9 @@ export function MathExamMixerApp({
                   aria-label="Chọn đề thi Toán"
                   value={activeExam.id}
                   onChange={(e) => {
+                    cancelPreferredTarget();
+                    navigationRevision.current += 1;
+                    setStepTransitionError(null);
                     setSelectedExamId(e.target.value);
                     setMixErrors([]);
                     setMixWarnings([]);
@@ -1028,8 +1017,9 @@ export function MathExamMixerApp({
                   <button
                     key={item.step}
                     type="button"
+                    aria-current={active ? 'step' : undefined}
                     onClick={() => {
-                      handleNavigateStep(item.step);
+                      navigateStep(item.step);
                       tutorial?.emitTutorialEvent('math-step-nav-clicked');
                     }}
                     className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold transition-all whitespace-nowrap truncate ${
@@ -1073,7 +1063,7 @@ export function MathExamMixerApp({
                   'error',
                   `Chặn trộn nhanh (${blockingIssues.length} lỗi BLOCKED): ${blockingIssues[0].message}`
                 );
-                setStep(2);
+                navigateStep(2);
                 return;
               }
               if (!activeExam.confirmedOriginalAnswers) {
@@ -1081,7 +1071,7 @@ export function MathExamMixerApp({
                   'error',
                   'Chưa xác nhận đáp án gốc ở Bước 2 — vui lòng rà soát khóa chấm và bấm "Xác nhận toàn bộ đáp án gốc" trước khi trộn.'
                 );
-                setStep(2);
+                navigateStep(2);
                 return;
               }
               const res = await generateMixedExamsAsync(activeExam, { chunkSize: 5 });
@@ -1124,10 +1114,10 @@ export function MathExamMixerApp({
                   exportGate?.blockingReasons[0] ??
                     'Không thể in/xuất PDF vì đề chưa xác nhận đáp án gốc hoặc đang có lỗi BLOCKED.'
                 );
-                setStep(activeExam.generatedVersions.length === 0 ? 2 : 5);
+                navigateStep(activeExam.generatedVersions.length === 0 ? 2 : 5);
                 return;
               }
-              setStep(5);
+              navigateStep(5);
               setTimeout(() => window.print(), 250);
             }}
             onShowToast={onShowToast}
@@ -1142,7 +1132,7 @@ export function MathExamMixerApp({
           stepMode={1}
           integrityIssues={originalIssues}
           onChangeExam={handleExamChange}
-          onGoToStep={handleNavigateStep}
+          onGoToStep={navigateStep}
         />
       )}
 
@@ -1259,7 +1249,7 @@ export function MathExamMixerApp({
               focusQuestionId={editorFocusQuestionId}
               focusRequestKey={editorFocusRequestKey}
               onChangeExam={handleExamChange}
-              onGoToStep={handleNavigateStep}
+              onGoToStep={navigateStep}
             />
           )}
 
@@ -1276,16 +1266,7 @@ export function MathExamMixerApp({
               }}
               onOpenAnswerStudio={() => setStep2Tab('answer-studio')}
               onConfirmAndProceed={() => {
-                const guard = evaluateStep2ToStep3Transition(activeExam);
-                if (!guard.allowed) {
-                  setStepTransitionError(guard);
-                  if (guard.reasonCode === 'integrity-blocked') {
-                    setStep2Tab('answer-studio');
-                  }
-                  onShowToast('error', `${guard.title}. ${guard.message}`);
-                } else {
-                  setStepTransitionError(null);
-                  setStep(3);
+                if (navigateStep(3)) {
                   onShowToast('success', 'Đề đã đạt kiểm tra toàn vẹn — chuyển sang Bước 3 trộn mã đề.');
                 }
               }}
@@ -2187,7 +2168,7 @@ export function MathExamMixerApp({
               <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
                 <button
                   type="button"
-                  onClick={() => setStep(2)}
+                  onClick={() => navigateStep(2)}
                   className="rounded-[10px] border border-slate-200 dark:border-slate-700 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
                 >
                   Quay lại Bước 2
@@ -2221,7 +2202,7 @@ export function MathExamMixerApp({
               </p>
               <button
                 type="button"
-                onClick={() => handleNavigateStep(3)}
+                onClick={() => navigateStep(3)}
                 className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
               >
                 <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />
@@ -3013,7 +2994,7 @@ export function MathExamMixerApp({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setStep(4)}
+                  onClick={() => navigateStep(4)}
                   className="rounded-[10px] border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
                 >
                   Quay lại đối soát mã đề
@@ -3313,7 +3294,7 @@ export function MathExamMixerApp({
                                 type="button"
                                 onClick={() => {
                                   setSelectedCodeTab(ver.code);
-                                  setStep(4);
+                                  navigateStep(4);
                                 }}
                                 className="flex-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
                               >

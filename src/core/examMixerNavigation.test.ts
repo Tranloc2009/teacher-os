@@ -224,6 +224,18 @@ describe('Exam Mixer Pro — Step 2 -> Step 3 Navigation & Anti-Bounce Regressio
     assert.equal(repeatSameRequest.action, 'noop');
   });
 
+  it('không phát lại request đã nhận khi cùng ID có nội dung khác', () => {
+    const exam = makeValidDocxExam(true);
+    const consumed = buildPreferredTargetKey({ requestId: 5, examId: exam.id, step: 2 });
+    const resolution = resolvePreferredTargetNavigation({
+      target: { requestId: 5, examId: exam.id, step: 4 },
+      lastConsumedTargetKey: consumed,
+      mathExams: [exam],
+      currentSelectedExamId: exam.id,
+    });
+    assert.equal(resolution.action, 'noop');
+  });
+
   it('cho phép Bước 2 -> Bước 3 -> Bước 2 -> Bước 3 ổn định và bảo toàn toàn bộ câu hỏi, đáp án, công thức và hình ảnh', () => {
     const exam = makeValidDocxExam(true);
     const snapshotBefore = JSON.stringify({

@@ -68,7 +68,8 @@ import type {
   CanvasNodeRecord,
   CanvasViewSettings,
 } from './types/canvas';
-import type { MathExamProject, MathExamStep } from './types/mathExam';
+import type { MathExamProject } from './types/mathExam';
+import type { ExamMixerNavigationRequest, PreferredExamTarget } from './core/examMixerNavigation';
 import type { ExamFormTemplate } from './types/examForm';
 import { BUILT_IN_EXAM_FORM_PRESETS } from './core/examFormEngine';
 import type { GradingSession } from './types/grading';
@@ -79,7 +80,6 @@ import type {
   ConnectedWorkflowStore,
   ConnectedWorkspaceWorkflowSummary,
   DashboardNextStepSuggestion,
-  MathMixerSubView,
   ParsedUniversalCommand,
   SmartActionItem,
   WorkflowStageEvaluation,
@@ -252,12 +252,16 @@ export default function App() {
   const [printPackId, setPrintPackId] = useState<string>('');
   const [printPreferredExamId, setPrintPreferredExamId] = useState<string | null>(null);
   const [printPreferredFormLabel, setPrintPreferredFormLabel] = useState<string | null>(null);
-  const [examMixerPreferredExamId, setExamMixerPreferredExamId] = useState<string | null>(null);
-  const [examMixerPreferredStep, setExamMixerPreferredStep] = useState<MathExamStep | null>(null);
-  const [examMixerPreferredSubView, setExamMixerPreferredSubView] =
-    useState<MathMixerSubView | null>(null);
-  const [examMixerPreferredExamCode, setExamMixerPreferredExamCode] = useState<string | null>(null);
-  const [examMixerPreferredRequestId, setExamMixerPreferredRequestId] = useState<number>(0);
+  const [examMixerTarget, setExamMixerTarget] = useState<ExamMixerNavigationRequest | null>(null);
+  const nextMixerRequestId = useRef(0);
+  const requestExamMixerTarget = useCallback((target: PreferredExamTarget) => {
+    setExamMixerTarget({ ...target, requestId: ++nextMixerRequestId.current });
+  }, []);
+  const clearExamMixerTarget = useCallback((requestId: number) => {
+    setExamMixerTarget((pending) =>
+      pending?.requestId === requestId ? null : pending
+    );
+  }, []);
   const [examGeneratorPreferredResourceId, setExamGeneratorPreferredResourceId] = useState<string | null>(null);
   const [examGeneratorPreferredTab, setExamGeneratorPreferredTab] = useState<GeneratorTabId | null>(null);
   const [examGeneratorPreferredPrompt, setExamGeneratorPreferredPrompt] = useState<string | null>(null);
@@ -875,12 +879,12 @@ export default function App() {
     }
     try {
       const saved = await saveMathExam(optimisticExam);
-      if (mathSaveSeqRef.current[exam.id] === nextSeq) {
-        const latestList = await listMathExams();
-        if (mathSaveSeqRef.current[exam.id] === nextSeq) {
-          setMathExams(latestList);
-        }
-      }
+      setMathExams((previous) => {
+        if (mathSaveSeqRef.current[exam.id] !== nextSeq) return previous;
+        return previous
+          .map((item) => item.id === saved.id ? saved : item)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      });
       setStorageBannerError(null);
       if (!silent) {
         showToast('success', `Đã lưu đề Toán "${saved.title}".`);
@@ -1561,11 +1565,7 @@ export default function App() {
               gate.blockingReasons[0] ??
                 `Đề "${lookup.entity.title}" chưa đạt kiểm chứng toàn vẹn — vui lòng xác nhận đáp án & trộn mã đề trước khi chấm OMR.`
             );
-            setExamMixerPreferredExamId(lookup.entity.id);
-            setExamMixerPreferredStep(2);
-            setExamMixerPreferredSubView('answer-studio');
-            setExamMixerPreferredExamCode(null);
-            setExamMixerPreferredRequestId((n) => n + 1);
+            requestExamMixerTarget({ examId: lookup.entity.id, step: 2, step2SubView: 'answer-studio' });
             openApp('math-mixer');
             return;
           }
@@ -1599,11 +1599,12 @@ export default function App() {
         return;
       }
       if (action.targetApp === 'math-mixer') {
-        setExamMixerPreferredExamId(action.examId ?? null);
-        setExamMixerPreferredStep(action.targetStep ?? 2);
-        setExamMixerPreferredSubView(action.targetSubView ?? null);
-        setExamMixerPreferredExamCode(action.examCode ?? null);
-        setExamMixerPreferredRequestId((n) => n + 1);
+        requestExamMixerTarget({
+          examId: action.examId,
+          step: action.targetStep ?? 2,
+          step2SubView: action.targetSubView,
+          examCode: action.examCode,
+        });
         openApp('math-mixer');
         return;
       }
@@ -1656,10 +1657,7 @@ export default function App() {
     setWorkflowStore(created.store);
     void saveConnectedWorkflowStore(created.store);
     setExamGeneratorPreferredResourceId(null);
-    setExamMixerPreferredExamId(null);
-    setExamMixerPreferredStep(null);
-    setExamMixerPreferredSubView(null);
-    setExamMixerPreferredExamCode(null);
+    setExamMixerTarget(null);
     setGradingPreferredExamId(null);
     setGradingPreferredSessionId(null);
     showToast(
@@ -1694,8 +1692,7 @@ export default function App() {
           'error',
           `Đề kiểm tra "${workflowContext.generatedExamTitle || workflowContext.generatedExamId}" không còn tồn tại. Hãy tạo đề mới hoặc chọn lại đề.`
         );
-        setExamMixerPreferredExamId(workflowContext.generatedExamId ?? null);
-        setExamMixerPreferredRequestId((n) => n + 1);
+        requestExamMixerTarget({ examId: workflowContext.generatedExamId });
         openApp('math-mixer');
         return;
       }
@@ -1713,13 +1710,11 @@ export default function App() {
       }
       if (stage.id === 'review') {
         if (activeExamId) {
-          setExamMixerPreferredExamId(activeExamId);
-          setExamMixerPreferredStep(2);
-          setExamMixerPreferredSubView(
-            stage.status === 'blocked' ? 'import-doctor' : 'answer-studio'
-          );
-          setExamMixerPreferredExamCode(null);
-          setExamMixerPreferredRequestId((n) => n + 1);
+          requestExamMixerTarget({
+            examId: activeExamId,
+            step: 2,
+            step2SubView: stage.status === 'blocked' ? 'import-doctor' : 'answer-studio',
+          });
           openApp('math-mixer');
         } else {
           setExamGeneratorPreferredTab('wizard');
@@ -1729,11 +1724,11 @@ export default function App() {
       }
       if (stage.id === 'mix') {
         if (activeExamId) {
-          setExamMixerPreferredExamId(activeExamId);
-          setExamMixerPreferredStep(stage.status === 'blocked' ? 2 : 3);
-          setExamMixerPreferredSubView(stage.status === 'blocked' ? 'editor' : null);
-          setExamMixerPreferredExamCode(null);
-          setExamMixerPreferredRequestId((n) => n + 1);
+          requestExamMixerTarget({
+            examId: activeExamId,
+            step: stage.status === 'blocked' ? 2 : 3,
+            step2SubView: stage.status === 'blocked' ? 'editor' : null,
+          });
           if (stage.status === 'blocked') {
             showToast(
               'error',
@@ -1786,11 +1781,11 @@ export default function App() {
         return;
       }
       if (targetApp === 'math-mixer' && suggestion.examId) {
-        setExamMixerPreferredExamId(suggestion.examId);
-        setExamMixerPreferredStep(suggestion.targetStep ?? 2);
-        setExamMixerPreferredSubView(suggestion.targetSubView ?? null);
-        setExamMixerPreferredExamCode(null);
-        setExamMixerPreferredRequestId((n) => n + 1);
+        requestExamMixerTarget({
+          examId: suggestion.examId,
+          step: suggestion.targetStep ?? 2,
+          step2SubView: suggestion.targetSubView,
+        });
         openApp('math-mixer');
         return;
       }
@@ -1859,20 +1854,13 @@ export default function App() {
         cmd.intent === 'open-answer-key-studio' ||
         cmd.intent === 'open-exam-answer-key'
       ) {
-        if (cmd.payload.examId) {
-          setExamMixerPreferredExamId(cmd.payload.examId);
-        }
-        setExamMixerPreferredStep(
-          cmd.payload.mixerStep ??
-            (cmd.intent === 'mix-current-exam'
-              ? 3
-              : cmd.intent === 'open-exam-answer-key'
-              ? 4
-              : 2)
-        );
-        setExamMixerPreferredSubView(cmd.payload.mixerSubView ?? null);
-        setExamMixerPreferredExamCode(cmd.payload.examCode ?? null);
-        setExamMixerPreferredRequestId((n) => n + 1);
+        requestExamMixerTarget({
+          examId: cmd.payload.examId,
+          step: cmd.payload.mixerStep ??
+            (cmd.intent === 'mix-current-exam' ? 3 : cmd.intent === 'open-exam-answer-key' ? 4 : 2),
+          step2SubView: cmd.payload.mixerSubView,
+          examCode: cmd.payload.examCode,
+        });
         openApp('math-mixer');
         if (cmd.blockedReason) {
           showToast('info', cmd.blockedReason);
@@ -1893,11 +1881,11 @@ export default function App() {
       ) {
         if (cmd.blockedReason && cmd.targetApp === 'math-mixer') {
           showToast('error', cmd.blockedReason);
-          if (cmd.payload.examId) setExamMixerPreferredExamId(cmd.payload.examId);
-          setExamMixerPreferredStep(cmd.payload.mixerStep ?? 2);
-          setExamMixerPreferredSubView(cmd.payload.mixerSubView ?? 'answer-studio');
-          setExamMixerPreferredExamCode(null);
-          setExamMixerPreferredRequestId((n) => n + 1);
+          requestExamMixerTarget({
+            examId: cmd.payload.examId,
+            step: cmd.payload.mixerStep ?? 2,
+            step2SubView: cmd.payload.mixerSubView ?? 'answer-studio',
+          });
           openApp('math-mixer');
           return;
         }
@@ -2246,11 +2234,7 @@ export default function App() {
                     );
                   }}
                   onOpenExamMixer={(examId) => {
-                    setExamMixerPreferredExamId(examId);
-                    setExamMixerPreferredStep(5);
-                    setExamMixerPreferredSubView(null);
-                    setExamMixerPreferredExamCode(null);
-                    setExamMixerPreferredRequestId((n) => n + 1);
+                    requestExamMixerTarget({ examId, step: 5 });
                     openApp('math-mixer');
                   }}
                   onOpenGradingStudio={(examId) => {
@@ -2382,11 +2366,7 @@ export default function App() {
                   }}
                   onOpenLinkedExam={(examId) => {
                     const target = mathExams.find((e) => e.id === examId);
-                    setExamMixerPreferredExamId(examId);
-                    setExamMixerPreferredStep(2);
-                    setExamMixerPreferredSubView(null);
-                    setExamMixerPreferredExamCode(null);
-                    setExamMixerPreferredRequestId((n) => n + 1);
+                    requestExamMixerTarget({ examId, step: 2 });
                     if (target) {
                       handleSyncWorkflowExam(target);
                     }
@@ -2486,11 +2466,7 @@ export default function App() {
                   onOpenResourceVault={() => openApp('resource-vault')}
                   onSaveMathExam={handleSaveMathExam}
                   onOpenExamMixerWithExam={(examId) => {
-                    setExamMixerPreferredExamId(examId);
-                    setExamMixerPreferredStep(2);
-                    setExamMixerPreferredSubView(null);
-                    setExamMixerPreferredExamCode(null);
-                    setExamMixerPreferredRequestId((n) => n + 1);
+                    requestExamMixerTarget({ examId, step: 2 });
                     openApp('math-mixer');
                   }}
                   onOpenGradingStudioWithExam={(examId) => {
@@ -2510,17 +2486,8 @@ export default function App() {
               <ErrorBoundary moduleName="Math Exam Mixer Pro" packs={packs} settings={settings}>
                 <MathExamMixerApp
                   mathExams={mathExams}
-                  preferredTargetRequestId={examMixerPreferredRequestId}
-                  preferredExamId={examMixerPreferredExamId}
-                  preferredStep={examMixerPreferredStep}
-                  preferredStep2SubView={examMixerPreferredSubView}
-                  preferredExamCode={examMixerPreferredExamCode}
-                  onClearPreferredTarget={() => {
-                    setExamMixerPreferredExamId(null);
-                    setExamMixerPreferredStep(null);
-                    setExamMixerPreferredSubView(null);
-                    setExamMixerPreferredExamCode(null);
-                  }}
+                  preferredTarget={examMixerTarget}
+                  onClearPreferredTarget={clearExamMixerTarget}
                   onSaveMathExam={handleSaveMathExam}
                   onDeleteMathExam={handleDeleteMathExam}
                   onDuplicateMathExam={handleDuplicateMathExam}
@@ -2549,11 +2516,7 @@ export default function App() {
                   preferredTab={gradingPreferredTab}
                   onOpenExamMixer={(examId) => {
                     if (examId) {
-                      setExamMixerPreferredExamId(examId);
-                      setExamMixerPreferredStep(2);
-                      setExamMixerPreferredSubView('answer-studio');
-                      setExamMixerPreferredExamCode(null);
-                      setExamMixerPreferredRequestId((n) => n + 1);
+                      requestExamMixerTarget({ examId, step: 2, step2SubView: 'answer-studio' });
                     }
                     openApp('math-mixer');
                   }}
@@ -2628,11 +2591,7 @@ export default function App() {
         onSelectApp={openApp}
         onSelectPack={handleEditPack}
         onSelectExam={(examId) => {
-          setExamMixerPreferredExamId(examId);
-          setExamMixerPreferredStep(2);
-          setExamMixerPreferredSubView(null);
-          setExamMixerPreferredExamCode(null);
-          setExamMixerPreferredRequestId((n) => n + 1);
+          requestExamMixerTarget({ examId, step: 2 });
           openApp('math-mixer');
         }}
         onRunAction={handleRunPaletteAction}
