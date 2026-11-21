@@ -33,12 +33,14 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
+  applyTeacherManualAnswer,
   computeLockStats,
   computeQuestionVerificationContentHash,
   createMathVisualAsset,
   detectDependentOptions,
   detectDependentStatements,
   evaluatePreMixIntegrity,
+  evaluateQuestionAnswerState,
   parseMathContent,
 } from '../../core/mathIntegrity';
 import {
@@ -241,24 +243,42 @@ export function MathExamEditor({
     });
   };
 
+  const updateQuestionAnswer = (
+    qId: string,
+    updater: (q: MathQuestion) => MathQuestion,
+    meta?: { sourceLocation?: string; selectionSummary?: string }
+  ) => {
+    const now = new Date().toISOString();
+    const nextQuestions = exam.questions.map((q) => {
+      if (q.id !== qId) return q;
+      const updated = updater(q);
+      return applyTeacherManualAnswer(q, updated, {
+        now,
+        sourceLocation: meta?.sourceLocation ?? 'Trình sửa câu hỏi (Bước 1)',
+        selectionSummary: meta?.selectionSummary,
+      });
+    });
+    onChangeExam({
+      ...exam,
+      questions: nextQuestions,
+      confirmedOriginalAnswers: false,
+      generatedVersions: [],
+      updatedAt: now,
+    });
+  };
+
   const handleConfirmSingleQuestionCandidate = (q: MathQuestion) => {
     if (!canConfirmEditedKey(q)) return;
     const now = new Date().toISOString();
-    const promoted: MathQuestion = {
+    const promotedBase: MathQuestion = {
       ...q,
       legacyAnomalyReasons: undefined,
-      answerConfirmed: true,
       updatedAt: now,
     };
-    const contentHash = computeQuestionVerificationContentHash(promoted);
-    promoted.answerProvenance = {
-      status: 'teacher-confirmed',
-      sourceKind: 'teacher-manual',
-      rawEvidence: q.answerProvenance?.rawEvidence,
-      confirmedAt: now,
-      confirmedContentHash: contentHash,
-      note: 'Giáo viên đã rà soát và xác nhận khóa đáp án.',
-    };
+    const promoted = applyTeacherManualAnswer(q, promotedBase, {
+      now,
+      sourceLocation: q.answerProvenance?.sourceLocation ?? 'Bảng rà soát khóa (Bước 2)',
+    });
 
     const nextQuestions = exam.questions.map((item) => (item.id === q.id ? promoted : item));
     onChangeExam({
@@ -271,17 +291,14 @@ export function MathExamEditor({
   };
 
   function canConfirmEditedKey(q: MathQuestion): boolean {
-    const status = q.answerProvenance?.status;
-    if (status !== 'needs-review' && status !== 'missing' && status !== 'conflict') return false;
-    if (q.type === 'mcq') {
-      return Boolean(q.correctOptionId && q.options?.filter((opt) => opt.isCorrect).length === 1 &&
-        q.options.some((opt) => opt.id === q.correctOptionId && opt.isCorrect));
-    }
-    if (q.type === 'true-false') {
-      return q.statements?.length === 4 && q.statements.every((st) => st.answerState === 'confirmed');
-    }
-    const answer = q.shortAnswer?.answerValue?.trim();
-    return q.type === 'short-answer' && Boolean(answer && !/\[\[ASSET:|\[CÔNG_THỨC_/.test(answer));
+    const ansState = evaluateQuestionAnswerState(q);
+    if (ansState.structural.status !== 'valid') return false;
+    return (
+      ansState.isNeedsReview ||
+      ansState.isConflict ||
+      ansState.isStaleConfirmation ||
+      ansState.isMissingKey
+    );
   }
 
   const handleAddQuestion = (type: MathQuestionType) => {
@@ -972,8 +989,12 @@ export function MathExamEditor({
                                   confirmedContentHash: contentHash,
                                 }
                               : {
+                                  ...q.answerProvenance,
                                   status: 'teacher-confirmed' as const,
                                   sourceKind: q.answerProvenance?.sourceKind ?? 'teacher-manual',
+                                  sourceFileHash:
+                                    q.answerProvenance?.sourceFileHash ?? q.sourceTrace?.sourceFileHash,
+                                  sourceLocation: q.answerProvenance?.sourceLocation,
                                   rawEvidence: q.answerProvenance?.rawEvidence,
                                   confirmedAt: now,
                                   confirmedContentHash: contentHash,
@@ -1103,7 +1124,8 @@ export function MathExamEditor({
                         }`
                       : `Tự luận (${q.points}đ)`;
 
-                  const provStatus = q.answerProvenance?.status;
+                  const ansState = evaluateQuestionAnswerState(q);
+                  const provStatus = ansState.effectiveStatus;
                   const provBadge =
                     provStatus === 'conflict'
                       ? {
@@ -2230,7 +2252,7 @@ export function MathExamEditor({
                             <button
                               type="button"
                               onClick={() =>
-                                updateQuestion(activeQuestion.id, (q) => {
+                                updateQuestionAnswer(activeQuestion.id, (q) => {
                                   const src = q.multiSelectOptions ?? q.options ?? [];
                                   const next = src.map((o) =>
                                     o.id === opt.id ? { ...o, isCorrect: !o.isCorrect } : o
@@ -2356,14 +2378,18 @@ export function MathExamEditor({
                               <button
                                 type="button"
                                 onClick={() =>
-                                  updateQuestion(activeQuestion.id, (q) => ({
-                                    ...q,
-                                    correctOptionId: opt.id,
-                                    options: (q.options ?? []).map((item) => ({
-                                      ...item,
-                                      isCorrect: item.id === opt.id,
-                                    })),
-                                  }))
+                                  updateQuestionAnswer(
+                                    activeQuestion.id,
+                                    (q) => ({
+                                      ...q,
+                                      correctOptionId: opt.id,
+                                      options: (q.options ?? []).map((item) => ({
+                                        ...item,
+                                        isCorrect: item.id === opt.id,
+                                      })),
+                                    }),
+                                    { selectionSummary: `Phương án ${MCQ_LABELS[idx]}` }
+                                  )
                                 }
                                 className={`rounded px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${
                                   isCorrect
@@ -2439,12 +2465,15 @@ export function MathExamEditor({
                             <button
                               type="button"
                               onClick={() =>
-                                updateQuestion(activeQuestion.id, (q) => ({
-                                  ...q,
-                                  statements: (q.statements ?? []).map((item) =>
-                                    item.id === st.id ? { ...item, isTrue: true, answerState: 'confirmed' } : item
-                                  ),
-                                }))
+                                updateQuestionAnswer(
+                                  activeQuestion.id,
+                                  (q) => ({
+                                    ...q,
+                                    statements: (q.statements ?? []).map((item) =>
+                                      item.id === st.id ? { ...item, isTrue: true, answerState: 'confirmed' as const } : item
+                                    ),
+                                  })
+                                )
                               }
                               className={`rounded px-2.5 py-0.5 text-[11px] font-medium ${
                                 st.isTrue && st.answerState !== 'missing' && st.answerState !== 'candidate'
@@ -2457,12 +2486,15 @@ export function MathExamEditor({
                             <button
                               type="button"
                               onClick={() =>
-                                updateQuestion(activeQuestion.id, (q) => ({
-                                  ...q,
-                                  statements: (q.statements ?? []).map((item) =>
-                                    item.id === st.id ? { ...item, isTrue: false, answerState: 'confirmed' } : item
-                                  ),
-                                }))
+                                updateQuestionAnswer(
+                                  activeQuestion.id,
+                                  (q) => ({
+                                    ...q,
+                                    statements: (q.statements ?? []).map((item) =>
+                                      item.id === st.id ? { ...item, isTrue: false, answerState: 'confirmed' as const } : item
+                                    ),
+                                  })
+                                )
                               }
                               className={`rounded px-2.5 py-0.5 text-[11px] font-medium ${
                                 !st.isTrue && st.answerState !== 'missing' && st.answerState !== 'candidate'
@@ -2521,7 +2553,7 @@ export function MathExamEditor({
                               .split('|')
                               .map((s) => s.trim())
                               .filter(Boolean);
-                            updateQuestion(activeQuestion.id, (q) => ({
+                            updateQuestionAnswer(activeQuestion.id, (q) => ({
                               ...q,
                               fillBlank: q.fillBlank
                                 ? {
@@ -2639,7 +2671,7 @@ export function MathExamEditor({
                             value={it.correctRank}
                             onChange={(e) => {
                               const rk = Math.max(1, Number(e.target.value) || 1);
-                              updateQuestion(activeQuestion.id, (q) => ({
+                              updateQuestionAnswer(activeQuestion.id, (q) => ({
                                 ...q,
                                 ordering: q.ordering
                                   ? {
@@ -2672,17 +2704,26 @@ export function MathExamEditor({
                     <input
                       type="text"
                       value={activeQuestion.shortAnswer?.answerValue ?? ''}
-                      onChange={(e) =>
-                        updateQuestion(activeQuestion.id, (q) => ({
+                      onChange={(e) => {
+                        const rawVal = e.target.value;
+                        const trimmed = rawVal.trim();
+                        const normalized = trimmed
+                          .replace(/−/g, '-')
+                          .replace(/\s+/g, '')
+                          .replace(/^(-?\d+),(\d+)$/, '$1.$2');
+                        updateQuestionAnswer(activeQuestion.id, (q) => ({
                           ...q,
                           shortAnswer: {
-                            answerValue: e.target.value,
-                            acceptedFormats: [e.target.value],
+                            ...(q.shortAnswer ?? { answerValue: rawVal, acceptedFormats: [] }),
+                            answerValue: rawVal,
+                            rawAnswer: trimmed,
+                            normalizedAnswer: normalized,
+                            acceptedFormats: Array.from(new Set([trimmed, normalized].filter(Boolean))),
                             unit: q.shortAnswer?.unit ?? '',
                             domainCondition: q.shortAnswer?.domainCondition ?? '',
                           },
-                        }))
-                      }
+                        }));
+                      }}
                       placeholder="VD: 0,60 hoặc -3/2"
                       className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
                     />

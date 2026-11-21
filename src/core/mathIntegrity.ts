@@ -22,6 +22,23 @@ import {
   TrueFalseLabel,
   TrueFalseStatement,
 } from '../types/mathExam';
+import {
+  applyTeacherManualAnswer,
+  computeContentHash,
+  computeQuestionVerificationContentHash,
+  evaluateQuestionAnswerState,
+  inspectQuestionAnswerStructure,
+  reconcileLegacyQuestionAnswerState,
+} from './mathAnswerState';
+
+export {
+  applyTeacherManualAnswer,
+  computeContentHash,
+  computeQuestionVerificationContentHash,
+  evaluateQuestionAnswerState,
+  inspectQuestionAnswerStructure,
+  reconcileLegacyQuestionAnswerState,
+};
 
 export const MCQ_LABELS: McqOptionLabel[] = ['A', 'B', 'C', 'D'];
 export const TF_LABELS: TrueFalseLabel[] = ['a', 'b', 'c', 'd'];
@@ -43,65 +60,12 @@ export function getStatementLetterLabel(index: number): string {
 export const MATH_SAFETY_LIMITATION_NOTICE =
   'Giới hạn kiểm chứng: Kiểm tra hash nội dung, render KaTeX và ánh xạ ID chỉ bảo đảm dữ liệu không bị sai lệch khi lưu hoặc trộn đề, KHÔNG thể tự chứng minh lời giải hay đáp án gốc đúng về mặt toán học. Giáo viên cần xác nhận đề gốc trước khi xuất bản.';
 
-export function computeContentHash(input: string): string {
-  let h1 = 0x811c9dc5;
-  let h2 = 5381;
-  for (let i = 0; i < input.length; i++) {
-    const ch = input.charCodeAt(i);
-    h1 ^= ch;
-    h1 = Math.imul(h1, 0x01000193);
-    h2 = ((h2 << 5) + h2) ^ ch;
-  }
-  return `${(h1 >>> 0).toString(16).padStart(8, '0')}-${(h2 >>> 0).toString(16).padStart(8, '0')}-${input.length}`;
-}
-
 export function sanitizeSvgSource(svg: string): string {
   return svg
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
     .replace(/<script[\s\S]*?\/>/gi, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/(href|xlink:href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '$1="#"');
-}
-
-/**
- * Hash toàn bộ nội dung + khóa đáp án của một câu hỏi để phát hiện khi giáo viên
- * chỉnh sửa câu sau khi đã bấm xác nhận (tự động hủy trạng thái teacher-confirmed).
- */
-export function computeQuestionVerificationContentHash(q: MathQuestion): string {
-  const parts: string[] = [
-    q.type,
-    q.universalType ?? q.type,
-    q.stem?.rawSource ?? '',
-    q.correctOptionId ?? '',
-    (q.correctOptionIds ?? []).join(','),
-    (q.options ?? [])
-      .map(
-        (o) =>
-          `${o.id}|${o.content?.rawSource ?? ''}|${o.isCorrect ? '1' : '0'}|${o.visualAsset?.checksum ?? ''}`
-      )
-      .join(';;'),
-    (q.multiSelectOptions ?? [])
-      .map(
-        (o) =>
-          `${o.id}|${o.content?.rawSource ?? ''}|${o.isCorrect ? '1' : '0'}|${o.visualAsset?.checksum ?? ''}`
-      )
-      .join(';;'),
-    (q.statements ?? [])
-      .map(
-        (s) =>
-          `${s.id}|${s.content?.rawSource ?? ''}|${s.isTrue ? '1' : '0'}|${s.answerState ?? ''}`
-      )
-      .join(';;'),
-    q.shortAnswer
-      ? `${q.shortAnswer.answerValue ?? ''}|${q.shortAnswer.rawAnswer ?? ''}|${q.shortAnswer.normalizedAnswer ?? ''}|${q.shortAnswer.unit ?? ''}`
-      : '',
-    (q.essayParts ?? [])
-      .map((p) => `${p.id}|${p.label}|${p.points}|${p.content?.rawSource ?? ''}`)
-      .join(';;'),
-    q.solutionGuide?.rawSource ?? '',
-    (q.visualAssets ?? []).map((a) => `${a.id}:${a.checksum}`).join(','),
-  ];
-  return computeContentHash(parts.join('###'));
 }
 
 /**
@@ -1250,80 +1214,92 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       });
     }
 
-    // Kiểm tra nguồn gốc khóa đáp án (Answer Provenance) & phát hiện sửa nội dung sau khi xác nhận
-    if (q.answerProvenance) {
-      const prov = q.answerProvenance;
-      if (prov.status === 'conflict') {
-        const conflictDetail = prov.conflictingEvidence?.join(' vs ') || prov.note || 'Bảng đáp án và lời giải không trùng khớp';
-        issues.push({
-          id: `q-prov-conflict-${q.id}`,
-          severity: 'error',
-          tier: 'BLOCKED',
-          scope: 'option',
-          questionId: q.id,
-          questionNumber: qNum,
-          code: q.code,
-          ...locMeta,
-          message: `Câu ${qNum} (${q.code}): MÂU THUẪN đáp án giữa nhiều nguồn trong tài liệu (${conflictDetail}).`,
-          recommendation: 'Đối chiếu tài liệu gốc, chọn đáp án chính xác và xác nhận lại trước khi trộn/xuất.',
-        });
-      } else if (prov.status === 'needs-review') {
-        issues.push({
-          id: `q-prov-review-${q.id}`,
-          severity: 'error',
-          tier: 'BLOCKED',
-          scope: 'option',
-          questionId: q.id,
-          questionNumber: qNum,
-          code: q.code,
-          ...locMeta,
-          message: `Câu ${qNum} (${q.code}): Khóa đáp án đang ở trạng thái CẦN DUYỆT QUY ƯỚC (${prov.note || 'ứng viên từ gạch chân hoặc dòng gợi ý chưa được xác nhận'}).`,
-          recommendation: 'Mở Bước 2 để xác nhận rõ quy ước đáp án hoặc sửa lại khóa chấm cho câu này.',
-        });
-      } else if (prov.status === 'missing' && q.type !== 'essay') {
-        issues.push({
-          id: `q-prov-missing-${q.id}`,
-          severity: 'error',
-          tier: 'BLOCKED',
-          scope: 'option',
-          questionId: q.id,
-          questionNumber: qNum,
-          code: q.code,
-          ...locMeta,
-          message: `Câu ${qNum} (${q.code}): THIẾU KHÓA ĐÁP ÁN (${prov.note || 'không tìm thấy đáp án xác minh trong tài liệu'}).`,
-          recommendation: 'Chọn hoặc nhập đáp án đúng ở Bước 1/2 (hệ thống không tự mặc định A hay Sai).',
-        });
-      } else if (prov.status === 'unsupported') {
-        issues.push({
-          id: `q-prov-unsupported-${q.id}`,
-          severity: 'error',
-          tier: 'BLOCKED',
-          scope: 'option',
-          questionId: q.id,
-          questionNumber: qNum,
-          code: q.code,
-          ...locMeta,
-          message: `Câu ${qNum} (${q.code}): Định dạng khóa đáp án chưa hỗ trợ tự động (UNSUPPORTED: ${prov.note || prov.rawEvidence || 'cần kiểm tra'}).`,
-          recommendation: 'Mở Answer Key Studio để nhập và xác nhận đáp án chuẩn trước khi trộn/xuất.',
-        });
-      } else if (
-        prov.status === 'teacher-confirmed' &&
-        prov.confirmedContentHash &&
-        prov.confirmedContentHash !== computeQuestionVerificationContentHash(q)
-      ) {
-        issues.push({
-          id: `q-prov-stale-confirm-${q.id}`,
-          severity: 'error',
-          tier: 'BLOCKED',
-          scope: 'option',
-          questionId: q.id,
-          questionNumber: qNum,
-          code: q.code,
-          ...locMeta,
-          message: `Câu ${qNum} (${q.code}): Nội dung hoặc đáp án đã bị chỉnh sửa sau lần xác nhận trước — trạng thái xác nhận không còn hiệu lực.`,
-          recommendation: 'Kiểm tra lại câu hỏi và bấm xác nhận lại đáp án trước khi trộn/xuất.',
-        });
-      }
+    // Kiểm tra trạng thái khóa đáp án hiện tại từ nguồn sự thật duy nhất (evaluateQuestionAnswerState)
+    const ansState = evaluateQuestionAnswerState(q);
+    let emittedAnswerBlockIssue = false;
+    const prov = q.answerProvenance;
+    if (ansState.isConflict) {
+      const conflictDetail =
+        prov?.conflictingEvidence?.join(' vs ') ||
+        prov?.note ||
+        'Bảng đáp án và lời giải không trùng khớp';
+      issues.push({
+        id: `q-prov-conflict-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): MÂU THUẪN đáp án giữa nhiều nguồn trong tài liệu (${conflictDetail}).`,
+        recommendation: 'Đối chiếu tài liệu gốc, chọn đáp án chính xác và xác nhận lại trước khi trộn/xuất.',
+      });
+      emittedAnswerBlockIssue = true;
+    } else if (ansState.isUnsupported) {
+      issues.push({
+        id: `q-prov-unsupported-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): Định dạng khóa đáp án chưa hỗ trợ tự động (UNSUPPORTED: ${prov?.note || prov?.rawEvidence || 'cần kiểm tra'}).`,
+        recommendation: 'Mở Answer Key Studio để nhập và xác nhận đáp án chuẩn trước khi trộn/xuất.',
+      });
+      emittedAnswerBlockIssue = true;
+    } else if (ansState.isStaleConfirmation) {
+      issues.push({
+        id: `q-prov-stale-confirm-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): Nội dung hoặc đáp án đã bị chỉnh sửa sau lần xác nhận trước — trạng thái xác nhận không còn hiệu lực.`,
+        recommendation: 'Kiểm tra lại câu hỏi và bấm xác nhận lại đáp án trước khi trộn/xuất.',
+      });
+      emittedAnswerBlockIssue = true;
+    } else if (ansState.isNeedsReview) {
+      const reviewDetail =
+        ansState.structural.reason ||
+        prov?.note ||
+        'ứng viên từ gạch chân hoặc dòng gợi ý chưa được xác nhận';
+      issues.push({
+        id: `q-prov-review-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): Khóa đáp án đang ở trạng thái CẦN DUYỆT QUY ƯỚC (${reviewDetail}).`,
+        recommendation: 'Mở Bước 1/2 để chọn rõ đáp án đúng hoặc xác nhận quy ước cho câu này.',
+      });
+      emittedAnswerBlockIssue = true;
+    } else if (ansState.isMissingKey && q.type !== 'essay') {
+      const missingDetail =
+        ansState.structural.reason ||
+        prov?.note ||
+        'không tìm thấy đáp án xác minh trong tài liệu';
+      issues.push({
+        id: `q-prov-missing-${q.id}`,
+        severity: 'error',
+        tier: 'BLOCKED',
+        scope: 'option',
+        questionId: q.id,
+        questionNumber: qNum,
+        code: q.code,
+        ...locMeta,
+        message: `Câu ${qNum} (${q.code}): THIẾU KHÓA ĐÁP ÁN (${missingDetail}).`,
+        recommendation: 'Chọn hoặc nhập đáp án đúng ở Bước 1/2 (hệ thống không tự mặc định A hay Sai).',
+      });
+      emittedAnswerBlockIssue = true;
     }
 
     // Cổng bảo vệ công thức & bố cục khi nhập từ PDF hoặc định dạng đa nguồn (Exam Mixer Pro 7.0)
@@ -1590,7 +1566,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
       });
 
-      if (correctOptions.length === 0) {
+      if (!emittedAnswerBlockIssue && (correctOptions.length === 0 || ansState.isInvalidAnswer)) {
         issues.push({
           id: `ms-answer-${q.id}`,
           severity: 'error',
@@ -1599,8 +1575,11 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           questionId: q.id,
           questionNumber: qNum,
           code: q.code,
-          message: `Câu ${qNum} (${q.code}) dạng Nhiều đáp án chưa chọn đáp án đúng nào.`,
-          recommendation: 'Đánh dấu ít nhất 1 phương án đúng.',
+          message:
+            ansState.isInvalidAnswer && ansState.structural.reason
+              ? `Câu ${qNum} (${q.code}): ${ansState.structural.reason}`
+              : `Câu ${qNum} (${q.code}) dạng Nhiều đáp án chưa chọn đáp án đúng nào.`,
+          recommendation: 'Đánh dấu ít nhất 1 phương án đúng hợp lệ theo ID.',
         });
       }
 
@@ -1686,9 +1665,12 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
         }
       });
 
-      const waitingForKey = (q.answerProvenance?.status === 'needs-review' || q.answerProvenance?.status === 'missing')
-        && !q.correctOptionId && correctOptions.length === 0;
-      if (!waitingForKey && (correctOptions.length !== 1 || correctOptions[0]?.id !== q.correctOptionId)) {
+      if (
+        !emittedAnswerBlockIssue &&
+        (correctOptions.length !== 1 ||
+          correctOptions[0]?.id !== q.correctOptionId ||
+          ansState.isInvalidAnswer)
+      ) {
         issues.push({
           id: `mcq-answer-${q.id}`,
           severity: 'error',
@@ -1772,33 +1754,37 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           });
         }
         if (st.answerState === 'missing') {
-          issues.push({
-            id: `tf-missing-state-${q.id}-${st.id}`,
-            severity: 'error',
-            tier: 'BLOCKED',
-            scope: 'statement',
-            questionId: q.id,
-            questionNumber: qNum,
-            code: q.code,
-            ...locMeta,
-            optionOrStatementLabel: `${st.originalLabel})`,
-            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) đang THIẾU đáp án Đúng/Sai (hệ thống không tự suy đoán Sai).`,
-            recommendation: 'Chọn Đúng hoặc Sai và xác nhận cho từng ý ở Bước 2.',
-          });
+          if (!emittedAnswerBlockIssue) {
+            issues.push({
+              id: `tf-missing-state-${q.id}-${st.id}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'statement',
+              questionId: q.id,
+              questionNumber: qNum,
+              code: q.code,
+              ...locMeta,
+              optionOrStatementLabel: `${st.originalLabel})`,
+              message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) đang THIẾU đáp án Đúng/Sai (hệ thống không tự suy đoán Sai).`,
+              recommendation: 'Chọn Đúng hoặc Sai và xác nhận cho từng ý ở Bước 1/2.',
+            });
+          }
         } else if (st.answerState === 'candidate') {
-          issues.push({
-            id: `tf-candidate-state-${q.id}-${st.id}`,
-            severity: 'error',
-            tier: 'BLOCKED',
-            scope: 'statement',
-            questionId: q.id,
-            questionNumber: qNum,
-            code: q.code,
-            ...locMeta,
-            optionOrStatementLabel: `${st.originalLabel})`,
-            message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) mới là ứng viên từ dấu gạch chân, chưa được giáo viên xác nhận quy ước.`,
-            recommendation: 'Đối chiếu khóa gốc và chọn rõ Đúng hoặc Sai cho từng ý.',
-          });
+          if (!emittedAnswerBlockIssue) {
+            issues.push({
+              id: `tf-candidate-state-${q.id}-${st.id}`,
+              severity: 'error',
+              tier: 'BLOCKED',
+              scope: 'statement',
+              questionId: q.id,
+              questionNumber: qNum,
+              code: q.code,
+              ...locMeta,
+              optionOrStatementLabel: `${st.originalLabel})`,
+              message: `Câu ${qNum} (${q.code}) ý ${st.originalLabel}) mới là ứng viên từ dấu gạch chân, chưa được giáo viên xác nhận quy ước.`,
+              recommendation: 'Đối chiếu khóa gốc và chọn rõ Đúng hoặc Sai cho từng ý.',
+            });
+          }
         } else if (typeof st.isTrue !== 'boolean') {
           issues.push({
             id: `tf-bool-${q.id}-${st.id}`,
@@ -1910,7 +1896,7 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
       }
     } else if (q.type === 'short-answer') {
       const val = q.shortAnswer?.answerValue?.trim() ?? '';
-      if (val.length === 0) {
+      if (!emittedAnswerBlockIssue && val.length === 0) {
         issues.push({
           id: `sa-empty-${q.id}`,
           severity: 'error',
@@ -1922,6 +1908,19 @@ export function auditOriginalExamIntegrity(exam: MathExamProject): MathIntegrity
           ...locMeta,
           message: `Câu ${qNum} (${q.code}) dạng Trả lời ngắn chưa có đáp án số chính xác.`,
           recommendation: 'Nhập đáp án gốc cố định (VD: 0, -4,3 hoặc π - 8/3).',
+        });
+      } else if (!emittedAnswerBlockIssue && ansState.isInvalidAnswer) {
+        issues.push({
+          id: `sa-empty-${q.id}`,
+          severity: 'error',
+          tier: 'BLOCKED',
+          scope: 'question',
+          questionId: q.id,
+          questionNumber: qNum,
+          code: q.code,
+          ...locMeta,
+          message: `Câu ${qNum} (${q.code}): ${ansState.structural.reason ?? 'Đáp án Trả lời ngắn chưa hợp lệ.'}`,
+          recommendation: 'Nhập lại đáp án gốc rõ ràng bằng số/ký hiệu chuẩn.',
         });
       }
     }
@@ -2264,9 +2263,10 @@ export function computeLockStats(exam: MathExamProject): MathIntegrityReport['st
     if (q.formulaStatus?.wmfPreviewCount) {
       wmfPreviewCount += q.formulaStatus.wmfPreviewCount;
     }
-    if (q.answerProvenance?.status === 'missing') missingKeyCount += 1;
-    if (q.answerProvenance?.status === 'needs-review') needsReviewKeyCount += 1;
-    if (q.answerProvenance?.status === 'conflict') conflictKeyCount += 1;
+    const ansState = evaluateQuestionAnswerState(q);
+    if (ansState.isMissingKey) missingKeyCount += 1;
+    if (ansState.isNeedsReview) needsReviewKeyCount += 1;
+    if (ansState.isConflict) conflictKeyCount += 1;
     if (q.legacyAnomalyReasons && q.legacyAnomalyReasons.length > 0) legacyAnomalyCount += 1;
   });
 
@@ -3101,11 +3101,7 @@ export function checkExamExportGate(exam: MathExamProject): {
   }
 
   const unconfirmedNonEssay = exam.questions.filter(
-    (q) =>
-      q.type !== 'essay' &&
-      !q.answerConfirmed &&
-      q.answerProvenance?.status !== 'source-matched' &&
-      q.answerProvenance?.status !== 'teacher-confirmed'
+    (q) => q.type !== 'essay' && evaluateQuestionAnswerState(q).needsTeacherConfirmation
   );
   if (unconfirmedNonEssay.length > 0) {
     reasons.push(
@@ -3177,15 +3173,18 @@ export function checkDraftExportGate(exam: MathExamProject): {
     new Set(structuralErrors.map((i) => i.message))
   );
 
-  const missingOrUnconfirmedAnswerCount = exam.questions.filter(
-    (q) =>
-      q.type !== 'essay' &&
-      (!q.answerConfirmed ||
-        q.answerProvenance?.status === 'missing' ||
-        q.answerProvenance?.status === 'needs-review' ||
-        q.answerProvenance?.status === 'conflict' ||
-        q.answerProvenance?.status === 'unsupported')
-  ).length;
+  const missingOrUnconfirmedAnswerCount = exam.questions.filter((q) => {
+    if (q.type === 'essay') return false;
+    const st = evaluateQuestionAnswerState(q);
+    return (
+      st.isMissingKey ||
+      st.isNeedsReview ||
+      st.isConflict ||
+      st.isUnsupported ||
+      st.isInvalidAnswer ||
+      st.needsTeacherConfirmation
+    );
+  }).length;
 
   const canExportDraft =
     exam.questions.length > 0 && blockingStructuralReasons.length === 0;

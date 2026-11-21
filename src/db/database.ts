@@ -78,6 +78,7 @@ import {
   getUniversalQuestionType,
   resolveSubjectId,
 } from '../core/subjectProfileRegistry';
+import { reconcileLegacyQuestionAnswerState } from '../core/mathAnswerState';
 import {
   DEFAULT_JOURNALS,
   DEFAULT_RESOURCES,
@@ -480,7 +481,7 @@ export function normalizeMathExamProject(raw: MathExamProject): MathExamProject 
       };
     }
 
-    const normalizedQuestion = {
+    const normalizedQuestion = reconcileLegacyQuestionAnswerState({
       ...q,
       subjectId: q.subjectId ?? resolvedSubjectId,
       universalType: getUniversalQuestionType(q),
@@ -489,7 +490,7 @@ export function normalizeMathExamProject(raw: MathExamProject): MathExamProject 
       answerConfirmed,
       answerProvenance,
       legacyAnomalyReasons: legacyAnomalies.length > 0 ? legacyAnomalies : undefined,
-    };
+    });
     return {
       ...normalizedQuestion,
       universalLock: buildUniversalLockState(normalizedQuestion, subjectProfile),

@@ -21,7 +21,7 @@ import {
 import {
   MCQ_LABELS,
   TF_LABELS,
-  computeQuestionVerificationContentHash,
+  applyTeacherManualAnswer,
 } from '../../core/mathIntegrity';
 import {
   RELIABILITY_ANSWER_STATUS_META,
@@ -119,23 +119,19 @@ export const AnswerKeyStudioPanel: React.FC<AnswerKeyStudioPanelProps> = ({
         ...o,
         isCorrect: o.id === target.id,
       }));
-      const updated: MathQuestion = {
-        ...item,
-        options: nextOpts,
-        correctOptionId: target.id,
-        answerConfirmed: true,
-        updatedAt: now,
-      };
-      updated.answerProvenance = {
-        status: 'teacher-confirmed',
-        sourceKind: 'teacher-manual',
-        sourceFileHash: item.answerProvenance?.sourceFileHash ?? item.sourceTrace?.sourceFileHash,
-        sourceLocation: 'Answer Key Studio (chọn trực tiếp)',
-        rawEvidence: `Giáo viên chọn phương án ${label}`,
-        confirmedAt: now,
-        confirmedContentHash: computeQuestionVerificationContentHash(updated),
-      };
-      return updated;
+      return applyTeacherManualAnswer(
+        item,
+        {
+          ...item,
+          options: nextOpts,
+          correctOptionId: target.id,
+        },
+        {
+          now,
+          sourceLocation: 'Answer Key Studio (chọn trực tiếp)',
+          selectionSummary: `Phương án ${label}`,
+        }
+      );
     });
     const allConfirmed = nextQuestions
       .filter((item) => item.type !== 'essay')
@@ -159,30 +155,17 @@ export const AnswerKeyStudioPanel: React.FC<AnswerKeyStudioPanelProps> = ({
           ? { ...st, isTrue: nextVal, answerState: 'confirmed' as const }
           : st
       );
-      const allFourConfirmed =
-        nextSts.length === 4 && nextSts.every((st) => st.answerState === 'confirmed');
-      const updated: MathQuestion = {
-        ...item,
-        statements: nextSts,
-        answerConfirmed: allFourConfirmed,
-        updatedAt: now,
-      };
-      updated.answerProvenance = allFourConfirmed
-        ? {
-            status: 'teacher-confirmed',
-            sourceKind: 'teacher-manual',
-            sourceFileHash: item.answerProvenance?.sourceFileHash ?? item.sourceTrace?.sourceFileHash,
-            sourceLocation: 'Answer Key Studio (xác nhận 4 ý Đ/S)',
-            rawEvidence: nextSts.map((s) => `${s.originalLabel}:${s.isTrue ? 'Đ' : 'S'}`).join(' '),
-            confirmedAt: now,
-            confirmedContentHash: computeQuestionVerificationContentHash(updated),
-          }
-        : {
-            ...(item.answerProvenance ?? {}),
-            status: 'missing',
-            note: 'Còn mệnh đề Đúng/Sai chưa được giáo viên chọn rõ.',
-          };
-      return updated;
+      return applyTeacherManualAnswer(
+        item,
+        {
+          ...item,
+          statements: nextSts,
+        },
+        {
+          now,
+          sourceLocation: 'Answer Key Studio (xác nhận 4 ý Đ/S)',
+        }
+      );
     });
     const allConfirmed = nextQuestions
       .filter((item) => item.type !== 'essay')
@@ -202,34 +185,24 @@ export const AnswerKeyStudioPanel: React.FC<AnswerKeyStudioPanelProps> = ({
     const normalized = trimmed.replace(/−/g, '-').replace(/\s+/g, '').replace(/^(-?\d+),(\d+)$/, '$1.$2');
     const nextQuestions = exam.questions.map((item) => {
       if (item.id !== q.id) return item;
-      const updated: MathQuestion = {
-        ...item,
-        shortAnswer: {
-          ...(item.shortAnswer ?? { answerValue: trimmed, acceptedFormats: [] }),
-          answerValue: trimmed,
-          rawAnswer: trimmed,
-          normalizedAnswer: normalized,
-          acceptedFormats: Array.from(new Set([trimmed, normalized].filter(Boolean))),
+      return applyTeacherManualAnswer(
+        item,
+        {
+          ...item,
+          shortAnswer: {
+            ...(item.shortAnswer ?? { answerValue: trimmed, acceptedFormats: [] }),
+            answerValue: trimmed,
+            rawAnswer: trimmed,
+            normalizedAnswer: normalized,
+            acceptedFormats: Array.from(new Set([trimmed, normalized].filter(Boolean))),
+          },
         },
-        answerConfirmed: trimmed.length > 0,
-        updatedAt: now,
-      };
-      updated.answerProvenance =
-        trimmed.length > 0
-          ? {
-              status: 'teacher-confirmed',
-              sourceKind: 'teacher-manual',
-              sourceFileHash: item.answerProvenance?.sourceFileHash ?? item.sourceTrace?.sourceFileHash,
-              sourceLocation: 'Answer Key Studio (nhập tay)',
-              rawEvidence: trimmed,
-              confirmedAt: now,
-              confirmedContentHash: computeQuestionVerificationContentHash(updated),
-            }
-          : {
-              status: 'missing',
-              note: 'Thiếu giá trị đáp án trả lời ngắn.',
-            };
-      return updated;
+        {
+          now,
+          sourceLocation: 'Answer Key Studio (nhập tay)',
+          selectionSummary: trimmed || undefined,
+        }
+      );
     });
     const allConfirmed = nextQuestions
       .filter((item) => item.type !== 'essay')

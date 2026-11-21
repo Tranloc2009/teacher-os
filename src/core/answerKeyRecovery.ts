@@ -8,6 +8,7 @@ import {
   MCQ_LABELS,
   TF_LABELS,
   computeQuestionVerificationContentHash,
+  evaluateQuestionAnswerState,
 } from './mathIntegrity';
 
 export type ReliabilityAnswerStatus =
@@ -76,32 +77,6 @@ export function mapToReliabilityAnswerStatus(q: MathQuestion): ReliabilityAnswer
     return 'AMBIGUOUS';
   }
 
-  const prov = q.answerProvenance;
-  if (prov) {
-    switch (prov.status) {
-      case 'teacher-confirmed': {
-        if (
-          prov.confirmedContentHash &&
-          prov.confirmedContentHash !== computeQuestionVerificationContentHash(q)
-        ) {
-          return 'AMBIGUOUS';
-        }
-        return 'TEACHER_CONFIRMED';
-      }
-      case 'source-matched':
-        return 'SOURCE_KEY_FOUND';
-      case 'conflict':
-        return 'CONFLICT';
-      case 'needs-review':
-        return 'AMBIGUOUS';
-      case 'unsupported':
-        return 'UNSUPPORTED';
-      case 'missing':
-      default:
-        return 'MISSING';
-    }
-  }
-
   if (q.type === 'essay') {
     return q.answerConfirmed
       ? 'TEACHER_CONFIRMED'
@@ -110,6 +85,16 @@ export function mapToReliabilityAnswerStatus(q: MathQuestion): ReliabilityAnswer
       : 'MISSING';
   }
 
+  const ansState = evaluateQuestionAnswerState(q);
+  if (ansState.isConflict) return 'CONFLICT';
+  if (ansState.isUnsupported) return 'UNSUPPORTED';
+  if (ansState.isStaleConfirmation || ansState.isNeedsReview || ansState.isInvalidAnswer) {
+    return 'AMBIGUOUS';
+  }
+  if (ansState.isMissingKey) return 'MISSING';
+
+  if (ansState.effectiveStatus === 'teacher-confirmed') return 'TEACHER_CONFIRMED';
+  if (ansState.effectiveStatus === 'source-matched') return 'SOURCE_KEY_FOUND';
   return q.answerConfirmed ? 'TEACHER_CONFIRMED' : 'MISSING';
 }
 
