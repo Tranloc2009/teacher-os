@@ -1,4 +1,5 @@
 import type { AppRole, AuthenticatedUser, WorkerEnv } from './types';
+import { getSupabaseOrigin, serviceAuthHeaders } from './supabase';
 import { isValidRole, isValidUuid } from './validation';
 
 interface JwtHeader {
@@ -52,18 +53,6 @@ function decodeBase64UrlJson<T>(segment: string): T | null {
     const bytes = decodeBase64UrlToBytes(segment);
     const json = new TextDecoder().decode(bytes);
     return JSON.parse(json) as T;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeSupabaseBaseUrl(rawUrl: string): string | null {
-  try {
-    const parsed = new URL(rawUrl.trim());
-    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-      return null;
-    }
-    return parsed.origin;
   } catch {
     return null;
   }
@@ -231,8 +220,7 @@ async function fetchAuthoritativeRoles(
   const response = await fetchImpl(url, {
     method: 'GET',
     headers: {
-      apikey: secretKey,
-      Authorization: `Bearer ${secretKey}`,
+      ...serviceAuthHeaders(secretKey),
       Accept: 'application/json',
     },
   });
@@ -257,13 +245,13 @@ async function fetchAuthoritativeRoles(
 
   return {
     ok: true,
-    roles: roles.length > 0 ? roles : ['student'],
+    roles,
   };
 }
 
 export type AuthVerificationResult =
   | { ok: true; user: AuthenticatedUser }
-  | { ok: false; status: 401 | 503; code: string; message: string };
+  | { ok: false; status: 401 | 403 | 503; code: string; message: string };
 
 export async function authenticateRequest(
   request: Request,
@@ -271,9 +259,7 @@ export async function authenticateRequest(
   fetchImpl: typeof fetch = fetch,
   nowMs: number = Date.now()
 ): Promise<AuthVerificationResult> {
-  const supabaseOrigin = env.SUPABASE_URL
-    ? normalizeSupabaseBaseUrl(env.SUPABASE_URL)
-    : null;
+  const supabaseOrigin = getSupabaseOrigin(env.SUPABASE_URL);
   const secretKey = env.SUPABASE_SECRET_KEY?.trim();
 
   if (!supabaseOrigin || !secretKey) {
@@ -418,6 +404,15 @@ export async function authenticateRequest(
       status: 503,
       code: 'ROLE_LOOKUP_FAILED',
       message: roleResult.reason,
+    };
+  }
+
+  if (roleResult.roles.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'APP_ROLE_REQUIRED',
+      message: 'Tài khoản chưa được cấp vai trò TeacherOS.',
     };
   }
 

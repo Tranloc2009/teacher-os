@@ -10,8 +10,11 @@ REVOKE ALL ON SCHEMA exam_private FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON ALL TABLES IN SCHEMA exam_private FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA exam_private FROM PUBLIC, anon, authenticated;
 
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE
+  public.profiles, public.user_roles, public.classrooms, public.class_members,
+  public.exam_publications, public.exam_versions, public.exam_assignments,
+  public.exam_attempts, public.attempt_answers, public.grading_results, public.audit_events
+FROM PUBLIC, anon, authenticated;
 
 -- -----------------------------------------------------------------------------
 -- 2. Trusted SECURITY DEFINER Authorization Helpers (Locked search_path)

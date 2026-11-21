@@ -1,4 +1,5 @@
 import type { RateLimitResult, WorkerEnv } from './types';
+import { getSupabaseOrigin, serviceAuthHeaders } from './supabase';
 
 interface BucketEntry {
   timestamps: number[];
@@ -87,28 +88,20 @@ export async function checkGlobalDurableRateLimit(
   windowSeconds: number,
   fetchImpl: typeof fetch
 ): Promise<{ ok: true; result: RateLimitResult } | { ok: false; message: string }> {
-  const rawUrl = env.SUPABASE_URL?.trim();
+  const origin = getSupabaseOrigin(env.SUPABASE_URL);
   const secretKey = env.SUPABASE_SECRET_KEY?.trim();
-  if (!rawUrl || !secretKey) {
+  if (!origin || !secretKey) {
     return {
       ok: false,
       message: 'Thiếu cấu hình Supabase để kiểm tra global rate limit.',
     };
   }
 
-  let origin: string;
-  try {
-    origin = new URL(rawUrl).origin;
-  } catch {
-    return { ok: false, message: 'SUPABASE_URL không hợp lệ.' };
-  }
-
   try {
     const res = await fetchImpl(`${origin}/rest/v1/rpc/server_check_rate_limit`, {
       method: 'POST',
       headers: {
-        apikey: secretKey,
-        Authorization: `Bearer ${secretKey}`,
+        ...serviceAuthHeaders(secretKey),
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },

@@ -4,23 +4,24 @@ Tài liệu này là quy trình triển khai từng bước cho **Supabase Free*
 
 ---
 
-## Phần 1: Áp Dụng 3 SQL Migrations Vào Dự Án Supabase TeacherOS
+## 1. Áp dụng migration vào dự án Supabase TeacherOS
 
-### Bước 1: Tạo hoặc mở dự án Supabase Free
-1. Truy cập [https://supabase.com/dashboard](https://supabase.com/dashboard) → chọn đúng dự án TeacherOS gói **Free ($0/month)**.
-2. Mở **SQL Editor** và chạy lần lượt **đúng thứ tự 3 tệp migration**:
+### Xác minh dự án và tác động trước khi chạy
+
+1. Trong [Supabase Dashboard](https://supabase.com/dashboard), kiểm tra tên, organization, project ref, gói Free và quyền truy cập. Đối chiếu project ref với URL Supabase dùng cho Worker và frontend.
+2. Kiểm tra lịch sử migration, tên bảng/hàm/trigger trùng trong `public`, `exam_private`, `auth.users`, và các bản ghi `exam_versions` hiện có. Ba migration đầu đã được thu hẹp cho lần cài mới. Nếu dự án từng chạy bản cũ, kiểm tra ACL ngoài các bảng TeacherOS, trigger đăng ký cũ và payload đề thi trước khi tiếp tục. Migration bổ sung không tự khôi phục quyền của ứng dụng khác hoặc sửa dữ liệu vi phạm constraint.
+3. Dùng Supabase CLI để ghi lịch sử migration. Với CLI v3, chạy `supabase migration list --remote=<PROJECT_REF>` và `supabase db push --remote=<PROJECT_REF> --dry-run`. Đối chiếu danh sách với bốn migration dưới đây. Sau khi được phép, bỏ `--dry-run` và xác nhận đúng đích.
    1. `supabase/migrations/20261120000001_phase4a_foundation_schema.sql` — Tạo 11 bảng `public.*`, schema riêng `exam_private.official_answer_keys`, index và trigger tạo user mặc định quyền `student`.
    2. `supabase/migrations/20261120000002_phase4a_rls_and_grants.sql` — Bật & cưỡng chế RLS trên mọi bảng, thu hồi quyền mặc định của `PUBLIC`/`anon`, chỉ cấp quyền tối thiểu cho `authenticated` (không cho ghi `user_roles`).
-   3. `supabase/migrations/20261120000003_phase4a_durable_idempotency_and_hardening.sql` — Cấp quyền tường minh cho `service_role` trên `public` & `exam_private`, khóa sửa các cột bất biến của `exam_attempts`, chặn khóa đáp án lọt vào `exam_versions`, tạo bảng & RPC bền vững cho **Idempotency-Key (`exam_private.api_idempotency_keys`)** và **Global Multi-Instance Rate Limit (`exam_private.api_rate_limits`)**.
-
-*(Nếu dùng Supabase CLI miễn phí trên máy cá nhân: `supabase link --project-ref <PROJECT_REF>` rồi chạy `supabase db push`.)*
+   3. `supabase/migrations/20261120000003_phase4a_durable_idempotency_and_hardening.sql` — Cấp quyền cho các bảng Worker sử dụng và tạo RPC cho idempotency, rate limit trên PostgreSQL.
+   4. `supabase/migrations/20261121052413_phase4a_access_boundaries.sql` — Đưa các hàm trợ giúp RLS vào schema riêng, giới hạn quyền xem đề và tạo lượt làm, khóa trạng thái khi nộp bài, chặn các trường đáp án đã biết trong JSON lồng nhau.
 
 ### Bước 2: Xác minh cấu hình bảo mật trên Supabase Dashboard
 1. **Project Settings → Data API → Exposed schemas**:
    - Chỉ giữ `public`. **TUYỆT ĐỐI KHÔNG** thêm `exam_private` vào Exposed schemas.
-   - Worker vẫn gọi được các bảng trong `exam_private` thông qua các RPC `server_*` chỉ cấp quyền `EXECUTE` cho `service_role`.
+   - Worker dùng các RPC `server_*` cho idempotency và rate limit. Đáp án chính thức nằm trong `exam_private.official_answer_keys` và Phase 4A chưa có API công bố đáp án.
 2. **Authentication → Providers → Email**: bật Email Sign-in.
-3. Tạo tài khoản thử nghiệm (1 học sinh, 1 giáo viên) và cấp quyền `teacher`/`admin` đầu tiên bằng SQL Editor:
+3. Tạo tài khoản thử nghiệm học sinh và giáo viên sau migration. Nếu có tài khoản từ trước, rà soát từng hồ sơ và cấp vai trò TeacherOS qua quy trình quản trị. Cấp quyền `teacher` cho tài khoản thử nghiệm bằng SQL Editor:
    ```sql
    INSERT INTO public.user_roles (user_id, role)
    VALUES ('<UUID-GIAO-VIEN>', 'teacher')
@@ -34,7 +35,7 @@ Tài liệu này là quy trình triển khai từng bước cho **Supabase Free*
 ### Bước 1: Kiểm tra `workers/api/wrangler.toml`
 Mở `workers/api/wrangler.toml` và cập nhật `[vars]`:
 - `name = "teacheros-api"` *(đã cấu hình sẵn)*
-- `ALLOWED_ORIGINS = "http://localhost:3000,https://<domain-pages-cua-ban>.pages.dev"` *(không dùng `*`)*
+- `ALLOWED_ORIGINS = "https://<domain-pages-cua-ban>.pages.dev"` *(origin production chính xác, không dùng `*`)*
 - `SUPABASE_URL = "https://<project-ref>.supabase.co"`
 
 ### Bước 2: Đăng nhập Cloudflare & cài đặt Required Secrets
@@ -42,16 +43,16 @@ Chạy từ thư mục `workers/api`:
 ```bash
 cd workers/api
 npx wrangler login
-npx wrangler secret put SUPABASE_SECRET_KEY
-npx wrangler secret put SUPABASE_PUBLISHABLE_KEY
+npx wrangler whoami
 ```
-> **Lưu ý bảo mật:** `SUPABASE_SECRET_KEY` (Secret key / `service_role`) chỉ được cài qua `wrangler secret put`, **tuyệt đối không** đưa vào `wrangler.toml`, `.env.example`, mã nguồn frontend hay GitHub.
+Đối chiếu account ID của Cloudflare và gói Workers Free. Cấu hình `SUPABASE_SECRET_KEY` và `SUPABASE_PUBLISHABLE_KEY` qua **Variables and Secrets** của Worker hoặc kho bí mật của CI. Đặt cả hai cho cùng project ref đã xác minh. Giữ `SUPABASE_SECRET_KEY` ngoài mã nguồn, chat và mọi biến `VITE_*`.
 
 ### Bước 3: Deploy Worker lên Cloudflare Workers Free
 ```bash
+npx wrangler deploy --dry-run
 npx wrangler deploy
 ```
-Ghi lại URL Worker vừa triển khai (dạng `https://teacheros-api.<subdomain>.workers.dev`).
+Khi tạo Worker mới cùng lúc với secret, CI có thể truyền `--secrets-file <tệp-bảo-mật-do-CI-cấp>` lúc deploy. Xóa tệp tạm sau khi chạy. Ghi lại URL Worker vừa triển khai (dạng `https://teacheros-api.<subdomain>.workers.dev`).
 
 ### Bước 4: Khuyến nghị bảo vệ tầng Edge cho `/api/health` (Miễn phí)
 - Các route ghi có xác thực (`POST /api/v1/*`) đã dùng **Global Multi-Instance Rate Limit bền vững trên PostgreSQL** (`X-RateLimit-Scope: global-db-backed`).
@@ -69,7 +70,17 @@ VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 VITE_CLOUDFLARE_API_URL=https://teacheros-api.<subdomain>.workers.dev
 ```
 
-Sau khi build/redeploy frontend, mở **TeacherOS → Cài đặt & Sao lưu → Nền tảng Trực tuyến & Bảo mật** và bấm **Kiểm tra kết nối thật** để xác nhận:
+Frontend `teacheros-web` dùng Cloudflare Workers Static Assets Free. Nạp ba biến `VITE_*` trước khi build, rồi triển khai từ thư mục gốc:
+
+```bash
+bun install --frozen-lockfile
+bun run build
+wrangler deploy --config workers/web/wrangler.toml
+```
+
+Dùng URL trả về sau deploy làm origin duy nhất cho `ALLOWED_ORIGINS` của API. Đặt cùng origin làm Site URL trong Supabase Auth, rồi thêm URL trang chủ với dấu `/` cuối vào Redirect URLs. Rebuild trước khi deploy lại nếu bất kỳ biến `VITE_*` nào thay đổi.
+
+Mở **TeacherOS → Cài đặt & Sao lưu → Nền tảng Trực tuyến & Bảo mật** và bấm **Kiểm tra kết nối thật** để xác nhận:
 - Supabase Auth `/auth/v1/health` → `200 OK`
 - `teacheros-api` `/api/health` → `200 OK` (`configured=true`)
 - `teacheros-api` `/api/v1/auth/me` → `401` khi chưa đăng nhập và `200` kèm vai trò từ `user_roles` sau khi đăng nhập.
@@ -84,8 +95,13 @@ VITE_SUPABASE_PUBLISHABLE_KEY="sb_publishable_..." \
 VITE_CLOUDFLARE_API_URL="https://teacheros-api.<subdomain>.workers.dev" \
 TEST_STUDENT_EMAIL="hocsinh-test@example.com" \
 TEST_STUDENT_PASSWORD="<mat-khau-test>" \
+TEST_TEACHER_EMAIL="giaovien-test@example.com" \
+TEST_TEACHER_PASSWORD="<mat-khau-test>" \
+TEST_FRONTEND_ORIGIN="https://<domain-frontend>" \
 node scripts/verify-phase4a-live.mjs
 ```
+
+Tạo ít nhất một lớp dành cho giáo viên thử nghiệm. Nạp mật khẩu qua môi trường kiểm thử hoặc kho bí mật. Chỉ đánh dấu nghiệm thu khi các kiểm tra bắt buộc đều chạy và đạt. Đối chiếu thêm dữ liệu thử của hai giáo viên và hai học sinh để xác minh RLS xuyên lớp, xuyên tài khoản, quyền nộp bài và việc chặn schema đáp án.
 
 Và chạy kiểm thử tích hợp Live RLS trong bộ test tự động:
 ```bash

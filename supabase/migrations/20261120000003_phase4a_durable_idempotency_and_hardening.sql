@@ -15,8 +15,10 @@
 --    anon & authenticated remain strictly blocked from exam_private.
 -- -----------------------------------------------------------------------------
 GRANT USAGE ON SCHEMA public TO service_role;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT SELECT ON public.user_roles, public.classrooms, public.exam_attempts TO service_role;
+GRANT INSERT ON public.user_roles, public.classrooms, public.audit_events TO service_role;
+GRANT UPDATE (user_id, role, granted_by) ON public.user_roles TO service_role;
+GRANT UPDATE (status, submitted_at, idempotency_key) ON public.exam_attempts TO service_role;
 
 GRANT USAGE ON SCHEMA exam_private TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA exam_private TO service_role;
