@@ -103,9 +103,16 @@ import {
   MathIntegrityBadge,
   MathIntegrityReportPanel,
 } from '../math/MathIntegrityReportPanel';
+import {
+  StepTransitionCheckResult,
+  evaluateStep2ToStep3Transition,
+  evaluateStepNavigationGuard,
+  resolvePreferredTargetNavigation,
+} from '../../core/examMixerNavigation';
 
 interface MathExamMixerAppProps {
   mathExams: MathExamProject[];
+  preferredTargetRequestId?: number;
   preferredExamId?: string | null;
   preferredStep?: MathExamStep | null;
   preferredStep2SubView?: 'editor' | 'import-doctor' | 'answer-studio' | null;
@@ -139,6 +146,7 @@ function triggerBlobDownload(blob: Blob, fileName: string) {
 
 export function MathExamMixerApp({
   mathExams,
+  preferredTargetRequestId,
   preferredExamId,
   preferredStep,
   preferredStep2SubView,
@@ -158,6 +166,8 @@ export function MathExamMixerApp({
   const [step, setStep] = useState<MathExamStep>(1);
   const [step2Tab, setStep2Tab] = useState<'editor' | 'import-doctor' | 'answer-studio'>('editor');
   const [doctorQuestionId, setDoctorQuestionId] = useState<string | null>(null);
+  const [editorFocusQuestionId, setEditorFocusQuestionId] = useState<string | null>(null);
+  const [editorFocusRequestKey, setEditorFocusRequestKey] = useState<number>(0);
   const [draftConfirmPending, setDraftConfirmPending] = useState(false);
   const [selectedCodeTab, setSelectedCodeTab] = useState<string>('');
   const [compareCodeTab, setCompareCodeTab] = useState<string>('');
@@ -166,62 +176,86 @@ export function MathExamMixerApp({
   >('compare');
   const [missingPreferredExamId, setMissingPreferredExamId] = useState<string | null>(null);
   const [missingPreferredCodeNotice, setMissingPreferredCodeNotice] = useState<string | null>(null);
+  const [stepTransitionError, setStepTransitionError] =
+    useState<StepTransitionCheckResult | null>(null);
+  const lastConsumedTargetKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (preferredExamId) {
-      const exactExam = mathExams.find((e) => e.id === preferredExamId);
-      if (exactExam) {
-        setSelectedExamId(exactExam.id);
-        setMissingPreferredExamId(null);
-        setStep(preferredStep ?? 2);
-        if (preferredStep2SubView) {
-          setStep2Tab(preferredStep2SubView);
-        }
-        if (preferredExamCode) {
-          const hasCode = exactExam.generatedVersions.some(
-            (v) => v.code === preferredExamCode
-          );
-          if (hasCode) {
-            setSelectedCodeTab(preferredExamCode);
-            setStep(4);
-            setStep4ViewMode('answer-matrix');
-            setMissingPreferredCodeNotice(null);
-          } else {
-            setMissingPreferredCodeNotice(
-              `Mã đề ${preferredExamCode} chưa tồn tại trong "${exactExam.title}". Hãy trộn mã đề ở Bước 3 trước khi xem bảng đáp án mã ${preferredExamCode}.`
-            );
-          }
+    const resolution = resolvePreferredTargetNavigation({
+      target: {
+        requestId: preferredTargetRequestId,
+        examId: preferredExamId,
+        step: preferredStep,
+        step2SubView: preferredStep2SubView,
+        examCode: preferredExamCode,
+      },
+      lastConsumedTargetKey: lastConsumedTargetKeyRef.current,
+      mathExams,
+      currentSelectedExamId: selectedExamId,
+    });
+
+    if (resolution.action === 'noop') {
+      return;
+    }
+
+    if (resolution.action === 'missing-exam') {
+      setMissingPreferredExamId(resolution.missingExamId ?? null);
+      return;
+    }
+
+    lastConsumedTargetKeyRef.current = resolution.targetKey;
+    setMissingPreferredExamId(null);
+    setMissingPreferredCodeNotice(resolution.missingCodeNotice ?? null);
+
+    if (resolution.selectedExamId) {
+      setSelectedExamId(resolution.selectedExamId);
+    }
+
+    if (resolution.nextStep2Tab) {
+      setStep2Tab(resolution.nextStep2Tab);
+    }
+    if (resolution.nextSelectedCodeTab) {
+      setSelectedCodeTab(resolution.nextSelectedCodeTab);
+    }
+    if (resolution.nextStep4ViewMode) {
+      setStep4ViewMode(resolution.nextStep4ViewMode);
+    }
+
+    if (resolution.nextStep !== undefined) {
+      if (resolution.nextStep === 3) {
+        const targetExam =
+          (resolution.selectedExamId
+            ? mathExams.find((e) => e.id === resolution.selectedExamId)
+            : mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0]) ?? null;
+        const guard = evaluateStep2ToStep3Transition(targetExam);
+        if (!guard.allowed) {
+          setStep(2);
+          setStepTransitionError(guard);
+          onShowToast('error', `${guard.title}. ${guard.message}`);
         } else {
-          setMissingPreferredCodeNotice(null);
+          setStepTransitionError(null);
+          setStep(3);
         }
       } else {
-        setMissingPreferredExamId(preferredExamId);
-      }
-    } else {
-      setMissingPreferredExamId(null);
-      if (preferredStep) {
-        setStep(preferredStep);
-      }
-      if (preferredStep2SubView) {
-        setStep2Tab(preferredStep2SubView);
-      }
-      if (preferredExamCode) {
-        const currentExam = mathExams.find((e) => e.id === selectedExamId) ?? mathExams[0];
-        if (currentExam?.generatedVersions.some((v) => v.code === preferredExamCode)) {
-          setSelectedCodeTab(preferredExamCode);
-          setStep(4);
-          setStep4ViewMode('answer-matrix');
-          setMissingPreferredCodeNotice(null);
-        } else {
-          setMissingPreferredCodeNotice(
-            `Không tìm thấy mã đề ${preferredExamCode} trong đề đang mở.`
-          );
-        }
-      } else {
-        setMissingPreferredCodeNotice(null);
+        setStepTransitionError(null);
+        setStep(resolution.nextStep);
       }
     }
-  }, [preferredExamId, preferredStep, preferredStep2SubView, preferredExamCode, mathExams]);
+
+    if (resolution.shouldClearPreferredTarget) {
+      onClearPreferredTarget?.();
+    }
+  }, [
+    preferredTargetRequestId,
+    preferredExamId,
+    preferredStep,
+    preferredStep2SubView,
+    preferredExamCode,
+    mathExams,
+    selectedExamId,
+    onClearPreferredTarget,
+    onShowToast,
+  ]);
   const [codeBatchPage, setCodeBatchPage] = useState<number>(0);
   const [mixErrors, setMixErrors] = useState<string[]>([]);
   const [mixWarnings, setMixWarnings] = useState<string[]>([]);
@@ -242,26 +276,22 @@ export function MathExamMixerApp({
     if (tutorial?.activeTutorial?.tutorialId !== 'tutorial.math-mixer') return;
     const sid = tutorial.currentStep?.stepId;
     if (
-      (sid === 'math-step-overview' ||
-        sid === 'math-subject-profile' ||
-        sid === 'math-import-source' ||
-        sid === 'math-lock-controls') &&
-      step !== 1
+      sid === 'math-step-overview' ||
+      sid === 'math-subject-profile' ||
+      sid === 'math-import-source' ||
+      sid === 'math-lock-controls'
     ) {
       setStep(1);
-    } else if (sid === 'math-confirm-step' && step !== 2) {
+    } else if (sid === 'math-confirm-step') {
       setStep(2);
-    } else if (sid === 'math-mix-rules' && step !== 3) {
+    } else if (sid === 'math-mix-rules') {
       setStep(3);
-    } else if (sid === 'math-compare-codes' && step !== 4) {
+    } else if (sid === 'math-compare-codes') {
       setStep(4);
-    } else if (
-      (sid === 'math-verify-export' || sid === 'math-export-formats') &&
-      step !== 5
-    ) {
+    } else if (sid === 'math-verify-export' || sid === 'math-export-formats') {
       setStep(5);
     }
-  }, [step, tutorial?.activeTutorial?.tutorialId, tutorial?.currentStep?.stepId]);
+  }, [tutorial?.activeTutorial?.tutorialId, tutorial?.currentStep?.stepId]);
 
   const activeExam = useMemo(
     () =>
@@ -349,11 +379,39 @@ export function MathExamMixerApp({
     void onSaveMathExam(next, true);
   };
 
+  useEffect(() => {
+    setStepTransitionError(null);
+  }, [activeExam?.id]);
+
+  useEffect(() => {
+    if (!stepTransitionError || !activeExam) return;
+    const recheck = evaluateStep2ToStep3Transition(activeExam);
+    if (recheck.allowed) {
+      setStepTransitionError(null);
+    }
+  }, [activeExam, stepTransitionError]);
+
+  const handleNavigateStep = (targetStep: MathExamStep) => {
+    const guard = evaluateStepNavigationGuard(activeExam, step, targetStep);
+    if (!guard.allowed) {
+      setStepTransitionError(guard);
+      if (step !== 2) {
+        setStep(2);
+      }
+      onShowToast('error', `${guard.title}. ${guard.message}`);
+      return;
+    }
+    setStepTransitionError(null);
+    setMixErrors([]);
+    setStep(targetStep);
+  };
+
   const handleCreateExam = async () => {
     const fresh = createEmptyMathExamProject(createId);
     const saved = await onSaveMathExam(fresh, true);
     setSelectedExamId(saved.id);
     setStep(1);
+    setStepTransitionError(null);
     setMixErrors([]);
     setMixWarnings([]);
     setLastExportIntegrity(null);
@@ -362,10 +420,11 @@ export function MathExamMixerApp({
 
   const handleRunShuffle = async () => {
     if (!activeExam) return;
-    if (!activeExam.confirmedOriginalAnswers) {
-      setMixErrors([
-        'Chưa xác nhận đáp án gốc ở Bước 2. Vui lòng rà soát và xác nhận đáp án trước khi trộn đề.',
-      ]);
+    const guard = evaluateStep2ToStep3Transition(activeExam);
+    if (!guard.allowed) {
+      setStepTransitionError(guard);
+      setMixErrors([guard.message]);
+      onShowToast('error', `${guard.title}. ${guard.message}`);
       setStep(2);
       return;
     }
@@ -970,7 +1029,7 @@ export function MathExamMixerApp({
                     key={item.step}
                     type="button"
                     onClick={() => {
-                      setStep(item.step);
+                      handleNavigateStep(item.step);
                       tutorial?.emitTutorialEvent('math-step-nav-clicked');
                     }}
                     className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold transition-all whitespace-nowrap truncate ${
@@ -1083,7 +1142,7 @@ export function MathExamMixerApp({
           stepMode={1}
           integrityIssues={originalIssues}
           onChangeExam={handleExamChange}
-          onGoToStep={setStep}
+          onGoToStep={handleNavigateStep}
         />
       )}
 
@@ -1115,18 +1174,92 @@ export function MathExamMixerApp({
             </div>
             <div className="text-[11px] text-slate-500 dark:text-slate-400">
               {originalIssues.filter((i) => i.severity === 'error').length === 0
-                ? 'Sẵn sàng chuyển sang Bước 3 trộn đề'
-                : `${originalIssues.filter((i) => i.severity === 'error').length} lỗi chặn (BLOCKED) cần xử lý trước khi xuất chính thức`}
+                ? activeExam.confirmedOriginalAnswers
+                  ? 'Sẵn sàng chuyển sang Bước 3 trộn đề'
+                  : 'Đã hết lỗi — cần bấm "Xác nhận toàn bộ đáp án gốc" trước khi sang Bước 3'
+                : `${originalIssues.filter((i) => i.severity === 'error').length} lỗi chặn (BLOCKED) cần xử lý trước khi chuyển sang Bước 3`}
             </div>
           </div>
+
+          {stepTransitionError && !stepTransitionError.allowed && (
+            <div
+              role="alert"
+              data-testid="step2-transition-error-banner"
+              className="no-print rounded-2xl border border-red-300 dark:border-red-800 bg-red-50/95 dark:bg-red-950/50 p-4 text-xs text-red-950 dark:text-red-100 space-y-2.5 shadow-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="flex items-start gap-2.5">
+                  <ShieldAlert
+                    className="h-4 w-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5"
+                    aria-hidden="true"
+                  />
+                  <div className="space-y-1">
+                    <p className="font-bold text-red-900 dark:text-red-100">
+                      {stepTransitionError.title}
+                    </p>
+                    <p className="text-red-800 dark:text-red-200 leading-relaxed">
+                      {stepTransitionError.message}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStepTransitionError(null)}
+                  className="rounded-lg border border-red-300 dark:border-red-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-red-800 dark:text-red-200 hover:bg-red-100/70 dark:hover:bg-red-900/40"
+                >
+                  Đóng
+                </button>
+              </div>
+
+              {stepTransitionError.blockingIssues.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-red-200/80 dark:border-red-800/70">
+                  {stepTransitionError.blockingIssues.slice(0, 6).map((issue) => (
+                    <button
+                      key={issue.id}
+                      type="button"
+                      onClick={() => {
+                        if (issue.questionId) {
+                          setEditorFocusQuestionId(issue.questionId);
+                          setEditorFocusRequestKey((k) => k + 1);
+                          setStep2Tab('editor');
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-red-300 dark:border-red-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-red-900 dark:text-red-200 hover:bg-red-100/60 dark:hover:bg-red-900/40 text-left"
+                    >
+                      <span>{issue.message}</span>
+                    </button>
+                  ))}
+                  {stepTransitionError.blockingIssues.length > 6 && (
+                    <span className="text-[11px] font-semibold text-red-700 dark:text-red-300 px-1">
+                      +{stepTransitionError.blockingIssues.length - 6} lỗi khác
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {stepTransitionError.reasonCode === 'answers-unconfirmed' && step2Tab !== 'editor' && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setStep2Tab('editor')}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-red-700"
+                  >
+                    Mở tab "Soạn & Rà soát đề" để bấm xác nhận đáp án gốc
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {step2Tab === 'editor' && (
             <MathExamEditor
               exam={activeExam}
               stepMode={2}
               integrityIssues={originalIssues}
+              focusQuestionId={editorFocusQuestionId}
+              focusRequestKey={editorFocusRequestKey}
               onChangeExam={handleExamChange}
-              onGoToStep={setStep}
+              onGoToStep={handleNavigateStep}
             />
           )}
 
@@ -1134,19 +1267,24 @@ export function MathExamMixerApp({
             <DocumentImportDoctorPanel
               exam={activeExam}
               initialQuestionId={doctorQuestionId}
-              onEditQuestion={() => setStep2Tab('editor')}
+              onEditQuestion={(qId) => {
+                if (qId) {
+                  setEditorFocusQuestionId(qId);
+                  setEditorFocusRequestKey((k) => k + 1);
+                }
+                setStep2Tab('editor');
+              }}
               onOpenAnswerStudio={() => setStep2Tab('answer-studio')}
               onConfirmAndProceed={() => {
-                const blockingCount = originalIssues.filter((i) => i.severity === 'error').length;
-                if (blockingCount > 0 || !activeExam.confirmedOriginalAnswers) {
-                  setStep2Tab('answer-studio');
-                  onShowToast(
-                    'info',
-                    blockingCount > 0
-                      ? `Còn ${blockingCount} lỗi cần xử lý. Đã chuyển sang Answer Key Studio để hoàn tất xác nhận đáp án.`
-                      : 'Hãy xác nhận toàn bộ đáp án gốc trước khi trộn đề.'
-                  );
+                const guard = evaluateStep2ToStep3Transition(activeExam);
+                if (!guard.allowed) {
+                  setStepTransitionError(guard);
+                  if (guard.reasonCode === 'integrity-blocked') {
+                    setStep2Tab('answer-studio');
+                  }
+                  onShowToast('error', `${guard.title}. ${guard.message}`);
                 } else {
+                  setStepTransitionError(null);
                   setStep(3);
                   onShowToast('success', 'Đề đã đạt kiểm tra toàn vẹn — chuyển sang Bước 3 trộn mã đề.');
                 }
@@ -1162,7 +1300,13 @@ export function MathExamMixerApp({
                 setDoctorQuestionId(qId);
                 setStep2Tab('import-doctor');
               }}
-              onEditQuestion={() => setStep2Tab('editor')}
+              onEditQuestion={(qId) => {
+                if (qId) {
+                  setEditorFocusQuestionId(qId);
+                  setEditorFocusRequestKey((k) => k + 1);
+                }
+                setStep2Tab('editor');
+              }}
               onToast={(msg, tone) =>
                 onShowToast(tone === 'warning' ? 'info' : tone ?? 'info', msg)
               }
@@ -2077,7 +2221,7 @@ export function MathExamMixerApp({
               </p>
               <button
                 type="button"
-                onClick={() => setStep(3)}
+                onClick={() => handleNavigateStep(3)}
                 className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
               >
                 <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />

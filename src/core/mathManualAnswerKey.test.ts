@@ -21,7 +21,7 @@ function makeTestId(prefix = 't'): string {
   return `${prefix}-${idSeq}`;
 }
 
-async function buildMinimalDocxBuffer(paragraphs: string[]): Promise<ArrayBuffer> {
+async function buildMinimalDocxBuffer(paragraphs: string[]): Promise<Uint8Array> {
   const zip = new JSZip();
   const escapeXml = (s: string) =>
     s
@@ -56,8 +56,7 @@ async function buildMinimalDocxBuffer(paragraphs: string[]): Promise<ArrayBuffer
 </w:document>`
   );
 
-  const uint8 = await zip.generateAsync({ type: 'uint8array' });
-  return uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength);
+  return zip.generateAsync({ type: 'uint8array' });
 }
 
 function wrapQuestionsIntoProject(questions: MathQuestion[], title = 'Đề kiểm thử khóa thủ công'): MathExamProject {
@@ -69,9 +68,10 @@ function wrapQuestionsIntoProject(questions: MathQuestion[], title = 'Đề ki�
     subjectId: 'toan',
     grade: 'Lớp 12',
     durationMinutes: 45,
-    schoolName: 'THPT Kiểm Thử',
-    examTitle: title,
-    semesterLabel: 'Học kỳ II',
+    schoolYear: '2025-2026',
+    examTypeLabel: 'Kiểm tra học kỳ II',
+    lastStep: 1,
+    isDemo: false,
     status: 'draft',
     confirmedOriginalAnswers: false,
     questions,
@@ -79,15 +79,16 @@ function wrapQuestionsIntoProject(questions: MathQuestion[], title = 'Đề ki�
     mixConfig: {
       level: 2,
       examCount: 4,
-      codePrefix: '10',
+      startCodeNumber: 101,
       customCodeNames: ['101', '102', '103', '104'],
       seed: 'manual-answer-regression-2026',
       shuffleQuestions: true,
       shuffleMcqOptions: true,
-      shuffleIndependentTrueFalseStatements: false,
-      keepSectionsOrder: true,
-      keepDependentGroups: true,
       keepVdcPositions: false,
+      preserveTopicRatios: false,
+      shufflePerSectionOnly: true,
+      shuffleIndependentTrueFalseStatements: false,
+      keepDependentGroups: true,
       lockedQuestionIds: [],
       matrixRules: [],
     },
@@ -241,7 +242,7 @@ test('Case 2: Switch IMP-01 A -> C, persist & reload, shuffle unlocked options -
     assert.equal(version.integrityPassed, true);
     const mixedImp01 = version.questions.find((q) => q.id === reloadedImp01.id)!;
     const keyRow = version.answerKeyRows.find((row) => row.questionId === reloadedImp01.id)!;
-    const mapping = version.mapping.find((m) => m.questionId === reloadedImp01.id)!;
+    const mapping = version.permutationMap.find((m) => m.questionId === reloadedImp01.id)!;
 
     assert.equal(keyRow.answer, mapping.newCorrectLabel);
     const labelIndex = ['A', 'B', 'C', 'D'].indexOf(keyRow.answer);

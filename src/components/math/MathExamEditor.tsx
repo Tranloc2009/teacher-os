@@ -100,6 +100,8 @@ interface MathExamEditorProps {
   exam: MathExamProject;
   stepMode: 1 | 2;
   integrityIssues: MathIntegrityIssue[];
+  focusQuestionId?: string | null;
+  focusRequestKey?: number;
   onChangeExam: (next: MathExamProject) => void;
   onGoToStep: (step: 1 | 2 | 3 | 4 | 5) => void;
 }
@@ -108,12 +110,21 @@ export function MathExamEditor({
   exam,
   stepMode,
   integrityIssues,
+  focusQuestionId,
+  focusRequestKey,
   onChangeExam,
   onGoToStep,
 }: MathExamEditorProps) {
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>(
     exam.questions[0]?.id ?? ''
   );
+
+  useEffect(() => {
+    if (!focusQuestionId) return;
+    if (exam.questions.some((q) => q.id === focusQuestionId)) {
+      setSelectedQuestionId(focusQuestionId);
+    }
+  }, [focusQuestionId, focusRequestKey, exam.questions]);
   const [showImportDrawer, setShowImportDrawer] = useState(false);
   const [showGroupDrawer, setShowGroupDrawer] = useState(false);
   const [pasteBuffer, setPasteBuffer] = useState('');
@@ -1028,9 +1039,13 @@ export function MathExamEditor({
 
               <button
                 type="button"
-                disabled={errorIssues.length > 0 || !exam.confirmedOriginalAnswers}
+                data-step-blocked={errorIssues.length > 0 || !exam.confirmedOriginalAnswers ? 'true' : 'false'}
                 onClick={() => onGoToStep(3)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium whitespace-nowrap transition-colors ${
+                  errorIssues.length > 0 || !exam.confirmedOriginalAnswers
+                    ? 'border-amber-300 dark:border-amber-700 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 hover:bg-amber-100/70 dark:hover:bg-amber-950/50'
+                    : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700'
+                }`}
               >
                 <span>Sang Bước 3: Thiết lập trộn</span>
               </button>
