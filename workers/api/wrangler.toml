@@ -7,14 +7,15 @@ name = "teacheros-api"
 main = "src/index.ts"
 compatibility_date = "2026-03-01"
 workers_dev = true
+preview_urls = false
 
 [vars]
 # Danh sách origin được phép gọi API (phân tách bằng dấu phẩy, TUYỆT ĐỐI không dùng "*")
-# Đặt origin frontend đã xác minh khi triển khai.
-ALLOWED_ORIGINS = ""
+# Origin production của Worker frontend teacheros-web.
+ALLOWED_ORIGINS = "https://teacheros-web.tranhuuloc9a42009.workers.dev"
 
 # URL dự án Supabase Free (công khai, KHÔNG phải secret)
-SUPABASE_URL = ""
+SUPABASE_URL = "https://odbiolvnxxxipybsyhla.supabase.co"
 
 # Giới hạn tần suất:
 # - Public /api/health dùng best-effort per-isolate (nên kết hợp thêm 1 Free WAF Rule trên Cloudflare Dashboard)
