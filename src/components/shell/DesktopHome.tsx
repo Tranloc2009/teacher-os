@@ -36,8 +36,10 @@ import type {
   DashboardNextStepSuggestion,
 } from '../../types/connectedWorkflow';
 import { useOptionalTutorial } from '../tutorial/TutorialProvider';
+import { HeroShowcaseVideo } from './HeroShowcaseVideo';
 
 interface DesktopHomeProps {
+  isActive?: boolean;
   packs: LessonPack[];
   mathExams: MathExamProject[];
   resources: ResourceItem[];
@@ -96,127 +98,8 @@ function formatRelativeOrDateVi(iso: string): string {
   });
 }
 
-function HeroGlassIllustration() {
-  return (
-    <svg
-      viewBox="0 0 340 210"
-      fill="none"
-      aria-hidden="true"
-      className="h-full w-full max-w-[330px] select-none"
-    >
-      <defs>
-        <linearGradient id="tos-hero-glass-a" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.86" />
-          <stop offset="100%" stopColor="#DCEBFF" stopOpacity="0.46" />
-        </linearGradient>
-        <linearGradient id="tos-hero-glass-b" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.72" />
-          <stop offset="100%" stopColor="#C4D7FF" stopOpacity="0.34" />
-        </linearGradient>
-        <linearGradient id="tos-hero-stylus" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.92" />
-          <stop offset="100%" stopColor="#A5B4FC" stopOpacity="0.62" />
-        </linearGradient>
-      </defs>
-
-      {/* Soft ambient glass orbs */}
-      <circle cx="242" cy="96" r="78" fill="#635BFF" fillOpacity="0.11" />
-      <circle cx="152" cy="142" r="54" fill="#67D9E8" fillOpacity="0.16" />
-
-      {/* Left tilted calendar glass card */}
-      <g transform="translate(52 72) rotate(-7)">
-        <rect
-          width="96"
-          height="92"
-          rx="18"
-          fill="url(#tos-hero-glass-b)"
-          stroke="#FFFFFF"
-          strokeOpacity="0.78"
-          strokeWidth="1.5"
-        />
-        <rect x="16" y="18" width="64" height="10" rx="5" fill="#635BFF" fillOpacity="0.22" />
-        <rect x="16" y="38" width="16" height="16" rx="4" fill="#635BFF" fillOpacity="0.18" />
-        <rect x="40" y="38" width="16" height="16" rx="4" fill="#3B82F6" fillOpacity="0.22" />
-        <rect x="64" y="38" width="16" height="16" rx="4" fill="#635BFF" fillOpacity="0.14" />
-        <rect x="16" y="62" width="16" height="16" rx="4" fill="#635BFF" fillOpacity="0.14" />
-        <rect x="40" y="62" width="40" height="16" rx="4" fill="#635BFF" fillOpacity="0.2" />
-      </g>
-
-      {/* Main foreground notebook glass card */}
-      <g transform="translate(132 22) rotate(3)">
-        <rect
-          width="156"
-          height="150"
-          rx="24"
-          fill="url(#tos-hero-glass-a)"
-          stroke="#FFFFFF"
-          strokeOpacity="0.88"
-          strokeWidth="1.6"
-        />
-        {/* Mortarboard silhouette */}
-        <path
-          d="M78 30L116 47L78 64L40 47L78 30Z"
-          fill="#FFFFFF"
-          fillOpacity="0.9"
-          stroke="#818CF8"
-          strokeOpacity="0.35"
-          strokeWidth="1.2"
-        />
-        <path
-          d="M55 56V71C55 77 65 82 78 82C91 82 101 77 101 71V56"
-          stroke="#635BFF"
-          strokeOpacity="0.35"
-          strokeWidth="2.4"
-          strokeLinecap="round"
-        />
-        <line
-          x1="112"
-          y1="49"
-          x2="112"
-          y2="71"
-          stroke="#635BFF"
-          strokeOpacity="0.38"
-          strokeWidth="2"
-          strokeLinecap="round"
-        />
-        {/* Minimal document lines */}
-        <rect x="30" y="98" width="96" height="7" rx="3.5" fill="#635BFF" fillOpacity="0.2" />
-        <rect x="30" y="114" width="76" height="7" rx="3.5" fill="#3B82F6" fillOpacity="0.18" />
-        <rect x="30" y="130" width="54" height="7" rx="3.5" fill="#8B5CF6" fillOpacity="0.18" />
-      </g>
-
-      {/* Stylus accent */}
-      <g transform="translate(274 72) rotate(32)">
-        <rect
-          x="0"
-          y="0"
-          width="17"
-          height="108"
-          rx="8.5"
-          fill="url(#tos-hero-stylus)"
-          stroke="#FFFFFF"
-          strokeOpacity="0.9"
-          strokeWidth="1.2"
-        />
-        <path d="M2 102L8.5 118L15 102H2Z" fill="#635BFF" fillOpacity="0.38" />
-      </g>
-
-      {/* Subtle four-point light sparkles */}
-      <path
-        d="M110 34L113 42L121 45L113 48L110 56L107 48L99 45L107 42L110 34Z"
-        fill="#FFFFFF"
-        fillOpacity="0.88"
-      />
-      <path
-        d="M308 38L310 43L315 45L310 47L308 52L306 47L301 45L306 43L308 38Z"
-        fill="#FFFFFF"
-        fillOpacity="0.78"
-      />
-    </svg>
-  );
-}
-
 export function DesktopHome({
+  isActive = true,
   packs,
   mathExams,
   resources,
@@ -413,24 +296,24 @@ export function DesktopHome({
 
   return (
     <main className="mx-auto max-w-[1280px] px-4 py-5 sm:px-6 sm:py-6 space-y-6">
-      {/* Row 1 — Compact Aurora Welcome Hero */}
+      {/* Row 1 — Aurora Welcome Hero with Integrated 16:9 TeacherOS 4.0 Showcase Video */}
       <section
         data-tour-id="desktop-hero"
-        className="aurora-surface-hero relative overflow-hidden rounded-[22px] px-6 py-6 sm:px-8 sm:py-7"
+        className="aurora-surface-hero relative overflow-hidden rounded-[22px] p-5 sm:p-7 lg:p-8"
       >
-        <div className="relative z-10 flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-          <div className="max-w-xl space-y-3.5">
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-white/80 dark:bg-slate-900/70 border border-white/90 dark:border-indigo-500/25 px-3 py-1 text-xs font-semibold text-[#5046E5] dark:text-indigo-300 shadow-[0_1px_2px_rgba(23,32,51,0.04)]">
-              <Sparkles className="h-3.5 w-3.5 text-[#635BFF] dark:text-indigo-400" aria-hidden="true" />
-              <span>Chào mừng đến với TeacherOS</span>
+        <div className="relative z-10 grid grid-cols-1 items-center gap-6 lg:grid-cols-12 lg:gap-8">
+          <div className="lg:col-span-5 space-y-4">
+            <div className="inline-flex items-center gap-2 text-xs font-semibold tracking-wide text-[#5046E5] dark:text-indigo-300">
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-[#635BFF] dark:text-indigo-400" aria-hidden="true" />
+              <span>TeacherOS 4.0 · Không gian hợp nhất</span>
             </div>
 
-            <div className="space-y-1.5">
-              <h1 className="text-2xl sm:text-[32px] font-bold tracking-tight text-[#172033] dark:text-white leading-[1.18] text-balance">
+            <div className="space-y-2">
+              <h1 className="text-2xl sm:text-[32px] lg:text-[34px] font-bold tracking-tight text-[#172033] dark:text-white leading-[1.15] text-balance">
                 Không gian giảng dạy của bạn
               </h1>
               <p className="text-sm sm:text-[15px] text-[#475569] dark:text-slate-300 leading-relaxed max-w-lg">
-                Chuẩn bị bài dạy, tổ chức tài liệu và quản lý công việc tại một nơi.
+                Chuẩn bị bài dạy, trộn đề an toàn, tổ chức tài liệu và quản lý công việc tại một nơi.
               </p>
             </div>
 
@@ -438,7 +321,7 @@ export function DesktopHome({
               <button
                 type="button"
                 onClick={() => onOpenApp('workspace')}
-                className="aurora-btn-primary inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#635BFF]"
+                className="aurora-btn-primary inline-flex min-h-[42px] items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#635BFF]"
               >
                 <Rocket className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>Mở không gian làm việc</span>
@@ -447,7 +330,7 @@ export function DesktopHome({
               <button
                 type="button"
                 onClick={onOpenToolsHub}
-                className="inline-flex items-center gap-2 rounded-xl border border-slate-200/90 dark:border-slate-700 bg-white/90 dark:bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-[#172033] dark:text-slate-100 shadow-[0_1px_2px_rgba(23,32,51,0.04)] hover:border-[#635BFF]/40 hover:bg-white dark:hover:bg-slate-800 transition-all duration-150 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-[#635BFF]"
+                className="inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-slate-200/90 dark:border-slate-700 bg-white/90 dark:bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-[#172033] dark:text-slate-100 shadow-[0_1px_2px_rgba(23,32,51,0.04)] hover:border-[#635BFF]/40 hover:bg-white dark:hover:bg-slate-800 transition-all duration-150 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-[#635BFF]"
               >
                 <LayoutGrid className="h-4 w-4 shrink-0 text-[#635BFF] dark:text-indigo-400" aria-hidden="true" />
                 <span>Khám phá công cụ</span>
@@ -455,9 +338,9 @@ export function DesktopHome({
             </div>
           </div>
 
-          {/* Right Lightweight Glass Illustration */}
-          <div className="hidden md:flex items-center justify-end w-[270px] lg:w-[320px] h-[168px] shrink-0 pointer-events-none">
-            <HeroGlassIllustration />
+          {/* Right 16:9 Showcase Video Frame (visible across Desktop & Mobile) */}
+          <div className="lg:col-span-7 w-full">
+            <HeroShowcaseVideo isActive={isActive} />
           </div>
         </div>
       </section>

@@ -2124,6 +2124,7 @@ export default function App() {
           <div className={activeView === 'desktop' ? 'block' : 'hidden print:hidden'}>
             <ErrorBoundary moduleName="Desktop Home" packs={packs} settings={settings}>
               <DesktopHome
+                isActive={activeView === 'desktop'}
                 packs={packs}
                 mathExams={mathExams}
                 resources={resources}
