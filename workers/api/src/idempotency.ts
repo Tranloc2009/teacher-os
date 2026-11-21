@@ -1,4 +1,5 @@
 import type { WorkerEnv } from './types';
+import { getSupabaseOrigin, serviceAuthHeaders } from './supabase';
 
 const IDEMPOTENCY_KEY_REGEX = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -44,22 +45,13 @@ export type DurableIdempotencyClaimResult =
   | { outcome: 'in_progress' }
   | { outcome: 'store_unavailable'; message: string };
 
-function getSupabaseOrigin(env: WorkerEnv): string | null {
-  if (!env.SUPABASE_URL) return null;
-  try {
-    return new URL(env.SUPABASE_URL.trim()).origin;
-  } catch {
-    return null;
-  }
-}
-
 async function callServiceRpc(
   env: WorkerEnv,
   rpcName: string,
   params: Record<string, unknown>,
   fetchImpl: typeof fetch
 ): Promise<Response> {
-  const origin = getSupabaseOrigin(env);
+  const origin = getSupabaseOrigin(env.SUPABASE_URL);
   const secretKey = env.SUPABASE_SECRET_KEY?.trim();
   if (!origin || !secretKey) {
     throw new Error('SUPABASE_SERVICE_CONFIG_MISSING');
@@ -68,8 +60,7 @@ async function callServiceRpc(
   return fetchImpl(`${origin}/rest/v1/rpc/${rpcName}`, {
     method: 'POST',
     headers: {
-      apikey: secretKey,
-      Authorization: `Bearer ${secretKey}`,
+      ...serviceAuthHeaders(secretKey),
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },

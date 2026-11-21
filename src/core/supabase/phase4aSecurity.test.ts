@@ -525,7 +525,11 @@ test('Phase 4A Worker Security: multi-instance durable DB idempotency, global DB
       method === 'PATCH' &&
       url.startsWith(`${SUPABASE_ORIGIN}/rest/v1/exam_attempts?id=eq.${ATTEMPT_A_ID}`)
     ) {
+      assert.equal(new URL(url).searchParams.get('status'), 'eq.in_progress');
       dbAttemptSubmitPatches += 1;
+      if (dbAttemptSubmitPatches > 1) {
+        return new Response('[]', { status: 200 });
+      }
       return new Response(
         JSON.stringify([{ id: ATTEMPT_A_ID, status: 'submitted' }]),
         { status: 200 }
@@ -848,6 +852,19 @@ test('Phase 4A Worker Security: multi-instance durable DB idempotency, global DB
   assert.equal(subB.status, 200);
   assert.equal(subB.headers.get('X-Idempotent-Replay'), 'true');
   assert.equal(dbAttemptSubmitPatches, 1);
+
+  const finalizedByAnotherRequest = await workerInstanceB.fetch(
+    new Request(`https://worker.local/api/v1/student/attempts/${ATTEMPT_A_ID}/submit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${studentAToken}`,
+        'Idempotency-Key': 'student-submit-cross-inst-2',
+      },
+    }),
+    env
+  );
+  assert.equal(finalizedByAnotherRequest.status, 409);
+  assert.equal(dbAttemptSubmitPatches, 2);
 
   // Direct answer-key probing blocked
   assert.equal(

@@ -32,6 +32,9 @@ const workerUrl = (
 
 const studentEmail = (process.env.TEST_STUDENT_EMAIL || '').trim();
 const studentPassword = process.env.TEST_STUDENT_PASSWORD || '';
+const teacherEmail = (process.env.TEST_TEACHER_EMAIL || '').trim();
+const teacherPassword = process.env.TEST_TEACHER_PASSWORD || '';
+const frontendOrigin = (process.env.TEST_FRONTEND_ORIGIN || '').trim();
 
 const results = [];
 let failed = false;
@@ -99,8 +102,8 @@ async function run() {
     );
     record(
       'Private Schema Blocked (exam_private.official_answer_keys)',
-      !privRes.ok ? 'PASS' : 'FAIL',
-      `HTTP ${privRes.status} (must NOT be 2xx)`
+      [401, 403, 406].includes(privRes.status) ? 'PASS' : 'FAIL',
+      `HTTP ${privRes.status} (cần phản hồi từ chối truy cập/schema)`
     );
   } catch (err) {
     record('Live RLS Anonymous Checks', 'FAIL', String(err));
@@ -119,7 +122,8 @@ async function run() {
       const healthBody = await healthRes.json().catch(() => ({}));
       record(
         'Worker GET /api/health',
-        healthRes.ok && healthBody.ok === true && healthBody.configured === true
+        healthRes.ok && healthBody.service === 'teacheros-api' &&
+          healthBody.ok === true && healthBody.configured === true
           ? 'PASS'
           : 'FAIL',
         `HTTP ${healthRes.status}, service=${healthBody.service}, configured=${healthBody.configured}`
@@ -147,6 +151,28 @@ async function run() {
         probeRes.status === 403 ? 'PASS' : 'FAIL',
         `HTTP ${probeRes.status}`
       );
+
+      if (frontendOrigin) {
+        for (const [origin, expectedStatus] of [[frontendOrigin, 204], ['https://cors-test.invalid', 403]]) {
+          const res = await fetch(`${workerUrl}/api/v1/auth/me`, {
+            method: 'OPTIONS',
+            headers: {
+              Origin: origin,
+              'Access-Control-Request-Method': 'GET',
+              'Access-Control-Request-Headers': 'authorization',
+            },
+          });
+          const allowedOrigin = res.headers.get('Access-Control-Allow-Origin');
+          const authorizationAllowed = res.headers.get('Access-Control-Allow-Headers')
+            ?.split(',').some((header) => header.trim().toLowerCase() === 'authorization');
+          const headersMatch = expectedStatus === 204
+            ? allowedOrigin === origin && authorizationAllowed
+            : allowedOrigin === null;
+          record(`Worker CORS ${origin}`, res.status === expectedStatus && headersMatch ? 'PASS' : 'FAIL', `HTTP ${res.status}`);
+        }
+      } else {
+        record('Worker CORS', 'SKIP', 'Đặt TEST_FRONTEND_ORIGIN bằng origin frontend production.');
+      }
     } catch (err) {
       record('Cloudflare Worker Probes', 'FAIL', String(err));
     }
@@ -199,8 +225,8 @@ async function run() {
         });
         record(
           'RLS Blocks Student Self-Escalation on public.user_roles',
-          !selfEscalateDb.ok ? 'PASS' : 'FAIL',
-          `HTTP ${selfEscalateDb.status} (must fail)`
+          selfEscalateDb.status === 403 ? 'PASS' : 'FAIL',
+          `HTTP ${selfEscalateDb.status} (expected 403)`
         );
 
         if (workerUrl) {
@@ -245,6 +271,37 @@ async function run() {
     } catch (err) {
       record('Authenticated Student E2E', 'FAIL', String(err));
     }
+  }
+
+  if (workerUrl && teacherEmail && teacherPassword) {
+    try {
+      const login = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: { apikey: publishableKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: teacherEmail, password: teacherPassword }),
+      });
+      const session = await login.json();
+      if (!login.ok || !session.access_token || !session.user?.id) {
+        record('Supabase Auth Teacher Sign-In', 'FAIL', `HTTP ${login.status}`);
+      } else {
+        const headers = { Authorization: `Bearer ${session.access_token}` };
+        const me = await fetch(`${workerUrl}/api/v1/auth/me`, { headers });
+        const meBody = await me.json().catch(() => ({}));
+        record('Worker Teacher JWT', me.ok && meBody.user?.id === session.user.id &&
+          meBody.user?.primaryRole === 'teacher' ? 'PASS' : 'FAIL', `HTTP ${me.status}`);
+        const classes = await fetch(`${workerUrl}/api/v1/teacher/classrooms`, { headers });
+        const body = await classes.json().catch(() => ({}));
+        const ownClasses = Array.isArray(body.classrooms) &&
+          body.classrooms.length > 0 &&
+          body.classrooms.every((classroom) => classroom.teacher_id === session.user.id);
+        record('Worker Teacher Classrooms', classes.ok && ownClasses ? 'PASS' : 'FAIL',
+          `HTTP ${classes.status} (cần ít nhất một lớp thử nghiệm thuộc giáo viên)`);
+      }
+    } catch (err) {
+      record('Authenticated Teacher E2E', 'FAIL', String(err));
+    }
+  } else {
+    record('Authenticated Teacher E2E', 'SKIP', 'Cần URL Worker, TEST_TEACHER_EMAIL và TEST_TEACHER_PASSWORD.');
   }
 
   console.log('\n=== Summary ===');

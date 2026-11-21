@@ -1,4 +1,5 @@
 import { authenticateRequest, userHasAnyRole } from './auth';
+import { getSupabaseOrigin, serviceAuthHeaders } from './supabase';
 import {
   buildSecurityHeaders,
   isOriginAllowed,
@@ -78,15 +79,6 @@ function applyRateLimitHeaders(headers: Headers, rate: RateLimitResult): void {
   headers.set('X-RateLimit-Scope', rate.scope);
 }
 
-function getSupabaseOrigin(env: WorkerEnv): string | null {
-  if (!env.SUPABASE_URL) return null;
-  try {
-    return new URL(env.SUPABASE_URL.trim()).origin;
-  } catch {
-    return null;
-  }
-}
-
 async function supabaseServiceRequest(
   env: WorkerEnv,
   pathWithQuery: string,
@@ -97,15 +89,14 @@ async function supabaseServiceRequest(
   },
   fetchImpl: typeof fetch
 ): Promise<Response> {
-  const origin = getSupabaseOrigin(env);
+  const origin = getSupabaseOrigin(env.SUPABASE_URL);
   const secretKey = env.SUPABASE_SECRET_KEY?.trim();
   if (!origin || !secretKey) {
     throw new Error('SUPABASE_SERVICE_CONFIG_MISSING');
   }
 
   const headers: Record<string, string> = {
-    apikey: secretKey,
-    Authorization: `Bearer ${secretKey}`,
+    ...serviceAuthHeaders(secretKey),
     Accept: 'application/json',
   };
   if (options.body !== undefined) {
@@ -389,7 +380,7 @@ export function createWorkerHandler(deps: WorkerDependencies = {}) {
 
       // 4. Public Minimal Liveness Endpoint (ZERO secrets, ZERO service_role calls)
       if (request.method === 'GET' && pathname === '/api/health') {
-        const hasSupabaseUrl = Boolean(getSupabaseOrigin(env));
+        const hasSupabaseUrl = Boolean(getSupabaseOrigin(env.SUPABASE_URL));
         const hasSecretKey = Boolean(env.SUPABASE_SECRET_KEY?.trim());
         return jsonResponse(
           200,
@@ -470,7 +461,7 @@ export function createWorkerHandler(deps: WorkerDependencies = {}) {
             phase: '4A',
             actorRole: user.primaryRole,
             checks: {
-              supabaseUrlConfigured: Boolean(getSupabaseOrigin(env)),
+              supabaseUrlConfigured: Boolean(getSupabaseOrigin(env.SUPABASE_URL)),
               serverSecretConfigured: Boolean(env.SUPABASE_SECRET_KEY?.trim()),
               publishableKeyConfigured: Boolean(
                 env.SUPABASE_PUBLISHABLE_KEY?.trim()
@@ -1027,7 +1018,7 @@ export function createWorkerHandler(deps: WorkerDependencies = {}) {
         const submittedAt = new Date(nowMs).toISOString();
         const updateRes = await supabaseServiceRequest(
           env,
-          `exam_attempts?id=eq.${encodeURIComponent(attemptId)}&student_id=eq.${encodeURIComponent(user.id)}`,
+          `exam_attempts?id=eq.${encodeURIComponent(attemptId)}&student_id=eq.${encodeURIComponent(user.id)}&status=eq.in_progress`,
           {
             method: 'PATCH',
             prefer: 'return=representation',
@@ -1040,7 +1031,8 @@ export function createWorkerHandler(deps: WorkerDependencies = {}) {
           fetchImpl
         );
 
-        if (!updateRes.ok) {
+        const updated = updateRes.ok ? (await updateRes.json()) as unknown[] : null;
+        if (!updated?.length) {
           await releaseDurableIdempotencyKey(
             env,
             {
@@ -1052,9 +1044,11 @@ export function createWorkerHandler(deps: WorkerDependencies = {}) {
             fetchImpl
           );
           return errorResponse(
-            502,
-            'UPSTREAM_SUBMIT_FAILED',
-            'Không thể cập nhật trạng thái nộp bài.',
+            updateRes.ok ? 409 : 502,
+            updateRes.ok ? 'ATTEMPT_ALREADY_FINALIZED' : 'UPSTREAM_SUBMIT_FAILED',
+            updateRes.ok
+              ? 'Bài làm đã được nộp hoặc đã kết thúc trước đó.'
+              : 'Không thể cập nhật trạng thái nộp bài.',
             requestId,
             baseHeaders
           );

@@ -300,7 +300,7 @@ export function OnlineCloudPanel() {
           </div>
           <ol className="list-decimal pl-5 space-y-1 text-slate-700 dark:text-slate-300 leading-relaxed">
             <li>
-              Tạo dự án <strong>Supabase Free ($0)</strong> và chạy 2 tệp migration trong{' '}
+              Xác minh dự án <strong>Supabase Free ($0)</strong> của TeacherOS trước khi áp dụng các migration trong{' '}
               <code className="font-mono-num">supabase/migrations/</code>.
             </li>
             <li>

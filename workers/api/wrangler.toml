@@ -10,11 +10,11 @@ workers_dev = true
 
 [vars]
 # Danh sách origin được phép gọi API (phân tách bằng dấu phẩy, TUYỆT ĐỐI không dùng "*")
-# Đã bao gồm localhost, AI Studio preview và domain Pages mẫu — hãy thay domain Cloudflare Pages thật của bạn nếu khác.
-ALLOWED_ORIGINS = "http://localhost:3000,https://teacheros.pages.dev,https://ais-dev-unpyp2byvmk2zwk6hgx725-21463468161.asia-northeast1.run.app,https://ais-pre-unpyp2byvmk2zwk6hgx725-21463468161.asia-northeast1.run.app"
+# Đặt origin frontend đã xác minh khi triển khai.
+ALLOWED_ORIGINS = ""
 
 # URL dự án Supabase Free (công khai, KHÔNG phải secret)
-SUPABASE_URL = "https://odbiolvnxxxipybsyhla.supabase.co"
+SUPABASE_URL = ""
 
 # Giới hạn tần suất:
 # - Public /api/health dùng best-effort per-isolate (nên kết hợp thêm 1 Free WAF Rule trên Cloudflare Dashboard)
@@ -29,3 +29,6 @@ MUTATION_RATE_LIMIT_WINDOW_SEC = "60"
 #   npx wrangler secret put SUPABASE_SECRET_KEY
 #   npx wrangler secret put SUPABASE_PUBLISHABLE_KEY
 # -----------------------------------------------------------------------------
+
+[secrets]
+required = ["SUPABASE_SECRET_KEY", "SUPABASE_PUBLISHABLE_KEY"]
