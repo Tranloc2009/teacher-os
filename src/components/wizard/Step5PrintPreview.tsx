@@ -165,12 +165,13 @@ export function Step5PrintPreview({
           </div>
 
           {showWorksheet && (
-            <div className="inline-flex items-center gap-1 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1 text-xs">
+            <div className="flex max-w-full flex-wrap items-center gap-1 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1 text-xs">
               <span className="px-2 text-slate-500 dark:text-slate-400">In phiếu:</span>
               {(['ALL', 'A', 'B', 'C'] as const).map((opt) => (
                 <button
                   key={opt}
                   type="button"
+                  aria-pressed={worksheetFilter === opt}
                   onClick={() => setWorksheetFilter(opt)}
                   className={`rounded-md px-2.5 py-1 font-medium whitespace-nowrap ${
                     worksheetFilter === opt

@@ -143,7 +143,7 @@ export function ConnectedWorkflowBar({
   onSwitchWorkflow,
   onResetWorkflow,
 }: ConnectedWorkflowBarProps) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   if (!WORKFLOW_RELEVANT_APPS.has(activeApp)) {
     return null;
@@ -171,7 +171,7 @@ export function ConnectedWorkflowBar({
   return (
     <section
       aria-label="Thanh quy trình liên thông và hành động tiếp theo TeacherOS"
-      className="no-print border-b border-slate-200/80 dark:border-slate-800/90 bg-white/85 dark:bg-slate-900/80 backdrop-blur-md px-3 py-2 sm:px-6"
+      className="tos-workflow-bar no-print px-4 sm:px-6"
     >
       <div className="mx-auto max-w-[1440px] space-y-2">
         {/* Row 1: Active workflow context + switcher + collapse */}
@@ -182,7 +182,7 @@ export function ConnectedWorkflowBar({
               <span>Luồng kiểm tra liên thông</span>
             </span>
 
-            {allWorkflows.length > 1 && onSwitchWorkflow ? (
+            {expanded && (allWorkflows.length > 1 && onSwitchWorkflow ? (
               <select
                 aria-label="Chuyển phiên quy trình làm việc"
                 value={context.workflowId}
@@ -204,9 +204,9 @@ export function ConnectedWorkflowBar({
                   {activeEntityLabel}
                 </span>
               </>
-            )}
+            ))}
 
-            {context.examVersionCodes.length > 0 && (
+            {expanded && context.examVersionCodes.length > 0 && (
               <span className="rounded-md border border-indigo-200/80 dark:border-indigo-800 bg-[#EEF0FF] dark:bg-indigo-950/60 px-1.5 py-0.5 text-[11px] font-mono-num font-semibold text-[#4338CA] dark:text-indigo-300">
                 {context.examVersionCodes.length} mã ({context.examVersionCodes.slice(0, 4).join(', ')})
               </span>
@@ -217,7 +217,7 @@ export function ConnectedWorkflowBar({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {onResetWorkflow && (
+            {expanded && onResetWorkflow && (
               <button
                 type="button"
                 onClick={onResetWorkflow}
@@ -232,9 +232,9 @@ export function ConnectedWorkflowBar({
               type="button"
               onClick={() => setExpanded((prev) => !prev)}
               aria-expanded={expanded}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-indigo-300"
+              className="tos-text-button"
             >
-              <span>{expanded ? 'Thu gọn' : 'Hiện 8 chặng'}</span>
+              <span>{expanded ? 'Thu gọn' : 'Xem quy trình'}</span>
               {expanded ? (
                 <ChevronUp className="h-3 w-3" aria-hidden="true" />
               ) : (
@@ -245,7 +245,7 @@ export function ConnectedWorkflowBar({
         </div>
 
         {/* Row 2: Smart Action Bar ("Hành động tiếp theo") */}
-        {smartActionBar && onExecuteSmartAction && (
+        {smartActionBar && onExecuteSmartAction && (expanded || blockedBanner || missingBanner) && (
           <div
             data-testid="smart-action-bar"
             className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs ${

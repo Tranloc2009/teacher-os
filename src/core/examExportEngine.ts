@@ -50,7 +50,7 @@ export const DEFAULT_EXAM_EXPORT_SETTINGS: ExamExportSettings = {
   headerNote: 'Không sử dụng tài liệu khi làm bài.',
   footerNote: 'Thí sinh không viết vào phần đề thi trừ khi giáo viên cho phép.',
   paperMarginMm: 15,
-  fontFamily: 'Be Vietnam Pro',
+  fontFamily: 'Times New Roman',
   includeAnswerKey: true,
   includeAnswerMatrix: true,
   includeMappingTable: true,

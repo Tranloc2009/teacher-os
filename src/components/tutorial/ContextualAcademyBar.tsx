@@ -37,14 +37,14 @@ export function ContextualAcademyBar({
   return (
     <div
       data-testid={`contextual-academy-hint-${tutorialId}`}
-      className={`no-print flex flex-wrap items-center justify-between gap-2.5 rounded-2xl border border-blue-200/80 dark:border-blue-900/70 bg-blue-50/75 dark:bg-blue-950/35 px-4 py-2.5 text-xs ${className}`}
+      className={`tos-academy-hint no-print flex items-center justify-between gap-2 text-xs ${className}`}
     >
       <div className="flex items-start gap-2 text-slate-800 dark:text-slate-100 min-w-0">
         <GraduationCap
-          className="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400 mt-0.5"
+          className="h-4 w-4 shrink-0 text-indigo-600 dark:text-indigo-300 mt-0.5"
           aria-hidden="true"
         />
-        <p className="leading-relaxed">
+        <p className="sr-only sm:not-sr-only sm:leading-relaxed">
           <strong className="font-semibold text-slate-950 dark:text-slate-50">{label}:</strong> {description}
         </p>
       </div>
@@ -53,7 +53,7 @@ export function ContextualAcademyBar({
         <button
           type="button"
           onClick={() => tutorial.startTutorial(tutorialId, { restart: false })}
-          className="inline-flex items-center gap-1.5 rounded-[10px] bg-blue-600 dark:bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 dark:hover:bg-blue-500 whitespace-nowrap"
+          className="tos-text-button"
         >
           <Play className="h-3 w-3" aria-hidden="true" />
           <span>Xem hướng dẫn tương tác</span>
@@ -62,10 +62,9 @@ export function ContextualAcademyBar({
           type="button"
           onClick={() => tutorial.dismissContextualHint(tutorialId)}
           aria-label={`Đóng gợi ý hướng dẫn ${label}`}
-          className="inline-flex items-center gap-1 rounded-[10px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white whitespace-nowrap"
+          className="tos-icon-button"
         >
           <X className="h-3 w-3" aria-hidden="true" />
-          <span>Để sau</span>
         </button>
       </div>
     </div>

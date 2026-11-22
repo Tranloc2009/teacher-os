@@ -1,3 +1,4 @@
+import { ProgressIndicator } from '../shell/WorkspaceUI';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -816,7 +817,7 @@ export function MathExamMixerApp({
     null;
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 space-y-6">
+    <main className="tos-page tos-module space-y-6">
       <div className="no-print space-y-6">
         {missingPreferredExamId && (
           <div
@@ -1004,48 +1005,9 @@ export function MathExamMixerApp({
               </span>
             </div>
 
-            {/* Connected 5-Step Progress Strip matching Reference Image 6 */}
-            <nav
-              aria-label="Quy trình 5 bước trộn đề Toán"
-              data-tour-id="math-step-tabs"
-              className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-3 border-t border-slate-100 dark:border-slate-800"
-            >
-              {STEP_TABS.map((item) => {
-                const active = step === item.step;
-                const done = step > item.step;
-                return (
-                  <button
-                    key={item.step}
-                    type="button"
-                    aria-current={active ? 'step' : undefined}
-                    onClick={() => {
-                      navigateStep(item.step);
-                      tutorial?.emitTutorialEvent('math-step-nav-clicked');
-                    }}
-                    className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-semibold transition-all whitespace-nowrap truncate ${
-                      active
-                        ? 'border-blue-600 bg-blue-600 text-white shadow-2xs'
-                        : done
-                        ? 'border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300'
-                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    <span
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-mono-num font-bold ${
-                        active
-                          ? 'bg-white/20 text-white'
-                          : done
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
-                      }`}
-                    >
-                      {item.step}
-                    </span>
-                    <span className="truncate">{item.shortTitle}</span>
-                  </button>
-                );
-              })}
-            </nav>
+            <ProgressIndicator label="Quy trình 5 bước trộn đề Toán" active={step} tourId="math-step-tabs"
+              steps={STEP_TABS.map((item) => ({ id: item.step, label: item.shortTitle }))}
+              onSelect={(target) => { navigateStep(target); tutorial?.emitTutorialEvent('math-step-nav-clicked'); }} />
           </div>
         </PageBanner>
 
@@ -1144,7 +1106,6 @@ export function MathExamMixerApp({
               {(
                 [
                   { id: 'editor', label: 'Soạn & Rà soát đề' },
-                  { id: 'import-doctor', label: 'Document Import Doctor' },
                   { id: 'answer-studio', label: 'Answer Key Studio' },
                 ] as const
               ).map((tab) => (
@@ -1162,12 +1123,22 @@ export function MathExamMixerApp({
                 </button>
               ))}
             </div>
+            <details className="tos-disclosure">
+              <summary>Chẩn đoán nâng cao</summary>
+              <button type="button" className="tos-text-button" onClick={(event) => {
+                setStep2Tab('import-doctor');
+                const summary = event.currentTarget.closest('details')?.querySelector('summary');
+                summary?.focus();
+                const details = event.currentTarget.closest('details');
+                if (details) details.open = false;
+              }}>Kiểm tra tài liệu đã nhập</button>
+            </details>
             <div className="text-[11px] text-slate-500 dark:text-slate-400">
               {originalIssues.filter((i) => i.severity === 'error').length === 0
                 ? activeExam.confirmedOriginalAnswers
                   ? 'Sẵn sàng chuyển sang Bước 3 trộn đề'
                   : 'Đã hết lỗi — cần bấm "Xác nhận toàn bộ đáp án gốc" trước khi sang Bước 3'
-                : `${originalIssues.filter((i) => i.severity === 'error').length} lỗi chặn (BLOCKED) cần xử lý trước khi chuyển sang Bước 3`}
+                : `${originalIssues.filter((i) => i.severity === 'error').length} vấn đề cần xử lý trước khi trộn`}
             </div>
           </div>
 

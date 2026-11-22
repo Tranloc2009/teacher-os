@@ -146,8 +146,6 @@ import {
   ShellSidebar,
 } from './components/shell/ShellSidebar';
 import { ToolsHubView } from './components/shell/ToolsHubView';
-import { AppDock } from './components/shell/AppDock';
-import { AppLauncher } from './components/shell/AppLauncher';
 import { CommandPalette } from './components/shell/CommandPalette';
 import { ConnectedWorkflowBar } from './components/shell/ConnectedWorkflowBar';
 import { ContextMenu, PackContextMenuState } from './components/shell/ContextMenu';
@@ -196,20 +194,8 @@ const ALT_SHORTCUT_TO_APP: Record<string, AppId> = {
   '0': 'settings',
 };
 
-function TutorialShellBindings({
-  launcherOpen,
-  paletteOpen,
-}: {
-  launcherOpen: boolean;
-  paletteOpen: boolean;
-}) {
+function TutorialShellBindings({ paletteOpen }: { paletteOpen: boolean }) {
   const { emitTutorialEvent } = useTutorial();
-
-  useEffect(() => {
-    if (launcherOpen) {
-      emitTutorialEvent('launcher-opened');
-    }
-  }, [launcherOpen, emitTutorialEvent]);
 
   useEffect(() => {
     if (paletteOpen) {
@@ -239,7 +225,8 @@ export default function App() {
   const [openedApps, setOpenedApps] = useState<AppId[]>(['desktop', 'lesson-studio']);
   const [, setTabs] = useState<WorkspaceTab[]>(INITIAL_WORKSPACE_TABS);
   const [, setActiveTabId] = useState<string>(INITIAL_WORKSPACE_TABS[0].id);
-  const [launcherOpen, setLauncherOpen] = useState(false);
+  const [homeGeneratorTarget, setHomeGeneratorTarget] = useState<{ draft?: GeneratedExamDraft } | null>(null);
+  const [homeResourceTarget, setHomeResourceTarget] = useState<{ id: string; title: string } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [uiPrefs, setUiPrefs] = useState<UIPreferences>(() => readUIPreferences());
   const [autosaveState, setAutosaveState] = useState<AutosaveState>('saved');
@@ -415,7 +402,6 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        setLauncherOpen(false);
         setPaletteOpen((prev) => !prev);
         return;
       }
@@ -428,7 +414,6 @@ export default function App() {
         const mapped = ALT_SHORTCUT_TO_APP[e.key];
         if (mapped) {
           e.preventDefault();
-          setLauncherOpen(false);
           setPaletteOpen(false);
           openApp(mapped);
         }
@@ -1404,7 +1389,6 @@ export default function App() {
   };
 
   const handleCleanupShellOverlays = useCallback(() => {
-    setLauncherOpen(false);
     setPaletteOpen(false);
   }, []);
 
@@ -2028,16 +2012,14 @@ export default function App() {
       onCleanupShellOverlays={handleCleanupShellOverlays}
     >
       <TutorialShellBindings
-        launcherOpen={launcherOpen}
         paletteOpen={paletteOpen}
       />
-      <div className="min-h-screen aurora-app-canvas text-[#172033] dark:text-slate-100 flex flex-col pb-14 lg:pb-0">
+      <div className="tos-shell min-h-screen flex flex-col">
         <TopBarWithTutorial
           activeView={activeView}
           activeContextTitle={activeContextTitle}
           theme={uiPrefs.theme}
           notifications={notifications}
-          onToggleSidebar={toggleSidebar}
           onSelectDesktop={() => openApp('desktop')}
           onOpenToolsHub={openToolsHub}
           onOpenSettings={() => openApp('settings')}
@@ -2097,7 +2079,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Workspace Canvas: Aurora Soft Glass Sidebar + Keep-Alive Application Viewport */}
+      {/* Keep-alive views preserve drafts and their current workflow step. */}
       <div className="flex-1 flex min-w-0">
         <ShellSidebar
           activeView={activeView}
@@ -2128,30 +2110,18 @@ export default function App() {
                 packs={packs}
                 mathExams={mathExams}
                 resources={resources}
-                workflows={workflows}
-                gradingSessions={gradingSessions}
                 examDrafts={examDrafts}
-                canvasBoards={canvasBoards}
-                canvasNodes={canvasNodes}
                 hasActiveUnsavedDraft={lessonStudioHasDraftChanges}
                 nextStepSuggestions={dashboardNextSteps}
-                connectedWorkspaceSummaries={connectedWorkspaceSummaries}
-                onCreateNewPack={handleCreateNew}
+                workflows={connectedWorkspaceSummaries}
+                onStartExam={() => { setHomeGeneratorTarget({}); openApp('exam-generator'); }}
                 onOpenApp={openApp}
                 onExecuteNextStep={handleExecuteNextStep}
                 onResumeWorkflow={handleResumeWorkflow}
-                onStartNewConnectedWorkflow={() => {
-                  handleStartNewConnectedWorkflow();
-                  openApp('resource-vault');
-                }}
-                onOpenToolsHub={openToolsHub}
-                onOpenLibrary={() => {
-                  setLessonStudioMode('library');
-                  openApp('lesson-studio');
-                }}
                 onOpenPackInStudio={handleEditPack}
-                onOpenCommandPalette={() => setPaletteOpen(true)}
-                onOpenPackContextMenu={(pack, x, y) => setContextMenu({ pack, x, y })}
+                onOpenExam={(exam) => { requestExamMixerTarget({ examId: exam.id, step: exam.generatedVersions.length ? 4 : 2 }); openApp('math-mixer'); }}
+                onOpenDraft={(draft) => { setHomeGeneratorTarget({ draft }); openApp('exam-generator'); }}
+                onOpenResource={(resource) => { setHomeResourceTarget({ id: resource.id, title: resource.title }); openApp('resource-vault'); }}
               />
             </ErrorBoundary>
           </div>
@@ -2160,10 +2130,6 @@ export default function App() {
             <div className="block print:hidden">
               <ErrorBoundary moduleName="Tools Hub" packs={packs} settings={settings}>
                 <ToolsHubView
-                  workflowCount={workflows.length}
-                  mathExamCount={mathExams.length}
-                  packCount={packs.length}
-                  journalCount={journals.length}
                   onOpenApp={openApp}
                 />
               </ErrorBoundary>
@@ -2316,6 +2282,7 @@ export default function App() {
               <ErrorBoundary moduleName="Resource Vault" packs={packs} settings={settings}>
                 <ResourceVaultApp
                   resources={resources}
+                  homeTarget={homeResourceTarget}
                   mathExams={mathExams}
                   activePack={activePack}
                   temporaryMode={temporaryMode}
@@ -2449,6 +2416,7 @@ export default function App() {
             <div className={activeView === 'exam-generator' ? 'block' : 'hidden print:hidden'}>
               <ErrorBoundary moduleName="Smart Exam Generator 2.0" packs={packs} settings={settings}>
                 <SmartExamGeneratorApp
+                  homeTarget={homeGeneratorTarget}
                   mathExams={mathExams}
                   resources={resources}
                   preferredResourceId={examGeneratorPreferredResourceId}
@@ -2562,23 +2530,6 @@ export default function App() {
       <CreditFooter />
 
       <MobileBottomNav activeView={activeView} onSelectNav={handleSelectNav} />
-
-      {uiPrefs.showDock && (
-        <AppDock
-          activeApp={activeApp}
-          openedApps={openedApps}
-          lessonStudioHasDraftChanges={lessonStudioHasDraftChanges}
-          onSwitchApp={openApp}
-          onOpenLauncher={() => setLauncherOpen(true)}
-        />
-      )}
-
-      <AppLauncher
-        open={launcherOpen}
-        activeApp={activeApp}
-        onClose={() => setLauncherOpen(false)}
-        onLaunchApp={openApp}
-      />
 
       <CommandPalette
         open={paletteOpen}
