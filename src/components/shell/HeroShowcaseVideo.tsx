@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ExternalLink,
   Loader2,
   Pause,
   Play,
@@ -11,6 +12,7 @@ import {
 import {
   HERO_SHOWCASE_MEDIA,
   describeHeroVideoError,
+  diagnoseHeroVideoProbeResponse,
   resolveHeroVideoPlaybackIntent,
   resolveNextUserOverride,
   shouldKeepPosterUnderlay,
@@ -66,6 +68,25 @@ export function HeroShowcaseVideo({
 
   const hasError = errorMessage !== null;
 
+  // Apply iOS Safari / WebKit muted + playsinline HTML attributes synchronously on DOM mount
+  const attachVideoRef = useCallback(
+    (node: HTMLVideoElement | null) => {
+      videoRef.current = node;
+      if (!node) return;
+      node.defaultMuted = true;
+      node.muted = isMuted;
+      if (isMuted) {
+        node.setAttribute('muted', '');
+      } else {
+        node.removeAttribute('muted');
+      }
+      node.setAttribute('playsinline', '');
+      node.setAttribute('webkit-playsinline', 'true');
+      node.setAttribute('x5-playsinline', 'true');
+    },
+    [isMuted]
+  );
+
   // Listen to OS / browser prefers-reduced-motion changes
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -117,8 +138,7 @@ export function HeroShowcaseVideo({
     return () => observer.disconnect();
   }, []);
 
-  // Enforce real HTML attributes required by Safari iOS & Chrome Android autoplay/inline policies
-  // (React sets `.muted` as a JS property after mount, not always the HTML attribute iOS WebKit checks)
+  // Keep muted attribute synchronized whenever user toggles sound or reloads
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -153,7 +173,6 @@ export function HeroShowcaseVideo({
       return;
     }
 
-    // Ensure muted attribute is strictly applied before programmatic autoplay on mobile
     if (isMuted) {
       video.defaultMuted = true;
       video.muted = true;
@@ -167,7 +186,10 @@ export function HeroShowcaseVideo({
           setAutoplayBlocked(false);
           setIsBuffering(false);
         })
-        .catch(() => {
+        .catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            return;
+          }
           // iOS Low Power Mode, Android Data Saver, or strict autoplay policy blocked autoplay
           setAutoplayBlocked(true);
           setIsPlaying(false);
@@ -188,7 +210,7 @@ export function HeroShowcaseVideo({
     }
   }, [attemptAutoplay, playbackIntent, hasError, reloadNonce]);
 
-  // Safety probe: if mobile browser silently prevents autoplay without throwing a Promise rejection,
+  // Safety probe: if mobile browser silently prevents autoplay without rejecting Promise,
   // expose the explicit Play button so user can start playback with one tap.
   useEffect(() => {
     if (playbackIntent !== 'play' || isPlaying || hasError || autoplayBlocked) {
@@ -198,7 +220,7 @@ export function HeroShowcaseVideo({
     const timer = window.setTimeout(() => {
       const video = videoRef.current;
       if (!video) return;
-      if (video.paused && video.readyState >= 2) {
+      if (video.paused && video.readyState >= 1) {
         setAutoplayBlocked(true);
         setIsBuffering(false);
       }
@@ -241,7 +263,7 @@ export function HeroShowcaseVideo({
     return () => window.clearTimeout(stallTimer);
   }, [playbackIntent, hasVisualFrame, hasError, autoplayBlocked, reloadNonce]);
 
-  // Dedicated synchronous Play action inside user gesture stack (for center Play CTA on mobile)
+  // Dedicated synchronous Play action inside user gesture stack (critical for Safari iOS unlock)
   const handleExplicitPlay = useCallback(() => {
     const video = videoRef.current;
     if (!video || hasError) return;
@@ -324,6 +346,33 @@ export function HeroShowcaseVideo({
     setReloadNonce((n) => n + 1);
   }, []);
 
+  const handleVideoError = useCallback((mediaErrorCode: number | null) => {
+    setIsPlaying(false);
+    setIsBuffering(false);
+    setShowBufferingBadge(false);
+    setErrorMessage(describeHeroVideoError(mediaErrorCode));
+
+    // Probe response headers to distinguish missing/SPA-HTML deployment vs browser codec error
+    if (typeof fetch === 'function') {
+      fetch(HERO_SHOWCASE_MEDIA.primaryMp4, {
+        method: 'HEAD',
+        cache: 'no-store',
+      })
+        .then((res) => {
+          const probeDiagnosis = diagnoseHeroVideoProbeResponse({
+            status: res.status,
+            contentType: res.headers.get('content-type'),
+          });
+          if (probeDiagnosis) {
+            setErrorMessage(probeDiagnosis);
+          }
+        })
+        .catch(() => {
+          // Keep MediaError message if probe itself fails due to offline network
+        });
+    }
+  }, []);
+
   const showCenterPlayPrompt = shouldShowManualPlayOverlay({
     hasError,
     isPlaying,
@@ -343,11 +392,11 @@ export function HeroShowcaseVideo({
         data-testid="hero-showcase-frame"
         className="relative w-full aspect-video overflow-hidden rounded-[14px] bg-[#ECEFF8] dark:bg-slate-950"
       >
-        {/* Video element with direct src so MediaError fires reliably on mobile Safari & Android */}
+        {/* Video element using canonical /media/teacheros-intro.mp4 (H.264 Main L3.1 / AAC-LC / isom faststart) */}
         {!hasError && (
           <video
             key={reloadNonce}
-            ref={videoRef}
+            ref={attachVideoRef}
             data-testid="hero-showcase-video"
             src={HERO_SHOWCASE_MEDIA.primaryMp4}
             poster={HERO_SHOWCASE_MEDIA.posterImage}
@@ -356,8 +405,7 @@ export function HeroShowcaseVideo({
             muted={isMuted}
             loop
             playsInline
-            preload="auto"
-            disableRemotePlayback
+            preload="metadata"
             aria-label="Video giới thiệu TeacherOS 4.0"
             onClick={handleTogglePlay}
             onLoadedMetadata={() => {
@@ -402,11 +450,7 @@ export function HeroShowcaseVideo({
               }
             }}
             onError={(e) => {
-              const code = e.currentTarget.error?.code ?? null;
-              setIsPlaying(false);
-              setIsBuffering(false);
-              setShowBufferingBadge(false);
-              setErrorMessage(describeHeroVideoError(code));
+              handleVideoError(e.currentTarget.error?.code ?? null);
             }}
           />
         )}
@@ -433,7 +477,7 @@ export function HeroShowcaseVideo({
           </div>
         )}
 
-        {/* Centered manual Play CTA when autoplay is blocked on mobile or prefers-reduced-motion is on */}
+        {/* Centered manual Play CTA when autoplay is blocked on iPhone/mobile or prefers-reduced-motion is on */}
         {showCenterPlayPrompt && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-slate-950/12">
             <button
@@ -459,7 +503,7 @@ export function HeroShowcaseVideo({
           <div
             role="alert"
             data-testid="hero-video-error"
-            className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-slate-950/60 p-4 text-center backdrop-blur-[2px]"
+            className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-slate-950/65 p-4 text-center backdrop-blur-[2px]"
           >
             <div className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-white">
               <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
@@ -486,18 +530,32 @@ export function HeroShowcaseVideo({
           className="flex w-full sm:w-auto items-center justify-end gap-1.5 shrink-0"
         >
           {hasError ? (
-            <button
-              type="button"
-              data-testid="hero-video-retry"
-              onClick={handleRetryLoad}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200/90 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 text-xs font-semibold text-[#172033] dark:text-slate-100 shadow-[0_1px_2px_rgba(23,32,51,0.04)] hover:border-[#635BFF]/40 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-[#635BFF]"
-            >
-              <RotateCcw
-                className="h-3.5 w-3.5 shrink-0 text-[#635BFF] dark:text-indigo-400"
-                aria-hidden="true"
-              />
-              <span>Tải lại video</span>
-            </button>
+            <>
+              <button
+                type="button"
+                data-testid="hero-video-retry"
+                onClick={handleRetryLoad}
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200/90 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 text-xs font-semibold text-[#172033] dark:text-slate-100 shadow-[0_1px_2px_rgba(23,32,51,0.04)] hover:border-[#635BFF]/40 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-[#635BFF]"
+              >
+                <RotateCcw
+                  className="h-3.5 w-3.5 shrink-0 text-[#635BFF] dark:text-indigo-400"
+                  aria-hidden="true"
+                />
+                <span>Tải lại video</span>
+              </button>
+
+              <a
+                href={HERO_SHOWCASE_MEDIA.primaryMp4}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="hero-video-open-direct"
+                aria-label="Mở trực tiếp tệp video MP4 trong trình phát thiết bị"
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[#635BFF]/30 bg-[#635BFF] px-3 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(23,32,51,0.08)] hover:bg-[#5046E5] transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#635BFF]"
+              >
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Mở video</span>
+              </a>
+            </>
           ) : (
             <>
               <button
