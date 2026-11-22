@@ -1,9 +1,3 @@
-/assets/aistudio/*.mp4
-  Content-Type: video/mp4
-  Accept-Ranges: bytes
-  Cache-Control: public, max-age=86400, must-revalidate
-  X-Content-Type-Options: nosniff
-
 /assets/aistudio/*.jpg
   Content-Type: image/jpeg
   Cache-Control: public, max-age=86400, must-revalidate

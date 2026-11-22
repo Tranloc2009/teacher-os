@@ -94,7 +94,7 @@ export function describeHeroVideoError(
 
 export const HERO_SHOWCASE_MEDIA = {
   /** Mobile-compatible MP4: H.264 Main Profile Level 3.1 (yuv420p) + AAC-LC stereo + faststart moov */
-  primaryMp4: '/assets/aistudio/Generated_Video_1_1__73041f26.mp4',
-  posterImage: '/assets/aistudio/teacheros-intro-poster.jpg',
+  primaryMp4: '/media/teacheros-intro.mp4',
+  posterImage: '/media/teacheros-intro-poster.jpg',
   mimeType: 'video/mp4',
 } as const;

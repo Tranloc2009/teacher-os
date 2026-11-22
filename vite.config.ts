@@ -48,8 +48,8 @@ export default defineConfig(() => {
         workbox: {
           // Chỉ cache App Shell tĩnh; tuyệt đối không cache video/ảnh nặng để bảo toàn HTTP Range Requests trên iOS Safari & Android
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          globIgnores: ['**/assets/aistudio/**'],
-          navigateFallbackDenylist: [/^\/assets\//, /\.(?:mp4|webm|ogg|m4v|jpg|jpeg|png)$/i],
+          globIgnores: ['**/assets/aistudio/**', '**/media/**'],
+          navigateFallbackDenylist: [/^\/(?:assets|media)\//, /\.(?:mp4|webm|ogg|m4v|jpg|jpeg|png)$/i],
           maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
         },
         devOptions: {

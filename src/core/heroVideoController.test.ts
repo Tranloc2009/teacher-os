@@ -154,14 +154,14 @@ test('maps MediaError codes and stall timeouts to specific Vietnamese user messa
   assert.match(describeHeroVideoError(null, 'play-failed'), /tự phát/i);
 });
 
-test('media constants point directly to the new mobile-compatible MP4 and poster under /assets/aistudio/', () => {
+test('media constants point directly to the MP4 and poster under /media/', () => {
   assert.equal(
     HERO_SHOWCASE_MEDIA.primaryMp4,
-    '/assets/aistudio/Generated_Video_1_1__73041f26.mp4'
+    '/media/teacheros-intro.mp4'
   );
   assert.equal(
     HERO_SHOWCASE_MEDIA.posterImage,
-    '/assets/aistudio/teacheros-intro-poster.jpg'
+    '/media/teacheros-intro-poster.jpg'
   );
   assert.equal(HERO_SHOWCASE_MEDIA.mimeType, 'video/mp4');
 });
