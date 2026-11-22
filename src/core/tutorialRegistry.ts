@@ -11,7 +11,7 @@ export const DESKTOP_OVERVIEW_TUTORIAL: TutorialDefinition = {
   estimatedMinutes: 2,
   completionTitle: 'Bạn đã sẵn sàng sử dụng TeacherOS!',
   completionMessage:
-    'Thầy/cô đã nắm được các khu vực chính của TeacherOS. Có thể mở lại hướng dẫn từ menu ở góc trên bên phải.',
+    'Thầy/cô đã nắm được các khu vực chính của TeacherOS. Nếu cần xem lại hướng dẫn bất cứ lúc nào, hãy nhấn nút dấu ? ở thanh công cụ phía trên.',
   completionCtaLabel: 'Bắt đầu làm việc',
   steps: [
     {
@@ -22,19 +22,19 @@ export const DESKTOP_OVERVIEW_TUTORIAL: TutorialDefinition = {
       target: 'desktop-hero',
       placement: 'bottom',
       actionType: 'info',
-      hint: 'Nhấn biểu tượng TeacherOS ở góc trên bên trái để quay lại tổng quan.',
+      hint: 'Nhấn vào dòng chữ TeacherOS 4.0 ở góc trên bên trái bất cứ lúc nào để quay lại màn hình này.',
       skippable: true,
     },
     {
       stepId: 'app-launcher',
-      title: 'Bước 2 — Thêm công cụ',
+      title: 'Bước 2 — App Launcher',
       description:
-        'Mở menu ở góc trên bên phải để tìm công cụ khác, cài đặt và hướng dẫn.',
+        'Nút "Ứng dụng" là nơi tập hợp toàn bộ công cụ trong TeacherOS để thầy/cô chuyển đổi nhanh chỉ với một cú nhấn.',
       target: 'topbar-app-launcher',
       placement: 'bottom',
       actionType: 'click',
       completionEvent: 'launcher-opened',
-      hint: 'Nhấn nút đang được đánh dấu để mở menu.',
+      hint: 'Hãy thử nhấn trực tiếp vào nút "Ứng dụng" đang sáng lên, hoặc chọn "Bỏ qua bước" nếu muốn xem tiếp.',
       skippable: true,
     },
     {
@@ -104,7 +104,7 @@ export const DESKTOP_OVERVIEW_TUTORIAL: TutorialDefinition = {
       stepId: 'overview-complete',
       title: 'Bước 8 — Hoàn thành',
       description:
-        'Bạn đã sẵn sàng sử dụng TeacherOS! Có thể xem lại hướng dẫn từ menu ở góc trên bên phải.',
+        'Bạn đã sẵn sàng sử dụng TeacherOS! Thầy/cô luôn có thể nhấn nút dấu ? ở thanh công cụ phía trên để xem lại hướng dẫn bất cứ lúc nào.',
       target: 'center',
       placement: 'center',
       actionType: 'info',

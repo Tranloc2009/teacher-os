@@ -1,5 +1,4 @@
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import { DocumentPreview } from '../shell/WorkspaceUI';
 import {
   AlertTriangle,
   Archive,
@@ -214,23 +213,6 @@ export function ExamFormDesigner({
   );
   const [importError, setImportError] = useState<string | null>(null);
   const [mobileDrawer, setMobileDrawer] = useState<'none' | 'setup' | 'inspector'>('none');
-  const mobileDrawerRef = useRef<HTMLDialogElement>(null);
-  const mobileDrawerTrigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const drawer = mobileDrawerRef.current;
-    if (mobileDrawer === 'none' || !drawer) return;
-    drawer.showModal();
-    const desktop = window.matchMedia('(min-width: 1280px)');
-    const closeOnDesktop = (event: MediaQueryListEvent) => {
-      if (event.matches) setMobileDrawer('none');
-    };
-    desktop.addEventListener('change', closeOnDesktop);
-    return () => {
-      desktop.removeEventListener('change', closeOnDesktop);
-      drawer.close();
-      mobileDrawerTrigger.current?.focus();
-    };
-  }, [mobileDrawer]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
@@ -612,7 +594,6 @@ export function ExamFormDesigner({
         ? 'Arial, Helvetica, sans-serif'
         : '"Be Vietnam Pro", system-ui, sans-serif';
 
-  const sheetWidthMm = workingTemplate.pageSettings.orientation === 'landscape' ? 297 : 210;
   const a4SheetStyle: CSSProperties = {
     fontFamily: sheetFontFamily,
     fontSize: `${workingTemplate.pageSettings.fontSizePt}pt`,
@@ -622,8 +603,9 @@ export function ExamFormDesigner({
     paddingBottom: `${workingTemplate.pageSettings.marginBottomMm}mm`,
     paddingLeft: `${workingTemplate.pageSettings.marginLeftMm}mm`,
     textAlign: workingTemplate.pageSettings.bodyAlignment === 'justify' ? 'justify' : 'left',
-    width: `${sheetWidthMm}mm`,
+    width: workingTemplate.pageSettings.orientation === 'landscape' ? '297mm' : '210mm',
     minHeight: workingTemplate.pageSettings.orientation === 'landscape' ? '210mm' : '297mm',
+    maxWidth: '100%',
   };
 
   const durationDisplay =
@@ -2246,7 +2228,7 @@ export function ExamFormDesigner({
     return (
       <div
         onClick={() => focusBlock('answer-key')}
-        className={`tos-paper mx-auto bg-white space-y-4 ${blockRingClass(
+        className={`mx-auto bg-white shadow-xl border border-slate-200/90 space-y-4 ${blockRingClass(
           'answer-key'
         )}`}
         style={a4SheetStyle}
@@ -2439,17 +2421,13 @@ export function ExamFormDesigner({
       {/* =================================================================== */}
       {/* TOP STUDIO TOOLBAR                                                   */}
       {/* =================================================================== */}
-      <div className="tos-document-toolbar print:hidden flex flex-wrap items-center justify-between" role="group" aria-label="Công cụ mẫu đề">
+      <div className="print:hidden rounded-2xl border border-slate-200/90 bg-white/95 backdrop-blur px-3.5 py-2.5 shadow-sm flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           {/* Mobile Drawer Toggles (< xl) */}
           <div className="flex xl:hidden items-center gap-1.5">
             <button
               type="button"
-              onClick={(event) => {
-                mobileDrawerTrigger.current = event.currentTarget;
-                setMobileDrawer('setup');
-              }}
-              aria-haspopup="dialog"
+              onClick={() => setMobileDrawer('setup')}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-800 hover:bg-indigo-50"
             >
               <LayoutTemplate className="w-3.5 h-3.5 text-indigo-600" />
@@ -2457,11 +2435,7 @@ export function ExamFormDesigner({
             </button>
             <button
               type="button"
-              onClick={(event) => {
-                mobileDrawerTrigger.current = event.currentTarget;
-                setMobileDrawer('inspector');
-              }}
-              aria-haspopup="dialog"
+              onClick={() => setMobileDrawer('inspector')}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-800 hover:bg-indigo-50"
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
@@ -2702,17 +2676,23 @@ export function ExamFormDesigner({
       {/* =================================================================== */}
       <div className="grid grid-cols-1 xl:grid-cols-[290px_minmax(0,1fr)_300px] gap-4 items-start">
         {/* LEFT PANEL — THIẾT LẬP (Desktop) */}
-        <aside className="tos-document-panel hidden xl:flex flex-col print:hidden overflow-hidden">
+        <aside className="hidden xl:flex flex-col print:hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
           {renderLeftPanelContent()}
         </aside>
 
         {/* CENTER AREA — LIVE A4 PREVIEW */}
-        <DocumentPreview label="Xem trước bản in A4" widthMm={sheetWidthMm} zoom={zoomPercent}>
+        <main className="min-w-0 rounded-2xl border border-slate-200/90 bg-slate-100/90 p-3 sm:p-5 overflow-x-auto print:border-0 print:bg-white print:p-0 print:overflow-visible">
+          <div
+            style={{
+              transform: zoomPercent === 100 ? undefined : `scale(${zoomPercent / 100})`,
+              transformOrigin: 'top center',
+            }}
+          >
             {previewTab === 'answer' ? (
               renderLiveAnswerKeyPreview()
             ) : (
               <div
-                className="tos-paper mx-auto bg-white"
+                className="mx-auto bg-white shadow-xl border border-slate-200/90 print:shadow-none print:border-0"
                 style={a4SheetStyle}
               >
                 {/* BLOCK 1: HEADER & SCHOOL BRANDING */}
@@ -3061,10 +3041,11 @@ export function ExamFormDesigner({
                 </div>
               </div>
             )}
-        </DocumentPreview>
+          </div>
+        </main>
 
         {/* RIGHT PANEL — THUỘC TÍNH & QUALITY CONTROL (Desktop) */}
-        <aside className="tos-document-panel hidden xl:flex flex-col print:hidden overflow-hidden">
+        <aside className="hidden xl:flex flex-col print:hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
           {renderRightPanelContent()}
         </aside>
       </div>
@@ -3073,23 +3054,29 @@ export function ExamFormDesigner({
       {/* MOBILE / TABLET SLIDE-OVER DRAWERS (< xl)                           */}
       {/* =================================================================== */}
       {mobileDrawer !== 'none' && (
-        <dialog
-          ref={mobileDrawerRef}
-          className={`tos-paper-drawer fixed inset-y-0 m-0 w-[min(90vw,340px)] max-h-none max-w-none p-0 xl:hidden print:hidden ${mobileDrawer === 'inspector' ? 'left-auto right-0' : 'left-0 right-auto'}`}
+        <div
+          className="fixed inset-0 z-50 xl:hidden print:hidden flex"
+          role="dialog"
+          aria-modal="true"
           aria-label={mobileDrawer === 'setup' ? 'Bảng Thiết lập mẫu đề' : 'Bảng Thuộc tính khối'}
-          onCancel={(event) => { event.preventDefault(); setMobileDrawer('none'); }}
-          onClick={(event) => { if (event.target === event.currentTarget) setMobileDrawer('none'); }}
         >
-          <div className="flex h-full flex-col overflow-hidden">
+          <div
+            className="fixed inset-0 bg-slate-900/40 backdrop-blur-[2px]"
+            onClick={() => setMobileDrawer('none')}
+          />
+          <div
+            className={`relative z-10 w-[min(90vw,340px)] max-h-full bg-white shadow-2xl flex flex-col overflow-hidden ${
+              mobileDrawer === 'inspector' ? 'ml-auto' : 'mr-auto'
+            }`}
+          >
             <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-slate-200 bg-slate-50">
               <span className="text-xs font-bold text-slate-900">
                 {mobileDrawer === 'setup' ? 'Thiết lập & Thư viện mẫu' : 'Thuộc tính & Kiểm định'}
               </span>
               <button
                 type="button"
-                autoFocus
                 onClick={() => setMobileDrawer('none')}
-                className="tos-icon-button hover:bg-slate-200"
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200"
                 aria-label="Đóng bảng"
               >
                 <X className="w-4 h-4" />
@@ -3099,7 +3086,7 @@ export function ExamFormDesigner({
               {mobileDrawer === 'setup' ? renderLeftPanelContent() : renderRightPanelContent()}
             </div>
           </div>
-        </dialog>
+        </div>
       )}
     </div>
   );

@@ -1,4 +1,3 @@
-import { ProgressIndicator } from '../shell/WorkspaceUI';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -56,7 +55,6 @@ export type WizardStep = 1 | 2 | 3 | 4 | 5;
 interface ExamGeneratorWizardPanelProps {
   unifiedBank: BankQuestionRecord[];
   templates: QuestionTemplateDefinition[];
-  persistedDrafts: GeneratedExamDraft[];
   initialDraftToReview?: GeneratedExamDraft | null;
   onSaveDrafts: (drafts: GeneratedExamDraft[]) => void;
   onUpdateDraft: (draft: GeneratedExamDraft) => void;
@@ -100,7 +98,6 @@ function triggerDownload(buffer: ArrayBuffer | Uint8Array, fileName: string) {
 export function ExamGeneratorWizardPanel({
   unifiedBank,
   templates,
-  persistedDrafts,
   initialDraftToReview,
   onSaveDrafts,
   onUpdateDraft,
@@ -499,21 +496,45 @@ export function ExamGeneratorWizardPanel({
   };
 
   const exportGate = activeDraft ? canExportOfficialAnswerKey(activeDraft) : null;
-  const draftSaved = activeDraft && persistedDrafts.some(
-    (draft) => draft.id === activeDraft.id && draft.updatedAt >= activeDraft.updatedAt,
-  );
-  const emptyMatrix = matrixSummary.totalQuestions === 0;
 
   return (
     <div className="space-y-5">
-      <ProgressIndicator label="Các bước tạo đề tự động" active={step}
-        steps={STEP_LABELS.map((item) => ({ id: item.step, label: item.short, disabled: item.step === 5 && generatedDrafts.length === 0 }))}
-        onSelect={setStep} />
-      <p role="status" className="tos-save-status">
-        {activeDraft
-          ? draftSaved ? 'Đã lưu bản nháp trên thiết bị.' : 'Bản nháp có thay đổi chưa lưu.'
-          : 'Đề được lưu thành bản nháp sau khi tạo.'}
-      </p>
+      {/* 5-Step Progress Bar */}
+      <nav
+        aria-label="Các bước tạo đề tự động"
+        className="rounded-2xl border border-slate-200/85 dark:border-slate-800 bg-white/95 dark:bg-slate-900/90 p-3 shadow-sm"
+      >
+        <ol className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {STEP_LABELS.map((s) => {
+            const isCurrent = step === s.step;
+            const isDone = step > s.step;
+            const disabled = s.step === 5 && generatedDrafts.length === 0;
+            return (
+              <li key={s.step}>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setStep(s.step)}
+                  className={`w-full rounded-xl px-3 py-2 text-left text-xs font-semibold transition-colors ${
+                    isCurrent
+                      ? 'bg-[#635BFF] text-white shadow-sm'
+                      : isDone
+                      ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100'
+                      : disabled
+                      ? 'bg-slate-50 dark:bg-slate-800/40 text-slate-400 cursor-not-allowed'
+                      : 'bg-slate-100/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200/70'
+                  }`}
+                >
+                  <span className="hidden md:inline">{s.title}</span>
+                  <span className="md:hidden">
+                    {s.step}. {s.short}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
 
       {/* STEP 1: CHOOSE SOURCE */}
       {step === 1 && (
@@ -617,9 +638,6 @@ export function ExamGeneratorWizardPanel({
           </div>
 
           {/* Question types & Cognitive levels */}
-          <details className="tos-disclosure">
-            <summary>Dạng câu hỏi và mức độ nhận thức</summary>
-            <div className="tos-disclosure-body">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
@@ -672,17 +690,15 @@ export function ExamGeneratorWizardPanel({
             </div>
           </div>
 
-            </div>
-          </details>
           {/* Source Availability Summary */}
           <div className="rounded-xl border border-indigo-200/80 dark:border-indigo-900 bg-indigo-50/60 dark:bg-indigo-950/30 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="space-y-0.5">
               <p className="font-semibold text-indigo-950 dark:text-indigo-200">
-                Câu hỏi có thể dùng
+                Nguồn khả dụng khớp bộ lọc hiện tại:
               </p>
               <p className="text-indigo-800 dark:text-indigo-300">
                 <span className="font-mono-num font-bold">{matchingSourceStats.bankCount}</span> câu hỏi gốc trong ngân hàng ·{' '}
-                <span className="font-mono-num font-bold">{matchingSourceStats.tplCount}</span> mẫu câu hỏi đã kiểm chứng.
+                <span className="font-mono-num font-bold">{matchingSourceStats.tplCount}</span> mẫu đổi số Level 1, Level 2 &amp; Level 3 (Đồ thị) đã kiểm chứng.
               </p>
             </div>
             <button
@@ -857,9 +873,6 @@ export function ExamGeneratorWizardPanel({
           </div>
 
           {/* Cognitive Ratio Summary */}
-          {emptyMatrix && <p id="exam-matrix-required" className="text-sm text-red-700 dark:text-red-300">
-            Thêm ít nhất một câu vào ma trận để tiếp tục.
-          </p>}
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="flex flex-wrap items-center gap-3">
               <span>
@@ -895,9 +908,7 @@ export function ExamGeneratorWizardPanel({
             <button
               type="button"
               onClick={() => setStep(3)}
-              disabled={emptyMatrix}
-              aria-describedby={emptyMatrix ? 'exam-matrix-required' : undefined}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-[#635BFF] px-4 py-2 text-xs font-semibold text-white enabled:hover:bg-[#5248f0] disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-[#635BFF] px-4 py-2 text-xs font-semibold text-white hover:bg-[#5248f0]"
             >
               <span>Tiếp tục: Chế độ tạo đề</span>
               <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -911,7 +922,7 @@ export function ExamGeneratorWizardPanel({
         <section className="rounded-2xl border border-slate-200/85 dark:border-slate-800 bg-white/95 dark:bg-slate-900/90 p-5 shadow-sm space-y-5">
           <div>
             <h2 className="text-base font-bold text-[#172033] dark:text-slate-100">
-              Bước 3: Chọn cách tạo đề
+              Bước 3: Chọn chế độ tạo đề, Seed tái lập &amp; Số lượng đề
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Phân biệt rõ: Biến thể câu hỏi (khác dữ kiện số, tự tính lại đáp án) khác với Mã đề Exam Mixer (đảo thứ tự câu/phương án).
@@ -923,18 +934,18 @@ export function ExamGeneratorWizardPanel({
               [
                 {
                   id: 'bank-only',
-                  title: 'Dùng câu hỏi gốc',
-                  desc: 'Chọn câu có sẵn trong ngân hàng theo ma trận.',
+                  title: 'MODE A — Ngân hàng gốc (Bank Only)',
+                  desc: 'Chỉ lấy câu hỏi gốc đã có sẵn trong ngân hàng theo đúng ma trận. An toàn tuyệt đối với câu hình học / tự luận.',
                 },
                 {
                   id: 'verified-variants',
-                  title: 'Tạo biến thể đã kiểm chứng',
-                  desc: 'Đổi số liệu trong các mẫu có bộ giải và tự kiểm tra đáp án.',
+                  title: 'MODE B — Biến thể kiểm chứng',
+                  desc: 'Chỉ sinh biến thể đổi số từ các mẫu Level 1, Level 2 & Level 3 Đồ thị có bộ giải & kiểm chứng độc lập. Thiếu mẫu sẽ báo rõ.',
                 },
                 {
                   id: 'hybrid',
-                  title: 'Kết hợp',
-                  desc: 'Dùng cả câu gốc và biến thể theo tỷ lệ bạn chọn.',
+                  title: 'MODE C — Kết hợp (Hybrid)',
+                  desc: 'Kết hợp câu hỏi gốc trong ngân hàng và biến thể đổi số kiểm chứng theo tỷ lệ mong muốn. Khuyên dùng.',
                 },
               ] as Array<{ id: ExamGenerationMode; title: string; desc: string }>
             ).map((opt) => {
@@ -944,7 +955,6 @@ export function ExamGeneratorWizardPanel({
                   key={opt.id}
                   type="button"
                   onClick={() => setBlueprint({ ...blueprint, mode: opt.id })}
-                  aria-pressed={selected}
                   className={`rounded-2xl border p-4 text-left space-y-1.5 transition-all ${
                     selected
                       ? 'border-[#635BFF] bg-[#EEF0FF]/70 dark:bg-indigo-950/50 ring-2 ring-[#635BFF]/20'
@@ -990,17 +1000,30 @@ export function ExamGeneratorWizardPanel({
             </div>
           )}
 
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-slate-700 dark:text-slate-300">
+                Seed ngẫu nhiên cố định (tái lập 100%)
+              </span>
+              <input
+                type="text"
+                value={blueprint.seed}
+                onChange={(e) =>
+                  setBlueprint({ ...blueprint, seed: e.target.value })
+                }
+                className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-mono-num"
+              />
+            </label>
+
             <div className="space-y-1 text-xs">
               <span className="font-semibold text-slate-700 dark:text-slate-300 block">
                 Số lượng đề cần tạo cùng ma trận
               </span>
-              <div className="grid max-w-sm grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 {([1, 2, 4, 10] as const).map((cnt) => (
                   <button
                     key={cnt}
                     type="button"
-                    aria-pressed={blueprint.examDraftCount === cnt}
                     onClick={() =>
                       setBlueprint({ ...blueprint, examDraftCount: cnt })
                     }
@@ -1016,16 +1039,7 @@ export function ExamGeneratorWizardPanel({
               </div>
             </div>
 
-            <details className="tos-disclosure">
-              <summary>Tái lập đề và tùy chọn biến thể</summary>
-              <div className="tos-disclosure-body space-y-3">
-                <label className="block space-y-1 text-xs">
-                  <span className="font-semibold">Mã để tạo lại cùng đề (seed)</span>
-                  <input type="text" value={blueprint.seed}
-                    onChange={(event) => setBlueprint({ ...blueprint, seed: event.target.value })}
-                    className="block w-full max-w-sm rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-800" />
-                </label>
-                <label className="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-300">
+            <label className="flex items-start gap-2 pt-5 text-xs text-slate-700 dark:text-slate-300">
               <input
                 type="checkbox"
                 checked={blueprint.allowMultipleVariantsPerTemplate}
@@ -1040,9 +1054,7 @@ export function ExamGeneratorWizardPanel({
               <span>
                 Cho phép sinh nhiều biến thể khác số liệu từ cùng 1 mẫu (vẫn đảm bảo không trùng bộ tham số).
               </span>
-                </label>
-              </div>
-            </details>
+            </label>
           </div>
 
           <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">

@@ -52,7 +52,6 @@ import { findExistingExamForDraft } from '../../core/connectedWorkflowEngine';
 export type GeneratorTabId = 'dashboard' | 'natural-language' | 'wizard' | 'bank' | 'templates';
 
 interface SmartExamGeneratorAppProps {
-  homeTarget?: { draft?: GeneratedExamDraft } | null;
   mathExams: MathExamProject[];
   resources?: ResourceItem[];
   preferredResourceId?: string | null;
@@ -72,14 +71,13 @@ interface SmartExamGeneratorAppProps {
 
 const TABS: Array<{ id: GeneratorTabId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Tổng quan', icon: LayoutDashboard },
-  { id: 'natural-language', label: 'Tạo đề từ yêu cầu', icon: Sparkles },
+  { id: 'natural-language', label: 'Tạo đề tiếng Việt (NL)', icon: Sparkles },
   { id: 'wizard', label: 'Tạo đề (5 bước)', icon: Wand2 },
   { id: 'bank', label: 'Ngân hàng câu hỏi', icon: Database },
-  { id: 'templates', label: 'Mẫu câu hỏi', icon: SlidersHorizontal },
+  { id: 'templates', label: 'Mẫu đổi số (L1–L3)', icon: SlidersHorizontal },
 ];
 
 export function SmartExamGeneratorApp({
-  homeTarget,
   mathExams,
   resources = [],
   preferredResourceId,
@@ -105,13 +103,6 @@ export function SmartExamGeneratorApp({
   const [drafts, setDrafts] = useState<GeneratedExamDraft[]>([]);
 
   const [reviewDraft, setReviewDraft] = useState<GeneratedExamDraft | null>(null);
-  const [wizardSession, setWizardSession] = useState(0);
-  useEffect(() => {
-    if (!homeTarget) return;
-    setReviewDraft(homeTarget.draft ?? null);
-    setWizardSession((previous) => previous + 1);
-    setActiveTab('wizard');
-  }, [homeTarget]);
   const [templateBuilderTargetId, setTemplateBuilderTargetId] = useState<string | null>(null);
   const [templateBuilderSourceQ, setTemplateBuilderSourceQ] =
     useState<BankQuestionRecord | null>(null);
@@ -468,8 +459,18 @@ export function SmartExamGeneratorApp({
   };
 
   return (
-    <main className="tos-page tos-module space-y-5">
-      <PageBanner title="Tạo đề kiểm tra" subtitle="Soạn đề theo ma trận, dùng lại câu hỏi hoặc mở bản nháp đã lưu." />
+    <main className="mx-auto max-w-[1440px] px-4 sm:px-6 py-5 space-y-5">
+      <PageBanner
+        title="Smart Exam Generator 3.0"
+        subtitle="Tạo đề tự động, sinh biến thể đổi số & đồ thị hàm số SVG + bảng biến thiên đồng bộ kiểm chứng độc lập (100% cục bộ · Không dùng AI API · Tích hợp Exam Mixer Pro & OMR)."
+        icon={<Wand2 className="h-5 w-5" aria-hidden="true" />}
+        actions={
+          <div className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/90 dark:bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+            <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>Verified Generation Only · Local-First</span>
+          </div>
+        }
+      />
 
       {missingPreferredResource && (
         <div
@@ -480,7 +481,7 @@ export function SmartExamGeneratorApp({
             <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
             <div>
               <p className="font-bold">
-                Không tìm thấy tài liệu nguồn đã chọn
+                Không tìm thấy tài liệu nguồn đã chọn (ID: {preferredResourceId})
               </p>
               <p className="mt-0.5 text-amber-800 dark:text-amber-300">
                 Tài liệu có thể đã bị xóa khỏi Resource Vault. Hệ thống không tự động chọn nhầm tài liệu khác — hãy chọn lại tài liệu nguồn.
@@ -512,9 +513,10 @@ export function SmartExamGeneratorApp({
       <div
         role="tablist"
         aria-label="Phân khu Smart Exam Generator 2.0"
-        className="tos-stepper"
+        className="flex flex-wrap items-center gap-2 border-b border-slate-200/80 dark:border-slate-800 pb-3"
       >
         {TABS.map((t) => {
+          const Icon = t.icon;
           const active = activeTab === t.id;
           return (
             <button
@@ -528,7 +530,13 @@ export function SmartExamGeneratorApp({
                 }
                 setActiveTab(t.id);
               }}
+              className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs sm:text-sm font-semibold transition-all ${
+                active
+                  ? 'bg-[#635BFF] text-white shadow-sm'
+                  : 'bg-white/90 dark:bg-slate-900 border border-slate-200/85 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-[#EEF0FF] dark:hover:bg-slate-800'
+              }`}
             >
+              <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
               <span>{t.label}</span>
             </button>
           );
@@ -537,7 +545,7 @@ export function SmartExamGeneratorApp({
 
       {loading ? (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-10 text-center text-sm text-slate-500">
-          Đang tải câu hỏi, mẫu đề và bản nháp…
+          Đang nạp ngân hàng câu hỏi và mẫu đổi số từ IndexedDB cục bộ...
         </div>
       ) : (
         <>
@@ -596,10 +604,8 @@ export function SmartExamGeneratorApp({
 
           {activeTab === 'wizard' && (
             <ExamGeneratorWizardPanel
-              key={wizardSession}
               unifiedBank={unifiedBank}
               templates={templates}
-              persistedDrafts={drafts}
               initialDraftToReview={reviewDraft}
               onSaveDrafts={(list) => {
                 if (list[0]) onSyncWorkflowDraft?.(list[0]);

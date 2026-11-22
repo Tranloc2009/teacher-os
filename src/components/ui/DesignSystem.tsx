@@ -1,6 +1,6 @@
-import { PageHeader } from '../shell/WorkspaceUI';
 import { ReactNode, useEffect, useRef, useState } from 'react';
 import { ChevronDown, X } from 'lucide-react';
+import deskBannerImg from '../../assets/images/teacher_desk_banner_1795006679389.jpg';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 export type ButtonSize = 'sm' | 'md';
@@ -20,7 +20,8 @@ export function Button({
   ...props
 }: ButtonProps) {
   const variantClasses: Record<ButtonVariant, string> = {
-    primary: 'tos-button-primary border border-transparent',
+    primary:
+      'bg-blue-600 text-white hover:bg-blue-700 border border-transparent dark:bg-blue-600 dark:hover:bg-blue-500',
     secondary:
       'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800',
     ghost:
@@ -37,7 +38,7 @@ export function Button({
   return (
     <button
       type={type}
-      className={`tos-button inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50 disabled:pointer-events-none ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-[10px] font-medium transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:pointer-events-none ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
       {...props}
     >
       {children}
@@ -375,6 +376,7 @@ export function Tooltip({
 export function PageBanner({
   title,
   subtitle,
+  icon,
   actions,
   children,
   tourId,
@@ -386,10 +388,59 @@ export function PageBanner({
   children?: ReactNode;
   tourId?: string;
 }) {
+  const [imgFailed, setImgFailed] = useState(false);
+
   return (
-    <section data-tour-id={tourId} className="tos-module-banner">
-      <PageHeader title={title} description={subtitle} action={actions} />
-      {children && <div className="tos-module-banner-body">{children}</div>}
+    <section
+      data-tour-id={tourId}
+      className="relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+    >
+      {/* Subtle desk accent visual on desktop right side, fading cleanly into surface */}
+      {!imgFailed && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none hidden md:block absolute inset-y-0 right-0 w-[44%] overflow-hidden"
+        >
+          <img
+            src={deskBannerImg}
+            alt=""
+            referrerPolicy="no-referrer"
+            onError={() => setImgFailed(true)}
+            className="h-full w-full object-cover object-right opacity-85 dark:opacity-18"
+          />
+          <div className="absolute inset-0 bg-gradient-to-r from-white via-white/80 to-transparent dark:from-slate-900 dark:via-slate-900/85 dark:to-transparent" />
+        </div>
+      )}
+
+      <div className="relative z-10 p-6 sm:p-7">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3.5 max-w-2xl">
+            {icon && (
+              <div className="hidden sm:flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-blue-100 dark:border-blue-900/60 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+                {icon}
+              </div>
+            )}
+            <div>
+              <h1 className="text-2xl sm:text-[28px] font-bold tracking-tight text-slate-950 dark:text-slate-50 text-balance leading-tight">
+                {title}
+              </h1>
+              <div
+                aria-hidden="true"
+                className="mt-1.5 h-[3px] w-14 rounded-full bg-blue-600 dark:bg-blue-500"
+              />
+              {subtitle && (
+                <p className="mt-2.5 text-sm text-slate-600 dark:text-slate-400 leading-relaxed max-w-xl">
+                  {subtitle}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+        </div>
+
+        {children && <div className="mt-5">{children}</div>}
+      </div>
     </section>
   );
 }

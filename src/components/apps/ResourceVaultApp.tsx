@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useMemo, useState } from 'react';
 import {
   Archive,
   BookOpen,
@@ -45,7 +45,6 @@ import { ResourceBulkImportPanel } from './ResourceBulkImportPanel';
 import type { MathExamProject } from '../../types/mathExam';
 
 interface ResourceVaultAppProps {
-  homeTarget?: { id: string; title: string } | null;
   resources: ResourceItem[];
   mathExams?: MathExamProject[];
   activePack: LessonPack;
@@ -75,7 +74,6 @@ const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
 const VAULT_PAGE_SIZE = 40;
 
 export function ResourceVaultApp({
-  homeTarget,
   resources,
   mathExams = [],
   activePack,
@@ -91,27 +89,16 @@ export function ResourceVaultApp({
   onShowToast,
 }: ResourceVaultAppProps) {
   const [query, setQuery] = useState('');
-  const [focusedResourceId, setFocusedResourceId] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<ResourceType | 'ALL'>('ALL');
   const [subjectFilter, setSubjectFilter] = useState<string>('ALL');
   const [docCategoryFilter, setDocCategoryFilter] = useState<ResourceDocumentCategory | 'ALL'>('ALL');
   const [tagFilter, setTagFilter] = useState<string>('');
   const [sortBy, setSortBy] = useState<'recent' | 'title' | 'subject'>('recent');
-  const [layoutMode, setLayoutMode] = useState<'grid' | 'list'>('list');
+  const [layoutMode, setLayoutMode] = useState<'grid' | 'list'>('grid');
   const [vaultPage, setVaultPage] = useState(0);
   const [showForm, setShowForm] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const tutorial = useOptionalTutorial();
-  useEffect(() => {
-    if (!homeTarget) return;
-    setFocusedResourceId(homeTarget.id);
-    setQuery(homeTarget.title);
-    setTypeFilter('ALL');
-    setSubjectFilter('ALL');
-    setDocCategoryFilter('ALL');
-    setTagFilter('');
-    setVaultPage(0);
-  }, [homeTarget]);
 
   // New resource form state
   const [title, setTitle] = useState('');
@@ -154,7 +141,6 @@ export function ResourceVaultApp({
     const q = query.trim().toLowerCase();
     const activeTag = tagFilter.trim().toLowerCase();
     const list = resources.filter((item) => {
-      if (focusedResourceId) return item.id === focusedResourceId;
       if (typeFilter !== 'ALL' && item.type !== typeFilter) return false;
       if (subjectFilter !== 'ALL' && item.subject !== subjectFilter) return false;
       if (docCategoryFilter !== 'ALL' && item.documentCategory !== docCategoryFilter) {
@@ -173,7 +159,7 @@ export function ResourceVaultApp({
       if (sortBy === 'subject') return a.subject.localeCompare(b.subject, 'vi');
       return (b.updatedAt || '').localeCompare(a.updatedAt || '');
     });
-  }, [resources, query, typeFilter, subjectFilter, docCategoryFilter, tagFilter, sortBy, focusedResourceId]);
+  }, [resources, query, typeFilter, subjectFilter, docCategoryFilter, tagFilter, sortBy]);
 
   const vaultPageCount = Math.max(1, Math.ceil(filteredResources.length / VAULT_PAGE_SIZE));
   const safeVaultPage = Math.min(vaultPage, vaultPageCount - 1);
@@ -322,7 +308,7 @@ export function ResourceVaultApp({
   }, [resources]);
 
   return (
-    <main className="tos-page tos-module space-y-6">
+    <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 space-y-6">
       <ContextualAcademyBar
         tutorialId="tutorial.resource-vault"
         label="Resource Vault"
@@ -331,8 +317,8 @@ export function ResourceVaultApp({
 
       <PageBanner
         tourId="rv-header"
-        title="Kho tài liệu"
-        subtitle="Tìm tài liệu đã lưu hoặc nhập tài liệu để dùng trong bài dạy và đề kiểm tra."
+        title="Resource Vault"
+        subtitle="Kho tài nguyên giảng dạy: bài tập, phiếu học tập, tài liệu và nhiều hơn nữa."
         icon={<Archive className="h-5 w-5" aria-hidden="true" />}
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -351,7 +337,7 @@ export function ResourceVaultApp({
               </Button>
             )}
             <Button
-              variant="primary"
+              variant={showBulkImport ? 'primary' : 'secondary'}
               size="sm"
               data-testid="rv-bulk-import-toggle-btn"
               onClick={() => {
@@ -360,7 +346,7 @@ export function ResourceVaultApp({
               }}
             >
               <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{showBulkImport ? 'Đóng bảng nhập' : 'Nhập tài liệu'}</span>
+              <span>{showBulkImport ? 'Đóng nhập hàng loạt' : 'Nhập hàng loạt'}</span>
             </Button>
           </div>
         }
@@ -586,7 +572,6 @@ export function ResourceVaultApp({
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
-              setFocusedResourceId(null);
               setVaultPage(0);
             }}
             placeholder="Tìm tài nguyên (tên, nội dung, thẻ...)"
@@ -661,10 +646,6 @@ export function ResourceVaultApp({
           </button>
         </div>
       </div>
-
-      {focusedResourceId && <button type="button" className="tos-text-button" onClick={() => {
-        setFocusedResourceId(null); setQuery(''); setVaultPage(0);
-      }}>Xem tất cả tài liệu</button>}
 
       {/* Category Tabs Bar + Sort & Grid/List Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-2.5">
@@ -762,9 +743,9 @@ export function ResourceVaultApp({
       </div>
 
       {/* 2-Column Main Content: Resource Cards (8 cols) + Dùng nhanh Sidebar (4 cols) */}
-      <div className="grid grid-cols-1 gap-6 items-start">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
         {/* Left: Resource Cards */}
-        <div className="min-w-0 space-y-4">
+        <div className="lg:col-span-8 space-y-4">
           {filteredResources.length === 0 ? (
             <div
               data-tour-id="rv-grid"
@@ -1001,9 +982,7 @@ export function ResourceVaultApp({
         </div>
 
         {/* Right: Dùng nhanh & Gợi ý chèn vào bài dạy */}
-        <details className="tos-disclosure">
-          <summary>Công cụ chèn tài liệu vào bài dạy</summary>
-          <div className="space-y-4 p-4">
+        <aside className="lg:col-span-4 space-y-4">
           {/* Card 1: Dùng nhanh — Được dùng nhiều */}
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
             <div className="bg-blue-50/70 dark:bg-blue-950/40 border-b border-blue-100 dark:border-blue-900/50 px-4 py-3 flex items-center gap-2">
@@ -1084,8 +1063,7 @@ export function ResourceVaultApp({
               ))}
             </div>
           </div>
-          </div>
-        </details>
+        </aside>
       </div>
     </main>
   );

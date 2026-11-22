@@ -324,7 +324,15 @@ export function SettingsView({
             <span>Mở rộng thanh điều hướng bên trái (Sidebar) trên màn hình lớn</span>
           </label>
 
-
+          <label className="flex items-center gap-2 text-xs font-medium text-slate-800 dark:text-slate-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={uiPrefs.showDock}
+              onChange={(e) => onUpdateUIPrefs({ showDock: e.target.checked })}
+              className="h-4 w-4 rounded border-slate-300 dark:border-slate-600 text-blue-900"
+            />
+            <span>Hiển thị thanh Dock ứng dụng dưới đáy màn hình</span>
+          </label>
         </div>
       </section>
 
