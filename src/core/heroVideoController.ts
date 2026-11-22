@@ -98,3 +98,13 @@ export const HERO_SHOWCASE_MEDIA = {
   posterImage: '/media/teacheros-intro-poster.jpg',
   mimeType: 'video/mp4',
 } as const;
+
+export function diagnoseHeroVideoProbeResponse({ status, contentType }: {
+  status: number; contentType: string | null;
+}): string | null {
+  if (status === 404 || contentType?.split(';')[0].trim().toLowerCase() === 'text/html') {
+    return 'Không tìm thấy video giới thiệu. Hãy tải lại trang rồi thử phát video.';
+  }
+  if (status >= 400) return 'Không thể tải video giới thiệu lúc này. Hãy thử lại sau.';
+  return null;
+}
