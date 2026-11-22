@@ -1,3 +1,5 @@
+import { triggerBlobDownload } from '../../utils/download';
+
 import { FormEvent, useMemo, useState } from 'react';
 import {
   Archive,
@@ -197,14 +199,7 @@ export function ResourceVaultApp({
         );
         return;
       }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = item.sourceFile.fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(blob, item.sourceFile.fileName);
     } catch {
       onShowToast?.('error', `Không thể đọc tệp đính kèm "${item.sourceFile.fileName}".`);
     }

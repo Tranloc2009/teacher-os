@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   HERO_SHOWCASE_MEDIA,
   describeHeroVideoError,
+  diagnoseHeroVideoProbeResponse,
   resolveHeroVideoPlaybackIntent,
   resolveNextUserOverride,
   shouldKeepPosterUnderlay,
@@ -164,4 +165,13 @@ test('media constants point directly to the MP4 and poster under /media/', () =>
     '/media/teacheros-intro-poster.jpg'
   );
   assert.equal(HERO_SHOWCASE_MEDIA.mimeType, 'video/mp4');
+});
+
+test('video probe distinguishes HTTP errors, HTML fallback and incorrect MIME from valid MP4', () => {
+  assert.equal(diagnoseHeroVideoProbeResponse({ status: 200, contentType: 'video/mp4' }), null);
+  assert.equal(diagnoseHeroVideoProbeResponse({ status: 206, contentType: 'VIDEO/MP4; charset=binary' }), null);
+  assert.match(diagnoseHeroVideoProbeResponse({ status: 404, contentType: 'text/html' })!, /HTTP 404/);
+  assert.match(diagnoseHeroVideoProbeResponse({ status: 200, contentType: 'text/html; charset=utf-8' })!, /HTML/);
+  assert.match(diagnoseHeroVideoProbeResponse({ status: 200, contentType: null })!, /MIME/);
+  assert.match(diagnoseHeroVideoProbeResponse({ status: 200, contentType: 'application/octet-stream' })!, /MIME/);
 });

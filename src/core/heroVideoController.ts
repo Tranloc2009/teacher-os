@@ -92,6 +92,24 @@ export function describeHeroVideoError(
   }
 }
 
+/** Diagnose deployment failures without misreporting them as codec errors. */
+export function diagnoseHeroVideoProbeResponse(input: {
+  status: number;
+  contentType: string | null;
+}): string | null {
+  if (input.status < 200 || input.status >= 300) {
+    return `Không thể tải tệp video (HTTP ${input.status}). Vui lòng kiểm tra đường dẫn và cấu hình triển khai.`;
+  }
+  const mimeType = input.contentType?.split(';', 1)[0].trim().toLowerCase();
+  if (mimeType === 'text/html' || mimeType === 'application/xhtml+xml') {
+    return 'Đường dẫn video đang trả về HTML thay vì MP4. Vui lòng kiểm tra static assets và SPA fallback khi triển khai.';
+  }
+  if (mimeType !== 'video/mp4') {
+    return 'Tệp video không được phục vụ với MIME type video/mp4. Vui lòng kiểm tra cấu hình static assets.';
+  }
+  return null;
+}
+
 export const HERO_SHOWCASE_MEDIA = {
   /** Mobile-compatible MP4: H.264 Main Profile Level 3.1 (yuv420p) + AAC-LC stereo + faststart moov */
   primaryMp4: '/media/teacheros-intro.mp4',

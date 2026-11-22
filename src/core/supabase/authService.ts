@@ -32,11 +32,10 @@ function resolvePrimaryRole(roles: CloudUserRole[]): CloudUserRole {
  * via RLS. NEVER reads role from user_metadata.
  */
 async function hydrateSessionUser(
-  session: Session | null
+  session: Session | null,
+  client = getSupabaseClient()
 ): Promise<CloudAuthUserState | null> {
   if (!session?.user) return null;
-
-  const client = getSupabaseClient();
   if (!client) return null;
 
   let roles: CloudUserRole[] = ['student'];
@@ -222,16 +221,32 @@ export async function signOutCloudUser(): Promise<CloudAuthActionResult> {
 }
 
 export function subscribeCloudAuthState(
-  onChange: (user: CloudAuthUserState | null) => void
+  onChange: (user: CloudAuthUserState | null) => void,
+  client = getSupabaseClient()
 ): () => void {
-  const client = getSupabaseClient();
   if (!client) return () => {};
 
+  let active = true;
+  let revision = 0;
   const { data } = client.auth.onAuthStateChange((_event, session) => {
-    void hydrateSessionUser(session).then(onChange);
+    const currentRevision = ++revision;
+    // Defer database requests until Supabase has released its auth lock.
+    setTimeout(() => {
+      if (!active || currentRevision !== revision) return;
+      void hydrateSessionUser(session, client).then(
+        (user) => {
+          if (active && currentRevision === revision) onChange(user);
+        },
+        () => {
+          if (active && currentRevision === revision) onChange(null);
+        }
+      );
+    }, 0);
   });
 
   return () => {
+    active = false;
+    revision++;
     data.subscription.unsubscribe();
   };
 }

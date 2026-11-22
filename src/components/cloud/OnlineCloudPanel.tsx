@@ -59,8 +59,24 @@ export function OnlineCloudPanel() {
       setCloudUser(null);
       return;
     }
-    void getCurrentCloudUser().then(setCloudUser);
-    return subscribeCloudAuthState(setCloudUser);
+    let active = true;
+    let authEventReceived = false;
+    const unsubscribe = subscribeCloudAuthState((user) => {
+      authEventReceived = true;
+      if (active) setCloudUser(user);
+    });
+    void getCurrentCloudUser().then(
+      (user) => {
+        if (active && !authEventReceived) setCloudUser(user);
+      },
+      () => {
+        if (active && !authEventReceived) setCloudUser(null);
+      }
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [config.isReady]);
 
   const handleRunDiagnostic = async () => {
@@ -77,6 +93,8 @@ export function OnlineCloudPanel() {
         accessToken,
       });
       setDiagnostic(report);
+    } catch {
+      setAuthFeedback({ type: 'error', text: 'Không thể kiểm tra kết nối. Vui lòng thử lại.' });
     } finally {
       setChecking(false);
     }
@@ -101,6 +119,8 @@ export function OnlineCloudPanel() {
       } else {
         setAuthFeedback({ type: 'error', text: result.message });
       }
+    } catch {
+      setAuthFeedback({ type: 'error', text: 'Không thể kết nối dịch vụ xác thực. Vui lòng thử lại.' });
     } finally {
       setAuthLoading(false);
     }
@@ -111,11 +131,13 @@ export function OnlineCloudPanel() {
     setAuthLoading(true);
     try {
       const result = await signOutCloudUser();
-      setCloudUser(null);
+      if (result.ok) setCloudUser(null);
       setAuthFeedback({
         type: result.ok ? 'success' : 'error',
         text: result.message,
       });
+    } catch {
+      setAuthFeedback({ type: 'error', text: 'Không thể đăng xuất lúc này. Vui lòng thử lại.' });
     } finally {
       setAuthLoading(false);
     }

@@ -1,4 +1,5 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { triggerBlobDownload } from '../../utils/download';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -133,14 +134,7 @@ const STEP_TABS: Array<{ step: MathExamStep; label: string; shortTitle: string }
   { step: 5, label: '5. Kiểm chứng & Xuất đề', shortTitle: 'Xuất' },
 ];
 
-function triggerBlobDownload(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+
 
 export function MathExamMixerApp({
   mathExams,

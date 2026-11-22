@@ -7,9 +7,9 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/core/*.test.ts src/core/grading/*.test.ts src/utils/*.test.ts"
+    "test": "tsx --test src/core/*.test.ts src/core/grading/*.test.ts src/core/examGenerator/*.test.ts src/core/supabase/*.test.ts src/utils/*.test.ts workers/web/src/*.test.ts"
   },
   "dependencies": {
     "@fontsource/be-vietnam-pro": "^5.3.0",
